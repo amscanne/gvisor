@@ -1,4 +1,4 @@
-module gvisor.googlesource.com/gvisor
+module github.com/amscanne/gvisor
 
 go 1.12
 
