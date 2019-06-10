@@ -7,7 +7,7 @@ package(
 go_library(
     name = "muxed",
     srcs = ["injectable.go"],
-    importpath = "gvisor.googlesource.com/gvisor/pkg/tcpip/link/muxed",
+    importpath = "gvisor.dev/gvisor/pkg/tcpip/link/muxed",
     visibility = [
         "//visibility:public",
     ],
