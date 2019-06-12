@@ -19,7 +19,7 @@ package ptrace
 import (
 	"syscall"
 
-	"gvisor.googlesource.com/gvisor/pkg/sentry/arch"
+	"gvisor.dev/gvisor/pkg/sentry/arch"
 )
 
 const (
