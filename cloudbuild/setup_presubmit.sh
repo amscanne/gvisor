@@ -16,6 +16,7 @@ declare -r PRESUBMIT_OPTS=(
     triggers
     create
     github
+    --project="${PROJECT}"
     --repo_name="${REPO}"
     --repo_owner="${OWNER}"
     --comment_control
