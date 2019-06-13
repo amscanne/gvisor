@@ -19,6 +19,7 @@ declare -r PRESUBMIT_OPTS=(
     --project="${PROJECT}"
     --repo_name="${REPO}"
     --repo_owner="${OWNER}"
+    --pull_request_pattern=".*"
     --comment_control
 )
 
