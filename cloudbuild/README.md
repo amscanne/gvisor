@@ -2,7 +2,8 @@
 
 This directory contains [Google Cloud Build][cloud-build] configuration files.
 The project maintains manage presubmit, continuous integration and release
-pipelines based on these files.
+pipelines based on these files. Note that these currently depend on alpha
+features.
 
 See `setup_presubmit.sh` and `setup_postsubmit.sh` for a self-documenting
 description of the presubmit and post submit hooks.

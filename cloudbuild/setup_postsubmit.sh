@@ -16,7 +16,7 @@ declare -r PROJECT=${PROJECT:-gvisor-release}
 declare -r REPO=${REPO:-gvisor}
 declare -r OWNER=${OWNER:-google}
 declare -r BADGE_BUCKET=${BADGE_BUCKET:-gvisor-build-badges}
-declare -r RELEASE_BUCEKT=${RELEASE_BUCKET:-gvisor}
+declare -r RELEASE_BUCKET=${RELEASE_BUCKET:-gvisor}
 declare -r RBE_PROJECT=${RBE_PROJECT:-gvisor-rbe}
 declare -r GO_ORIGIN=${GO_ORIGIN:-origin}
 declare -r POSTSUBMIT_OPTS=(
@@ -25,6 +25,7 @@ declare -r POSTSUBMIT_OPTS=(
     triggers
     create
     github
+    --project="${PROJECT}"
     --repo_name="${REPO}"
     --repo_owner="${OWNER}"
 )

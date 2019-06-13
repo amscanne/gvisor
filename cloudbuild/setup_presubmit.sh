@@ -16,13 +16,14 @@ declare -r PRESUBMIT_OPTS=(
     triggers
     create
     github
+    --project="${PROJECT}"
     --repo_name="${REPO}"
     --repo_owner="${OWNER}"
+    --pull_request_pattern=".*"
     --comment_control
 )
 
 # Tests.
-gcloud ${PRESUBMIT_OPTS[@]} --build_config=cloudbuild/test.yaml --substitutions=_RBE_PROJECT="${RBE_PROJECT}"
 gcloud ${PRESUBMIT_OPTS[@]} --build_config=cloudbuild/script.yaml --substitutions=_RBE_PROJECT="${RBE_PROJECT}",_SCRIPT=test/docker_tests.sh
 gcloud ${PRESUBMIT_OPTS[@]} --build_config=cloudbuild/script.yaml --substitutions=_RBE_PROJECT="${RBE_PROJECT}",_SCRIPT=test/do_tests.sh
 gcloud ${PRESUBMIT_OPTS[@]} --build_config=cloudbuild/script.yaml --substitutions=_RBE_PROJECT="${RBE_PROJECT}",_SCRIPT=test/kvm_tests.sh

@@ -1,6 +1,15 @@
 steps:
+
+# We need to checkout the repository.
+- name: 'ubuntu'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - 'find . -mindepth 1 -delete'
 - name: 'gcr.io/cloud-builders/git'
-  args: ['fetch', '--all', '--unshallow']
+  args: ['clone', '${REPO_NAME}', '.']
+- name: 'gcr.io/cloud-builders/git'
+  args: ['checkout', '${COMMIT_SHA}']
 
 # Validate the gazelle configuration.
 - name: 'gcr.io/cloud-builders/bazel'
