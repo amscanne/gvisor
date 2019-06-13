@@ -2,7 +2,7 @@ steps:
 
 # We need to checkout the repository.
 - name: 'ubuntu'
-  args:
+  entrypoint: 'bash'
   args:
     - '-c'
     - 'find . -mindepth 1 -delete'
