@@ -5,6 +5,7 @@ steps:
     - --bes_backend=buildeventservice.googleapis.com
     - --bes_results_url=https://source.cloud.google.com/results/invocations/
     - --google_default_credentials
+    - --tls_enabled
     - //benchmarks/...
 options:
   machineType: 'N1_HIGHCPU_8'
