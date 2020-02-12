@@ -45,10 +45,7 @@ func copyTimespecIn(t *kernel.Task, addr usermem.Addr) (linux.Timespec, error) {
 func copyTimespecOut(t *kernel.Task, addr usermem.Addr, ts *linux.Timespec) error {
 	switch t.Arch().Width() {
 	case 8:
-		out := t.CopyScratchBuffer(16)
-		usermem.ByteOrder.PutUint64(out[0:], uint64(ts.Sec))
-		usermem.ByteOrder.PutUint64(out[8:], uint64(ts.Nsec))
-		_, err := t.CopyOutBytes(addr, out)
+		_, err := ts.Marshal(t, addr)
 		return err
 	default:
 		return syserror.ENOSYS

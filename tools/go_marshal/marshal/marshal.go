@@ -20,6 +20,17 @@
 // tools/go_marshal. See the go_marshal README for details.
 package marshal
 
+import (
+	"gvisor.dev/gvisor/pkg/usermem"
+)
+
+// Task is used for Marshal and Unmarshal below.
+type Task interface {
+	CopyScratchBuffer(size int) []byte
+	CopyOutBytes(addr usermem.Addr, b []byte) (int, error)
+	CopyInBytes(addr usermem.Addr, b []byte) (int, error)
+}
+
 // Marshallable represents a type that can be marshalled to and from memory.
 type Marshallable interface {
 	// SizeBytes is the size of the memory representation of a type in

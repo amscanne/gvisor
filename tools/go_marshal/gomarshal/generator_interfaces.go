@@ -504,4 +504,39 @@ func (g *interfaceGenerator) emitMarshallable() {
 	})
 	g.emit("}\n\n")
 
+	g.emit("// Marshal implements marshal.Marshallable.Marshal.\n")
+	g.emit("//go:nosplit\n")
+	g.emit("func (%s *%s) Marshal(task marshal.Task, addr usermem.Addr) (int, error) {\n", g.r, g.typeName())
+	g.recordUsedImport("usermem")
+	g.recordUsedImport("marshal")
+	g.inIndent(func() {
+		fallBack := func() {
+			g.emit("// Type %s doesn't have a packed layout in memory, fall back to UnmarshalBytes.\n", g.typeName())
+			g.emit("buf := task.CopyScratchBuffer(%s.SizeBytes())\n", g.r)
+			g.emit("%s.MarshalBytes(buf)\n", g.r)
+			g.emit("return task.CopyOutBytes(addr, buf)\n")
+		}
+		if thisPacked {
+			g.recordUsedImport("reflect")
+			g.recordUsedImport("unsafe")
+			if cond, ok := g.areFieldsPackedExpression(); ok {
+				g.emit("if !%s {\n", cond)
+				g.inIndent(fallBack)
+				g.emit("}\n")
+			}
+			// Fast serialization.
+			g.emit("ptr := unsafe.Pointer(%s)\n", g.r)
+			g.emit("val := uintptr(ptr)\n")
+			g.emit("val = val^0\n")
+			g.emit("var buf []byte\n")
+			g.emit("hdr := (*reflect.SliceHeader)(unsafe.Pointer(&buf))\n")
+			g.emit("hdr.Data = val\n")
+			g.emit("hdr.Len = %s.SizeBytes()\n", g.r)
+			g.emit("hdr.Cap = %s.SizeBytes()\n", g.r)
+			g.emit("return task.CopyOutBytes(addr, buf)\n")
+		} else {
+			fallBack()
+		}
+	})
+	g.emit("}\n\n")
 }

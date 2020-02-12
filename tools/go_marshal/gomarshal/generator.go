@@ -44,7 +44,7 @@ const (
 // All recievers are single letters, so we don't allow import aliases to be a
 // single letter.
 var badIdents = []string{
-	"src", "srcs", "dst", "dsts", "blk", "buf", "err",
+	"src", "srcs", "dst", "dsts", "blk", "buf", "err", "task", "ptr", "val", "addr",
 	// All single-letter identifiers.
 }
 
@@ -98,6 +98,7 @@ func NewGenerator(srcs []string, out, outTest, pkg string, imports []string) (*G
 	g.imports.add(usermemImport)
 	g.imports.add(safecopyImport)
 	g.imports.add("unsafe")
+	g.imports.add("reflect")
 
 	return &g, nil
 }
@@ -111,7 +112,7 @@ func (g *Generator) writeHeader() error {
 	// Emit build tags.
 	if t := tags.Aggregate(g.inputs); len(t) > 0 {
 		b.emit(strings.Join(t.Lines(), "\n"))
-		b.emit("\n")
+		b.emit("\n\n")
 	}
 
 	// Package header.
@@ -327,17 +328,6 @@ func (g *Generator) Run() error {
 			}
 			ts = append(ts, g.generateOneTestSuite(t))
 		}
-	}
-
-	// Tool was invoked with input files with no data structures marked for code
-	// generation. This is probably not what the user intended.
-	if len(impls) == 0 {
-		var buf bytes.Buffer
-		fmt.Fprintf(&buf, "go_marshal invoked on these files, but they don't contain any types requiring code generation. Perhaps mark some with \"// +marshal\"?:\n")
-		for _, i := range g.inputs {
-			fmt.Fprintf(&buf, "  %s\n", i)
-		}
-		abort(buf.String())
 	}
 
 	// Write output file header. These include things like package name and
