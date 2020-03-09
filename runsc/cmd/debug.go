@@ -39,7 +39,9 @@ type Debug struct {
 	profileCPU       string
 	profileGoroutine string
 	profileBlock     string
+	rateBlock        int
 	profileMutex     string
+	rateMutex        int
 	trace            string
 	strace           string
 	logLevel         string
@@ -71,7 +73,9 @@ func (d *Debug) SetFlags(f *flag.FlagSet) {
 	f.StringVar(&d.profileCPU, "profile-cpu", "", "writes CPU profile to the given file.")
 	f.StringVar(&d.profileGoroutine, "profile-goroutine", "", "writes goroutine profile to the given file.")
 	f.StringVar(&d.profileBlock, "profile-block", "", "writes block profile to the given file.")
+	f.IntVar(&d.rateBlock, "rate-block", 1, "rate of blocking events profiled (1=all, 100=1 in every 100).")
 	f.StringVar(&d.profileMutex, "profile-mutex", "", "writes mutex profile to the given file.")
+	f.IntVar(&d.rateMutex, "rate-mutex", 1, "rate of mutex events profiled (1=all, 100=1 in every 100).")
 	f.DurationVar(&d.duration, "duration", time.Second, "amount of time to wait for CPU and trace profiles")
 	f.StringVar(&d.trace, "trace", "", "writes an execution trace to the given file.")
 	f.IntVar(&d.signal, "signal", -1, "sends signal to the sandbox")
@@ -127,6 +131,7 @@ func (d *Debug) Execute(_ context.Context, f *flag.FlagSet, args ...interface{})
 	}
 	log.Infof("Found sandbox %q, PID: %d", c.Sandbox.ID, c.Sandbox.Pid)
 
+	delay := false
 	if d.signal > 0 {
 		log.Infof("Sending signal %d to process: %d", d.signal, c.Sandbox.Pid)
 		if err := syscall.Kill(c.Sandbox.Pid, syscall.Signal(d.signal)); err != nil {
@@ -166,31 +171,45 @@ func (d *Debug) Execute(_ context.Context, f *flag.FlagSet, args ...interface{})
 		log.Infof("Goroutine profile written to %q", d.profileGoroutine)
 	}
 	if d.profileBlock != "" {
+		delay = true
 		f, err := os.Create(d.profileBlock)
 		if err != nil {
 			return Errorf(err.Error())
 		}
 		defer f.Close()
-
-		if err := c.Sandbox.BlockProfile(f); err != nil {
+		defer func() {
+			if err := c.Sandbox.BlockProfile(f); err != nil {
+				Fatalf(err.Error())
+			}
+			log.Infof("Block profile written to %q", d.profileBlock)
+			if err := c.Sandbox.BlockProfileRate(0); err != nil {
+				Fatalf(err.Error())
+			}
+		}()
+		if err := c.Sandbox.BlockProfileRate(d.rateBlock); err != nil {
 			return Errorf(err.Error())
 		}
-		log.Infof("Block profile written to %q", d.profileBlock)
 	}
 	if d.profileMutex != "" {
+		delay = true
 		f, err := os.Create(d.profileMutex)
 		if err != nil {
 			return Errorf(err.Error())
 		}
 		defer f.Close()
-
-		if err := c.Sandbox.MutexProfile(f); err != nil {
+		defer func() {
+			if err := c.Sandbox.MutexProfile(f); err != nil {
+				Fatalf(err.Error())
+			}
+			log.Infof("Mutex profile written to %q", d.profileMutex)
+			if err := c.Sandbox.MutexProfileFraction(0); err != nil {
+				Fatalf(err.Error())
+			}
+		}()
+		if err := c.Sandbox.MutexProfileFraction(d.rateMutex); err != nil {
 			return Errorf(err.Error())
 		}
-		log.Infof("Mutex profile written to %q", d.profileMutex)
 	}
-
-	delay := false
 	if d.profileCPU != "" {
 		delay = true
 		f, err := os.Create(d.profileCPU)

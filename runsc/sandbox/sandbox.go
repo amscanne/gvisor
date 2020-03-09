@@ -1010,6 +1010,24 @@ func (s *Sandbox) GoroutineProfile(f *os.File) error {
 	return nil
 }
 
+// BlockProfileRate sets the profiling fraction for blocking.
+func (s *Sandbox) BlockProfileRate(rate int) error {
+	log.Debugf("Block profile rate (%d) %q", rate, s.ID)
+	conn, err := s.sandboxConnect()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	opts := control.SampleOpts{
+		Rate: rate,
+	}
+	if err := conn.Call(boot.BlockProfileRate, &opts, nil); err != nil {
+		return fmt.Errorf("setting sandbox %q block profile rate: %v", s.ID, err)
+	}
+	return nil
+}
+
 // BlockProfile writes a block profile to the given file.
 func (s *Sandbox) BlockProfile(f *os.File) error {
 	log.Debugf("Block profile %q", s.ID)
@@ -1026,6 +1044,24 @@ func (s *Sandbox) BlockProfile(f *os.File) error {
 	}
 	if err := conn.Call(boot.BlockProfile, &opts, nil); err != nil {
 		return fmt.Errorf("getting sandbox %q block profile: %v", s.ID, err)
+	}
+	return nil
+}
+
+// MutexProfileFraction sets the profiling fraction for mutxes.
+func (s *Sandbox) MutexProfileFraction(rate int) error {
+	log.Debugf("Mutex profile fraction (%d) %q", rate, s.ID)
+	conn, err := s.sandboxConnect()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	opts := control.SampleOpts{
+		Rate: rate,
+	}
+	if err := conn.Call(boot.MutexProfileFraction, &opts, nil); err != nil {
+		return fmt.Errorf("setting sandbox %q mutex profile fraction: %v", s.ID, err)
 	}
 	return nil
 }

@@ -131,6 +131,23 @@ func (p *Profile) GoroutineProfile(o *ProfileOpts, _ *struct{}) error {
 	return nil
 }
 
+// SampleOpts is used for setting rates.
+type SampleOpts struct {
+	Rate int `json:"rate"`
+}
+
+// SetBlockProfileRate sets the block profile rate internally.
+func (p *Profile) SetBlockProfileRate(o *SampleOpts, _ *struct{}) error {
+	runtime.SetBlockProfileRate(o.Rate)
+	return nil
+}
+
+// SetMutexProfileFraction sets the mutex profile fraction.
+func (p *Profile) SetMutexProfileFraction(o *SampleOpts, _ *struct{}) error {
+	runtime.SetMutexProfileFraction(o.Rate)
+	return nil
+}
+
 // BlockProfile is an RPC stub which dumps out the stack trace that led to
 // blocking on synchronization primitives.
 func (p *Profile) BlockProfile(o *ProfileOpts, _ *struct{}) error {

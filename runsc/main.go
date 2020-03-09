@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -91,6 +92,9 @@ var (
 )
 
 func main() {
+	runtime.SetMutexProfileFraction(10)
+	runtime.SetBlockProfileRate(10)
+
 	// Help and flags commands are generated automatically.
 	help := cmd.NewHelp(subcommands.DefaultCommander)
 	help.Register(new(cmd.Syscalls))

@@ -101,14 +101,16 @@ const (
 
 // Profiling related commands (see pprof.go for more details).
 const (
-	StartCPUProfile  = "Profile.StartCPUProfile"
-	StopCPUProfile   = "Profile.StopCPUProfile"
-	HeapProfile      = "Profile.HeapProfile"
-	GoroutineProfile = "Profile.GoroutineProfile"
-	BlockProfile     = "Profile.BlockProfile"
-	MutexProfile     = "Profile.MutexProfile"
-	StartTrace       = "Profile.StartTrace"
-	StopTrace        = "Profile.StopTrace"
+	StartCPUProfile      = "Profile.StartCPUProfile"
+	StopCPUProfile       = "Profile.StopCPUProfile"
+	HeapProfile          = "Profile.HeapProfile"
+	GoroutineProfile     = "Profile.GoroutineProfile"
+	BlockProfile         = "Profile.BlockProfile"
+	BlockProfileRate     = "Profile.SetBlockProfileRate"
+	MutexProfile         = "Profile.MutexProfile"
+	MutexProfileFraction = "Profile.SetMutexProfileFraction"
+	StartTrace           = "Profile.StartTrace"
+	StopTrace            = "Profile.StopTrace"
 )
 
 // Logging related commands (see logging.go for more details).
