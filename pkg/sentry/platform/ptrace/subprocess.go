@@ -69,7 +69,7 @@ type thread struct {
 // threadPool is a collection of threads.
 type threadPool struct {
 	// mu protects below.
-	mu sync.Mutex
+	mu sync.RWMutex
 
 	// threads is the collection of threads.
 	//
@@ -85,29 +85,39 @@ type threadPool struct {
 //
 // Precondition: the runtime OS thread must be locked.
 func (tp *threadPool) lookupOrCreate(currentTID int32, newThread func() *thread) *thread {
-	tp.mu.Lock()
+	tp.mu.RLock()
 	t, ok := tp.threads[currentTID]
-	if !ok {
-		// Before creating a new thread, see if we can find a thread
-		// whose system tid has disappeared.
-		//
-		// TODO(b/77216482): Other parts of this package depend on
-		// threads never exiting.
-		for origTID, t := range tp.threads {
-			// Signal zero is an easy existence check.
-			if err := syscall.Tgkill(syscall.Getpid(), int(origTID), 0); err != nil {
-				// This thread has been abandoned; reuse it.
-				delete(tp.threads, origTID)
-				tp.threads[currentTID] = t
-				tp.mu.Unlock()
-				return t
-			}
-		}
-
-		// Create a new thread.
-		t = newThread()
-		tp.threads[currentTID] = t
+	tp.mu.RUnlock()
+	if ok {
+		return t
 	}
+
+	tp.mu.Lock()
+	t, ok = tp.threads[currentTID]
+	if ok {
+		tp.mu.Unlock()
+		return t
+	}
+
+	// Before creating a new thread, see if we can find a thread
+	// whose system tid has disappeared.
+	//
+	// TODO(b/77216482): Other parts of this package depend on
+	// threads never exiting.
+	for origTID, t := range tp.threads {
+		// Signal zero is an easy existence check.
+		if err := syscall.Tgkill(syscall.Getpid(), int(origTID), 0); err != nil {
+			// This thread has been abandoned; reuse it.
+			delete(tp.threads, origTID)
+			tp.threads[currentTID] = t
+			tp.mu.Unlock()
+			return t
+		}
+	}
+
+	// Create a new thread.
+	t = newThread()
+	tp.threads[currentTID] = t
 	tp.mu.Unlock()
 	return t
 }
