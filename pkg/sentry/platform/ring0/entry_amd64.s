@@ -100,9 +100,11 @@ TEXT ·sysret(SB),NOSPLIT,$0-24
 	// Save original state.
 	LOAD_KERNEL_ADDRESS(cpu+0(FP), BX)
 	LOAD_KERNEL_ADDRESS(regs+8(FP), AX)
+
+	// Save SP, BP and *regs in the CPU area.
 	MOVQ SP, CPU_REGISTERS+PTRACE_RSP(BX)
 	MOVQ BP, CPU_REGISTERS+PTRACE_RBP(BX)
-	MOVQ AX, CPU_REGISTERS+PTRACE_RAX(BX)
+	MOVQ AX, CPU_USER_REGISTERS(BX)
 
 	// Restore user register state.
 	REGISTERS_LOAD(AX, 0)
@@ -110,6 +112,7 @@ TEXT ·sysret(SB),NOSPLIT,$0-24
 	MOVQ PTRACE_FLAGS(AX), R11 // Needed for SYSRET.
 	MOVQ PTRACE_RSP(AX), SP    // Restore the stack directly.
 	MOVQ PTRACE_RAX(AX), AX    // Restore AX (scratch).
+	SWAP_GS()
 	SYSRET64()
 
 // See entry_amd64.go.
@@ -117,9 +120,11 @@ TEXT ·iret(SB),NOSPLIT,$0-24
 	// Save original state.
 	LOAD_KERNEL_ADDRESS(cpu+0(FP), BX)
 	LOAD_KERNEL_ADDRESS(regs+8(FP), AX)
+
+	// Save SP, BP and *regs in the CPU area.
 	MOVQ SP, CPU_REGISTERS+PTRACE_RSP(BX)
 	MOVQ BP, CPU_REGISTERS+PTRACE_RBP(BX)
-	MOVQ AX, CPU_REGISTERS+PTRACE_RAX(BX)
+	MOVQ AX, CPU_USER_REGISTERS(BX)
 
 	// Build an IRET frame & restore state.
 	LOAD_KERNEL_STACK(BX)
@@ -130,6 +135,7 @@ TEXT ·iret(SB),NOSPLIT,$0-24
 	MOVQ PTRACE_RIP(AX), SI;   PUSHQ SI
 	REGISTERS_LOAD(AX, 0)   // Restore most registers.
 	MOVQ PTRACE_RAX(AX), AX // Restore AX (scratch).
+	SWAP_GS()
 	IRET()
 
 // See entry_amd64.go.
@@ -165,14 +171,16 @@ TEXT ·sysenter(SB),NOSPLIT,$0
 user:
 	SWAP_GS()
 	XCHGQ CPU_REGISTERS+PTRACE_RSP(GS), SP // Swap stacks.
-	XCHGQ CPU_REGISTERS+PTRACE_RAX(GS), AX // Swap for AX (regs).
+	PUSHQ AX                               // Save old AX.
+	MOVQ CPU_USER_REGISTERS(GS), AX        // Load *regs from call.
 	REGISTERS_SAVE(AX, 0)                  // Save all except IP, FLAGS, SP, AX.
-	MOVQ CPU_REGISTERS+PTRACE_RAX(GS), BX  // Load saved AX value.
-	MOVQ BX,  PTRACE_RAX(AX)               // Save everything else.
+	POPQ BX                                // Restore original AX.
+	MOVQ BX,  PTRACE_RAX(AX)               // Save original AX.
 	MOVQ BX,  PTRACE_ORIGRAX(AX)
 	MOVQ CX,  PTRACE_RIP(AX)
 	MOVQ R11, PTRACE_FLAGS(AX)
-	MOVQ CPU_REGISTERS+PTRACE_RSP(GS), BX; MOVQ BX, PTRACE_RSP(AX)
+	MOVQ CPU_REGISTERS+PTRACE_RSP(GS), BX
+	MOVQ BX, PTRACE_RSP(AX)
 	MOVQ $0, CPU_ERROR_CODE(GS) // Clear error code.
 	MOVQ $1, CPU_ERROR_TYPE(GS) // Set error type to user.
 
@@ -237,9 +245,10 @@ user:
 	SWAP_GS()
 	ADDQ $-8, SP                            // Adjust for flags.
 	MOVQ $_KERNEL_FLAGS, 0(SP); BYTE $0x9d; // Reset flags (POPFQ).
-	XCHGQ CPU_REGISTERS+PTRACE_RAX(GS), AX  // Swap for user regs.
+	PUSHQ AX                                // Save original AX.
+	MOVQ CPU_USER_REGISTERS(GS), AX         // Swap for user regs.
 	REGISTERS_SAVE(AX, 0)                   // Save all except IP, FLAGS, SP, AX.
-	MOVQ CPU_REGISTERS+PTRACE_RAX(GS), BX   // Restore original AX.
+	POPQ BX                                 // Restore original AX.
 	MOVQ BX, PTRACE_RAX(AX)                 // Save it.
 	MOVQ BX, PTRACE_ORIGRAX(AX)
 	MOVQ 16(SP), BX; MOVQ BX, PTRACE_RIP(AX)

@@ -33,7 +33,8 @@ func sysenter()
 
 // swapgs swaps the current GS value.
 //
-// This must be called prior to sysret/iret.
+// This is called in WriteGS itself and all stubs, and typically needs to be
+// called directly once during CPU setup.
 func swapgs()
 
 // sysret returns to userspace from a system call.

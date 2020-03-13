@@ -105,6 +105,10 @@ TEXT ·wrfsmsr(SB),NOSPLIT,$0-8
 	BYTE $0x0f; BYTE $0x30;
 	RET
 
+// SWAP_GS swaps the kernel GS (CPU).
+#define SWAP_GS() \
+	BYTE $0x0F; BYTE $0x01; BYTE $0xf8;
+
 // wrgsbase writes to the GS base.
 //
 // The code corresponds to:
@@ -113,7 +117,9 @@ TEXT ·wrfsmsr(SB),NOSPLIT,$0-8
 //
 TEXT ·wrgsbase(SB),NOSPLIT,$0-8
 	MOVQ addr+0(FP), AX
+	SWAP_GS()
 	BYTE $0xf3; BYTE $0x48; BYTE $0x0f; BYTE $0xae; BYTE $0xd8;
+	SWAP_GS()
 	RET
 
 // wrgsmsr writes to the GSBASE MSR.
@@ -124,7 +130,9 @@ TEXT ·wrgsmsr(SB),NOSPLIT,$0-8
 	MOVQ AX, DX
 	SHRQ $32, DX
 	MOVQ $0xc0000101, CX     // MSR_GS_BASE
+	SWAP_GS()
 	BYTE $0x0f; BYTE $0x30;  // WRMSR
+	SWAP_GS()
 	RET
 
 // jumpToUser changes execution to the user address.

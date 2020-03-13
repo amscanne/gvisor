@@ -444,8 +444,13 @@ func (s *Sandbox) createSandboxProcess(conf *boot.Config, args *Args, startSyncF
 		nextFD++
 	}
 
-	// TODO(b/151157106): syscall tests fail by timeout if asyncpreemptoff
-	// isn't set.
+	// TODO(b/151157106): KVM is not currently able to support asynchronous
+	// preemption. The runtime.asyncPreempt function relies on inspection
+	// of the signal context in the host signal frame, which will be
+	// represtative of the nested host signal frame (the bluepill execution
+	// context). For preemption with KVM, some alternate mechanism or
+	// fixing this basic mismatch (e.g. by copying out the intermediate
+	// state to the host frame) will be necessary.
 	if conf.Platform == "kvm" {
 		cmd.Env = append(cmd.Env, "GODEBUG=asyncpreemptoff=1")
 	}

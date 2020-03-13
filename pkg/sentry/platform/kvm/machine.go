@@ -121,6 +121,7 @@ type vCPU struct {
 	// vCPUArchState is the architecture-specific state.
 	vCPUArchState
 
+	// dieState holds intermediate state for bluepill errors.
 	dieState dieState
 }
 
@@ -169,6 +170,11 @@ func (m *machine) newVCPU() *vCPU {
 	if err := c.initArchState(); err != nil {
 		panic(fmt.Sprintf("error initialization vCPU state: %v", err))
 	}
+
+	// Ensure the guest exits before freeing.
+	runtime.SetFinalizer(c, func(c *vCPU) {
+		c.bounce(true)
+	})
 
 	return c // Done.
 }

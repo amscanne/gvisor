@@ -88,6 +88,10 @@ type CPUArchState struct {
 	// errorCode is the error code from the last exception.
 	errorCode uintptr
 
+	// userRegisters is the saved value of the parameter passed via sysret
+	// and iret. This is used to save state when returning to the kernel.
+	userRegisters *syscall.PtraceRegs
+
 	// errorType indicates the type of error code here, it is always set
 	// along with the errorCode value above.
 	//
