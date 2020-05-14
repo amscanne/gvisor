@@ -15,12 +15,14 @@
 package fsutil
 
 import (
+	"io"
+
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
-	"gvisor.dev/gvisor/pkg/sentry/context"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/memmap"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
@@ -219,7 +221,7 @@ func GenericConfigureMMap(file *fs.File, m memmap.Mappable, opts *memmap.MMapOpt
 type FileNoIoctl struct{}
 
 // Ioctl implements fs.FileOperations.Ioctl.
-func (FileNoIoctl) Ioctl(ctx context.Context, io usermem.IO, args arch.SyscallArguments) (uintptr, error) {
+func (FileNoIoctl) Ioctl(context.Context, *fs.File, usermem.IO, arch.SyscallArguments) (uintptr, error) {
 	return 0, syserror.ENOTTY
 }
 
@@ -228,12 +230,12 @@ func (FileNoIoctl) Ioctl(ctx context.Context, io usermem.IO, args arch.SyscallAr
 type FileNoSplice struct{}
 
 // WriteTo implements fs.FileOperations.WriteTo.
-func (FileNoSplice) WriteTo(context.Context, *fs.File, *fs.File, fs.SpliceOpts) (int64, error) {
+func (FileNoSplice) WriteTo(context.Context, *fs.File, io.Writer, int64, bool) (int64, error) {
 	return 0, syserror.ENOSYS
 }
 
 // ReadFrom implements fs.FileOperations.ReadFrom.
-func (FileNoSplice) ReadFrom(context.Context, *fs.File, *fs.File, fs.SpliceOpts) (int64, error) {
+func (FileNoSplice) ReadFrom(context.Context, *fs.File, io.Reader, int64) (int64, error) {
 	return 0, syserror.ENOSYS
 }
 
@@ -285,7 +287,7 @@ func NewStaticDirFileOperations(dentries *fs.SortedDentryMap) *StaticDirFileOper
 }
 
 // IterateDir implements DirIterator.IterateDir.
-func (sdfo *StaticDirFileOperations) IterateDir(ctx context.Context, dirCtx *fs.DirCtx, offset int) (int, error) {
+func (sdfo *StaticDirFileOperations) IterateDir(ctx context.Context, d *fs.Dirent, dirCtx *fs.DirCtx, offset int) (int, error) {
 	n, err := fs.GenericReaddir(dirCtx, sdfo.dentryMap)
 	return offset + n, err
 }

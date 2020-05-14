@@ -20,6 +20,7 @@ package linux
 const (
 	ANON_INODE_FS_MAGIC   = 0x09041934
 	DEVPTS_SUPER_MAGIC    = 0x00001cd1
+	EXT_SUPER_MAGIC       = 0xef53
 	OVERLAYFS_SUPER_MAGIC = 0x794c7630
 	PIPEFS_MAGIC          = 0x50495045
 	PROC_SUPER_MAGIC      = 0x9fa0
@@ -37,6 +38,8 @@ const (
 )
 
 // Statfs is struct statfs, from uapi/asm-generic/statfs.h.
+//
+// +marshal
 type Statfs struct {
 	// Type is one of the filesystem magic values, defined above.
 	Type uint64
@@ -76,9 +79,25 @@ type Statfs struct {
 	Spare [4]uint64
 }
 
+// Whence argument to lseek(2), from include/uapi/linux/fs.h.
+const (
+	SEEK_SET  = 0
+	SEEK_CUR  = 1
+	SEEK_END  = 2
+	SEEK_DATA = 3
+	SEEK_HOLE = 4
+)
+
 // Sync_file_range flags, from include/uapi/linux/fs.h
 const (
 	SYNC_FILE_RANGE_WAIT_BEFORE = 1
 	SYNC_FILE_RANGE_WRITE       = 2
 	SYNC_FILE_RANGE_WAIT_AFTER  = 4
+)
+
+// Flag argument to renameat2(2), from include/uapi/linux/fs.h.
+const (
+	RENAME_NOREPLACE = (1 << 0) // Don't overwrite target.
+	RENAME_EXCHANGE  = (1 << 1) // Exchange src and dst.
+	RENAME_WHITEOUT  = (1 << 2) // Whiteout src.
 )

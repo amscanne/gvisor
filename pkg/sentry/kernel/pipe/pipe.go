@@ -17,13 +17,13 @@ package pipe
 
 import (
 	"fmt"
-	"sync"
 	"sync/atomic"
 	"syscall"
 
-	"gvisor.dev/gvisor/pkg/sentry/context"
+	"gvisor.dev/gvisor/pkg/buffer"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/syserror"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
@@ -38,19 +38,6 @@ const (
 	// MaximumPipeSize is a hard limit on the maximum size of a pipe.
 	MaximumPipeSize = 8 << 20
 )
-
-// Sizer is an interface for setting and getting the size of a pipe.
-//
-// It is implemented by Pipe and, through embedding, all other types.
-type Sizer interface {
-	// PipeSize returns the pipe capacity in bytes.
-	PipeSize() int64
-
-	// SetPipeSize sets the new pipe capacity in bytes.
-	//
-	// The new size is returned (which may be capped).
-	SetPipeSize(int64) (int64, error)
-}
 
 // Pipe is an encapsulation of a platform-independent pipe.
 // It manages a buffered byte queue shared between a reader/writer
@@ -84,21 +71,16 @@ type Pipe struct {
 	// mu protects all pipe internal state below.
 	mu sync.Mutex `state:"nosave"`
 
-	// data is the buffer queue of pipe contents.
+	// view is the underlying set of buffers.
 	//
 	// This is protected by mu.
-	data bufferList
+	view buffer.View
 
 	// max is the maximum size of the pipe in bytes. When this max has been
 	// reached, writers will get EWOULDBLOCK.
 	//
 	// This is protected by mu.
 	max int64
-
-	// size is the current size of the pipe in bytes.
-	//
-	// This is protected by mu.
-	size int64
 
 	// hadWriter indicates if this pipe ever had a writer. Note that this
 	// does not necessarily indicate there is *currently* a writer, just
@@ -112,7 +94,7 @@ type Pipe struct {
 // NewPipe initializes and returns a pipe.
 //
 // N.B. The size and atomicIOBytes will be bounded.
-func NewPipe(ctx context.Context, isNamed bool, sizeBytes, atomicIOBytes int64) *Pipe {
+func NewPipe(isNamed bool, sizeBytes, atomicIOBytes int64) *Pipe {
 	if sizeBytes < MinimumPipeSize {
 		sizeBytes = MinimumPipeSize
 	}
@@ -125,17 +107,33 @@ func NewPipe(ctx context.Context, isNamed bool, sizeBytes, atomicIOBytes int64) 
 	if atomicIOBytes > sizeBytes {
 		atomicIOBytes = sizeBytes
 	}
-	return &Pipe{
-		isNamed:       isNamed,
-		max:           sizeBytes,
-		atomicIOBytes: atomicIOBytes,
+	var p Pipe
+	initPipe(&p, isNamed, sizeBytes, atomicIOBytes)
+	return &p
+}
+
+func initPipe(pipe *Pipe, isNamed bool, sizeBytes, atomicIOBytes int64) {
+	if sizeBytes < MinimumPipeSize {
+		sizeBytes = MinimumPipeSize
 	}
+	if sizeBytes > MaximumPipeSize {
+		sizeBytes = MaximumPipeSize
+	}
+	if atomicIOBytes <= 0 {
+		atomicIOBytes = 1
+	}
+	if atomicIOBytes > sizeBytes {
+		atomicIOBytes = sizeBytes
+	}
+	pipe.isNamed = isNamed
+	pipe.max = sizeBytes
+	pipe.atomicIOBytes = atomicIOBytes
 }
 
 // NewConnectedPipe initializes a pipe and returns a pair of objects
 // representing the read and write ends of the pipe.
 func NewConnectedPipe(ctx context.Context, sizeBytes, atomicIOBytes int64) (*fs.File, *fs.File) {
-	p := NewPipe(ctx, false /* isNamed */, sizeBytes, atomicIOBytes)
+	p := NewPipe(false /* isNamed */, sizeBytes, atomicIOBytes)
 
 	// Build an fs.Dirent for the pipe which will be shared by both
 	// returned files.
@@ -150,8 +148,8 @@ func NewConnectedPipe(ctx context.Context, sizeBytes, atomicIOBytes int64) (*fs.
 		InodeID:   ino,
 		BlockSize: int64(atomicIOBytes),
 	}
-	ms := fs.NewPseudoMountSource()
-	d := fs.NewDirent(fs.NewInode(iops, ms, sattr), fmt.Sprintf("pipe:[%d]", ino))
+	ms := fs.NewPseudoMountSource(ctx)
+	d := fs.NewDirent(ctx, fs.NewInode(ctx, iops, ms, sattr), fmt.Sprintf("pipe:[%d]", ino))
 	// The p.Open calls below will each take a reference on the Dirent. We
 	// must drop the one we already have.
 	defer d.DecRef()
@@ -162,6 +160,7 @@ func NewConnectedPipe(ctx context.Context, sizeBytes, atomicIOBytes int64) (*fs.
 //
 // Precondition: at least one of flags.Read or flags.Write must be set.
 func (p *Pipe) Open(ctx context.Context, d *fs.Dirent, flags fs.FileFlags) *fs.File {
+	flags.NonSeekable = true
 	switch {
 	case flags.Read && flags.Write:
 		p.rOpen()
@@ -185,13 +184,24 @@ func (p *Pipe) Open(ctx context.Context, d *fs.Dirent, flags fs.FileFlags) *fs.F
 	}
 }
 
+type readOps struct {
+	// left returns the bytes remaining.
+	left func() int64
+
+	// limit limits subsequence reads.
+	limit func(int64)
+
+	// read performs the actual read operation.
+	read func(*buffer.View) (int64, error)
+}
+
 // read reads data from the pipe into dst and returns the number of bytes
 // read, or returns ErrWouldBlock if the pipe is empty.
 //
 // Precondition: this pipe must have readers.
-func (p *Pipe) read(ctx context.Context, dst usermem.IOSequence) (int64, error) {
+func (p *Pipe) read(ctx context.Context, ops readOps) (int64, error) {
 	// Don't block for a zero-length read even if the pipe is empty.
-	if dst.NumBytes() == 0 {
+	if ops.left() == 0 {
 		return 0, nil
 	}
 
@@ -199,7 +209,7 @@ func (p *Pipe) read(ctx context.Context, dst usermem.IOSequence) (int64, error) 
 	defer p.mu.Unlock()
 
 	// Is the pipe empty?
-	if p.size == 0 {
+	if p.view.Size() == 0 {
 		if !p.HasWriters() {
 			// There are no writers, return EOF.
 			return 0, nil
@@ -208,38 +218,24 @@ func (p *Pipe) read(ctx context.Context, dst usermem.IOSequence) (int64, error) 
 	}
 
 	// Limit how much we consume.
-	if dst.NumBytes() > p.size {
-		dst = dst.TakeFirst64(p.size)
+	if ops.left() > p.view.Size() {
+		ops.limit(p.view.Size())
 	}
 
-	done := int64(0)
-	for dst.NumBytes() > 0 {
-		// Pop the first buffer.
-		first := p.data.Front()
-		if first == nil {
-			break
-		}
+	// Copy user data; the read op is responsible for trimming.
+	done, err := ops.read(&p.view)
+	return done, err
+}
 
-		// Copy user data.
-		n, err := dst.CopyOutFrom(ctx, first)
-		done += int64(n)
-		p.size -= n
-		dst = dst.DropFirst64(n)
+type writeOps struct {
+	// left returns the bytes remaining.
+	left func() int64
 
-		// Empty buffer?
-		if first.Empty() {
-			// Push to the free list.
-			p.data.Remove(first)
-			bufferPool.Put(first)
-		}
+	// limit should limit subsequent writes.
+	limit func(int64)
 
-		// Handle errors.
-		if err != nil {
-			return done, err
-		}
-	}
-
-	return done, nil
+	// write should write to the provided buffer.
+	write func(*buffer.View) (int64, error)
 }
 
 // write writes data from sv into the pipe and returns the number of bytes
@@ -247,7 +243,7 @@ func (p *Pipe) read(ctx context.Context, dst usermem.IOSequence) (int64, error) 
 // atomicIOBytes free capacity), write returns ErrWouldBlock.
 //
 // Precondition: this pipe must have writers.
-func (p *Pipe) write(ctx context.Context, src usermem.IOSequence) (int64, error) {
+func (p *Pipe) write(ctx context.Context, ops writeOps) (int64, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -258,38 +254,29 @@ func (p *Pipe) write(ctx context.Context, src usermem.IOSequence) (int64, error)
 
 	// POSIX requires that a write smaller than atomicIOBytes (PIPE_BUF) be
 	// atomic, but requires no atomicity for writes larger than this.
-	wanted := src.NumBytes()
-	if avail := p.max - p.size; wanted > avail {
+	wanted := ops.left()
+	avail := p.max - p.view.Size()
+	if wanted > avail {
 		if wanted <= p.atomicIOBytes {
 			return 0, syserror.ErrWouldBlock
 		}
-		// Limit to the available capacity.
-		src = src.TakeFirst64(avail)
+		ops.limit(avail)
 	}
 
-	done := int64(0)
-	for src.NumBytes() > 0 {
-		// Need a new buffer?
-		last := p.data.Back()
-		if last == nil || last.Full() {
-			// Add a new buffer to the data list.
-			last = newBuffer()
-			p.data.PushBack(last)
-		}
-
-		// Copy user data.
-		n, err := src.CopyInTo(ctx, last)
-		done += int64(n)
-		p.size += n
-		src = src.DropFirst64(n)
-
-		// Handle errors.
-		if err != nil {
-			return done, err
-		}
+	// Copy user data.
+	done, err := ops.write(&p.view)
+	if err != nil {
+		return done, err
 	}
-	if wanted > done {
-		// Partial write due to full pipe.
+
+	if done < avail {
+		// Non-failure, but short write.
+		return done, nil
+	}
+	if done < wanted {
+		// Partial write due to full pipe. Note that this could also be
+		// the short write case above, we would expect a second call
+		// and the write to return zero bytes in this case.
 		return done, syserror.ErrWouldBlock
 	}
 
@@ -340,7 +327,7 @@ func (p *Pipe) HasWriters() bool {
 // Precondition: mu must be held.
 func (p *Pipe) rReadinessLocked() waiter.EventMask {
 	ready := waiter.EventMask(0)
-	if p.HasReaders() && p.data.Front() != nil {
+	if p.HasReaders() && p.view.Size() != 0 {
 		ready |= waiter.EventIn
 	}
 	if !p.HasWriters() && p.hadWriter {
@@ -366,7 +353,7 @@ func (p *Pipe) rReadiness() waiter.EventMask {
 // Precondition: mu must be held.
 func (p *Pipe) wReadinessLocked() waiter.EventMask {
 	ready := waiter.EventMask(0)
-	if p.HasWriters() && p.size < p.max {
+	if p.HasWriters() && p.view.Size() < p.max {
 		ready |= waiter.EventOut
 	}
 	if !p.HasReaders() {
@@ -395,18 +382,18 @@ func (p *Pipe) rwReadiness() waiter.EventMask {
 func (p *Pipe) queued() int64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.size
+	return p.view.Size()
 }
 
-// PipeSize implements PipeSizer.PipeSize.
-func (p *Pipe) PipeSize() int64 {
+// FifoSize implements fs.FifoSizer.FifoSize.
+func (p *Pipe) FifoSize(context.Context, *fs.File) (int64, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.max
+	return p.max, nil
 }
 
-// SetPipeSize implements PipeSize.SetPipeSize.
-func (p *Pipe) SetPipeSize(size int64) (int64, error) {
+// SetFifoSize implements fs.FifoSizer.SetFifoSize.
+func (p *Pipe) SetFifoSize(size int64) (int64, error) {
 	if size < 0 {
 		return 0, syserror.EINVAL
 	}
@@ -418,7 +405,7 @@ func (p *Pipe) SetPipeSize(size int64) (int64, error) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if size < p.size {
+	if size < p.view.Size() {
 		return 0, syserror.EBUSY
 	}
 	p.max = size

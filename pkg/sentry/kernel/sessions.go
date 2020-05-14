@@ -47,6 +47,11 @@ type Session struct {
 	// The id is immutable.
 	id SessionID
 
+	// foreground is the foreground process group.
+	//
+	// This is protected by TaskSet.mu.
+	foreground *ProcessGroup
+
 	// ProcessGroups is a list of process groups in this Session. This is
 	// protected by TaskSet.mu.
 	processGroups processGroupList
@@ -241,7 +246,7 @@ func (pg *ProcessGroup) SendSignal(info *arch.SignalInfo) error {
 
 	var lastErr error
 	for tg := range tasks.Root.tgids {
-		if tg.ProcessGroup() == pg {
+		if tg.processGroup == pg {
 			tg.signalHandlers.mu.Lock()
 			infoCopy := *info
 			if err := tg.leader.sendSignalLocked(&infoCopy, true /*group*/); err != nil {
@@ -260,12 +265,14 @@ func (pg *ProcessGroup) SendSignal(info *arch.SignalInfo) error {
 func (tg *ThreadGroup) CreateSession() error {
 	tg.pidns.owner.mu.Lock()
 	defer tg.pidns.owner.mu.Unlock()
+	tg.signalHandlers.mu.Lock()
+	defer tg.signalHandlers.mu.Unlock()
 	return tg.createSession()
 }
 
 // createSession creates a new session for a threadgroup.
 //
-// Precondition: callers must hold TaskSet.mu for writing.
+// Precondition: callers must hold TaskSet.mu and the signal mutex for writing.
 func (tg *ThreadGroup) createSession() error {
 	// Get the ID for this thread in the current namespace.
 	id := tg.pidns.tgids[tg]
@@ -294,6 +301,7 @@ func (tg *ThreadGroup) createSession() error {
 		id:     SessionID(id),
 		leader: tg,
 	}
+	s.refs.EnableLeakCheck("kernel.Session")
 
 	// Create a new ProcessGroup, belonging to that Session.
 	// This also has a single reference (assigned below).
@@ -307,6 +315,7 @@ func (tg *ThreadGroup) createSession() error {
 		session:    s,
 		ancestors:  0,
 	}
+	pg.refs.EnableLeakCheck("kernel.ProcessGroup")
 
 	// Tie them and return the result.
 	s.processGroups.PushBack(pg)
@@ -319,8 +328,14 @@ func (tg *ThreadGroup) createSession() error {
 			childTG.processGroup.incRefWithParent(pg)
 			childTG.processGroup.decRefWithParent(oldParentPG)
 		})
-		tg.processGroup.decRefWithParent(oldParentPG)
+		// If tg.processGroup is an orphan, decRefWithParent will lock
+		// the signal mutex of each thread group in tg.processGroup.
+		// However, tg's signal mutex may already be locked at this
+		// point. We change tg's process group before calling
+		// decRefWithParent to avoid locking tg's signal mutex twice.
+		oldPG := tg.processGroup
 		tg.processGroup = pg
+		oldPG.decRefWithParent(oldParentPG)
 	} else {
 		// The current process group may be nil only in the case of an
 		// unparented thread group (i.e. the init process). This would
@@ -343,6 +358,9 @@ func (tg *ThreadGroup) createSession() error {
 		ns.pgids[pg] = ProcessGroupID(local)
 		ns.processGroups[ProcessGroupID(local)] = pg
 	}
+
+	// Disconnect from the controlling terminal.
+	tg.tty = nil
 
 	return nil
 }
@@ -378,11 +396,13 @@ func (tg *ThreadGroup) CreateProcessGroup() error {
 	// We manually adjust the ancestors if the parent is in the same
 	// session.
 	tg.processGroup.session.incRef()
-	pg := &ProcessGroup{
+	pg := ProcessGroup{
 		id:         ProcessGroupID(id),
 		originator: tg,
 		session:    tg.processGroup.session,
 	}
+	pg.refs.EnableLeakCheck("kernel.ProcessGroup")
+
 	if tg.leader.parent != nil && tg.leader.parent.tg.processGroup.session == pg.session {
 		pg.ancestors++
 	}
@@ -390,20 +410,20 @@ func (tg *ThreadGroup) CreateProcessGroup() error {
 	// Assign the new process group; adjust children.
 	oldParentPG := tg.parentPG()
 	tg.forEachChildThreadGroupLocked(func(childTG *ThreadGroup) {
-		childTG.processGroup.incRefWithParent(pg)
+		childTG.processGroup.incRefWithParent(&pg)
 		childTG.processGroup.decRefWithParent(oldParentPG)
 	})
 	tg.processGroup.decRefWithParent(oldParentPG)
-	tg.processGroup = pg
+	tg.processGroup = &pg
 
 	// Add the new process group to the session.
-	pg.session.processGroups.PushBack(pg)
+	pg.session.processGroups.PushBack(&pg)
 
 	// Ensure this translation is added to all namespaces.
 	for ns := tg.pidns; ns != nil; ns = ns.parent {
 		local := ns.tgids[tg]
-		ns.pgids[pg] = ProcessGroupID(local)
-		ns.processGroups[ProcessGroupID(local)] = pg
+		ns.pgids[&pg] = ProcessGroupID(local)
+		ns.processGroups[ProcessGroupID(local)] = &pg
 	}
 
 	return nil

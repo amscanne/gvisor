@@ -18,21 +18,23 @@ import (
 	"fmt"
 	"syscall"
 
+	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/binary"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/fdnotifier"
 	"gvisor.dev/gvisor/pkg/log"
-	"gvisor.dev/gvisor/pkg/sentry/context"
+	"gvisor.dev/gvisor/pkg/safemem"
+	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/fs/fsutil"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
-	"gvisor.dev/gvisor/pkg/sentry/kernel/kdefs"
 	ktime "gvisor.dev/gvisor/pkg/sentry/kernel/time"
-	"gvisor.dev/gvisor/pkg/sentry/safemem"
 	"gvisor.dev/gvisor/pkg/sentry/socket"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
+	"gvisor.dev/gvisor/pkg/sentry/socket/control"
 	"gvisor.dev/gvisor/pkg/syserr"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
@@ -42,7 +44,13 @@ const (
 	// sizeofSockaddr is the size in bytes of the largest sockaddr type
 	// supported by this package.
 	sizeofSockaddr = syscall.SizeofSockaddrInet6 // sizeof(sockaddr_in6) > sizeof(sockaddr_in)
+
+	// maxControlLen is the maximum size of a control message buffer used in a
+	// recvmsg or sendmsg syscall.
+	maxControlLen = 1024
 )
+
+// LINT.IfChange
 
 // socketOperations implements fs.FileOperations and socket.Socket for a socket
 // implemented using a host socket.
@@ -54,53 +62,72 @@ type socketOperations struct {
 	fsutil.FileNoSplice             `state:"nosave"`
 	fsutil.FileNoopFlush            `state:"nosave"`
 	fsutil.FileUseInodeUnstableAttr `state:"nosave"`
+
+	socketOpsCommon
+}
+
+// socketOpsCommon contains the socket operations common to VFS1 and VFS2.
+//
+// +stateify savable
+type socketOpsCommon struct {
 	socket.SendReceiveTimeout
 
 	family   int            // Read-only.
 	stype    linux.SockType // Read-only.
 	protocol int            // Read-only.
-	fd       int            // must be O_NONBLOCK
 	queue    waiter.Queue
+
+	// fd is the host socket fd. It must have O_NONBLOCK, so that operations
+	// will return EWOULDBLOCK instead of blocking on the host. This allows us to
+	// handle blocking behavior independently in the sentry.
+	fd int
 }
 
 var _ = socket.Socket(&socketOperations{})
 
 func newSocketFile(ctx context.Context, family int, stype linux.SockType, protocol int, fd int, nonblock bool) (*fs.File, *syserr.Error) {
 	s := &socketOperations{
-		family:   family,
-		stype:    stype,
-		protocol: protocol,
-		fd:       fd,
+		socketOpsCommon: socketOpsCommon{
+			family:   family,
+			stype:    stype,
+			protocol: protocol,
+			fd:       fd,
+		},
 	}
 	if err := fdnotifier.AddFD(int32(fd), &s.queue); err != nil {
 		return nil, syserr.FromError(err)
 	}
 	dirent := socket.NewDirent(ctx, socketDevice)
 	defer dirent.DecRef()
-	return fs.NewFile(ctx, dirent, fs.FileFlags{NonBlocking: nonblock, Read: true, Write: true}, s), nil
+	return fs.NewFile(ctx, dirent, fs.FileFlags{NonBlocking: nonblock, Read: true, Write: true, NonSeekable: true}, s), nil
 }
 
 // Release implements fs.FileOperations.Release.
-func (s *socketOperations) Release() {
+func (s *socketOpsCommon) Release() {
 	fdnotifier.RemoveFD(int32(s.fd))
 	syscall.Close(s.fd)
 }
 
 // Readiness implements waiter.Waitable.Readiness.
-func (s *socketOperations) Readiness(mask waiter.EventMask) waiter.EventMask {
+func (s *socketOpsCommon) Readiness(mask waiter.EventMask) waiter.EventMask {
 	return fdnotifier.NonBlockingPoll(int32(s.fd), mask)
 }
 
 // EventRegister implements waiter.Waitable.EventRegister.
-func (s *socketOperations) EventRegister(e *waiter.Entry, mask waiter.EventMask) {
+func (s *socketOpsCommon) EventRegister(e *waiter.Entry, mask waiter.EventMask) {
 	s.queue.EventRegister(e, mask)
 	fdnotifier.UpdateFD(int32(s.fd))
 }
 
 // EventUnregister implements waiter.Waitable.EventUnregister.
-func (s *socketOperations) EventUnregister(e *waiter.Entry) {
+func (s *socketOpsCommon) EventUnregister(e *waiter.Entry) {
 	s.queue.EventUnregister(e)
 	fdnotifier.UpdateFD(int32(s.fd))
+}
+
+// Ioctl implements fs.FileOperations.Ioctl.
+func (s *socketOperations) Ioctl(ctx context.Context, _ *fs.File, io usermem.IO, args arch.SyscallArguments) (uintptr, error) {
+	return ioctl(ctx, s.fd, io, args)
 }
 
 // Read implements fs.FileOperations.Read.
@@ -121,7 +148,7 @@ func (s *socketOperations) Read(ctx context.Context, _ *fs.File, dst usermem.IOS
 			}
 			return uint64(n), nil
 		}
-		return readv(s.fd, iovecsFromBlockSeq(dsts))
+		return readv(s.fd, safemem.IovecsFromBlockSeq(dsts))
 	}))
 	return int64(n), err
 }
@@ -144,13 +171,13 @@ func (s *socketOperations) Write(ctx context.Context, _ *fs.File, src usermem.IO
 			}
 			return uint64(n), nil
 		}
-		return writev(s.fd, iovecsFromBlockSeq(srcs))
+		return writev(s.fd, safemem.IovecsFromBlockSeq(srcs))
 	}))
 	return int64(n), err
 }
 
 // Connect implements socket.Socket.Connect.
-func (s *socketOperations) Connect(t *kernel.Task, sockaddr []byte, blocking bool) *syserr.Error {
+func (s *socketOpsCommon) Connect(t *kernel.Task, sockaddr []byte, blocking bool) *syserr.Error {
 	if len(sockaddr) > sizeofSockaddr {
 		sockaddr = sockaddr[:sizeofSockaddr]
 	}
@@ -190,20 +217,21 @@ func (s *socketOperations) Connect(t *kernel.Task, sockaddr []byte, blocking boo
 }
 
 // Accept implements socket.Socket.Accept.
-func (s *socketOperations) Accept(t *kernel.Task, peerRequested bool, flags int, blocking bool) (kdefs.FD, interface{}, uint32, *syserr.Error) {
-	var peerAddr []byte
+func (s *socketOpsCommon) Accept(t *kernel.Task, peerRequested bool, flags int, blocking bool) (int32, linux.SockAddr, uint32, *syserr.Error) {
+	var peerAddr linux.SockAddr
+	var peerAddrBuf []byte
 	var peerAddrlen uint32
 	var peerAddrPtr *byte
 	var peerAddrlenPtr *uint32
 	if peerRequested {
-		peerAddr = make([]byte, sizeofSockaddr)
-		peerAddrlen = uint32(len(peerAddr))
-		peerAddrPtr = &peerAddr[0]
+		peerAddrBuf = make([]byte, sizeofSockaddr)
+		peerAddrlen = uint32(len(peerAddrBuf))
+		peerAddrPtr = &peerAddrBuf[0]
 		peerAddrlenPtr = &peerAddrlen
 	}
 
 	// Conservatively ignore all flags specified by the application and add
-	// SOCK_NONBLOCK since socketOperations requires it.
+	// SOCK_NONBLOCK since socketOpsCommon requires it.
 	fd, syscallErr := accept4(s.fd, peerAddrPtr, peerAddrlenPtr, syscall.SOCK_NONBLOCK|syscall.SOCK_CLOEXEC)
 	if blocking {
 		var ch chan struct{}
@@ -223,29 +251,47 @@ func (s *socketOperations) Accept(t *kernel.Task, peerRequested bool, flags int,
 	}
 
 	if peerRequested {
-		peerAddr = peerAddr[:peerAddrlen]
+		peerAddr = socket.UnmarshalSockAddr(s.family, peerAddrBuf[:peerAddrlen])
 	}
 	if syscallErr != nil {
 		return 0, peerAddr, peerAddrlen, syserr.FromError(syscallErr)
 	}
 
-	f, err := newSocketFile(t, s.family, s.stype, s.protocol, fd, flags&syscall.SOCK_NONBLOCK != 0)
-	if err != nil {
-		syscall.Close(fd)
-		return 0, nil, 0, err
-	}
-	defer f.DecRef()
+	var (
+		kfd  int32
+		kerr error
+	)
+	if kernel.VFS2Enabled {
+		f, err := newVFS2Socket(t, s.family, s.stype, s.protocol, fd, uint32(flags&syscall.SOCK_NONBLOCK))
+		if err != nil {
+			syscall.Close(fd)
+			return 0, nil, 0, err
+		}
+		defer f.DecRef()
 
-	fdFlags := kernel.FDFlags{
-		CloseOnExec: flags&syscall.SOCK_CLOEXEC != 0,
+		kfd, kerr = t.NewFDFromVFS2(0, f, kernel.FDFlags{
+			CloseOnExec: flags&syscall.SOCK_CLOEXEC != 0,
+		})
+		t.Kernel().RecordSocketVFS2(f)
+	} else {
+		f, err := newSocketFile(t, s.family, s.stype, s.protocol, fd, flags&syscall.SOCK_NONBLOCK != 0)
+		if err != nil {
+			syscall.Close(fd)
+			return 0, nil, 0, err
+		}
+		defer f.DecRef()
+
+		kfd, kerr = t.NewFDFrom(0, f, kernel.FDFlags{
+			CloseOnExec: flags&syscall.SOCK_CLOEXEC != 0,
+		})
+		t.Kernel().RecordSocket(f)
 	}
-	kfd, kerr := t.FDMap().NewFDFrom(0, f, fdFlags, t.ThreadGroup().Limits())
-	t.Kernel().RecordSocket(f)
+
 	return kfd, peerAddr, peerAddrlen, syserr.FromError(kerr)
 }
 
 // Bind implements socket.Socket.Bind.
-func (s *socketOperations) Bind(t *kernel.Task, sockaddr []byte) *syserr.Error {
+func (s *socketOpsCommon) Bind(t *kernel.Task, sockaddr []byte) *syserr.Error {
 	if len(sockaddr) > sizeofSockaddr {
 		sockaddr = sockaddr[:sizeofSockaddr]
 	}
@@ -258,12 +304,12 @@ func (s *socketOperations) Bind(t *kernel.Task, sockaddr []byte) *syserr.Error {
 }
 
 // Listen implements socket.Socket.Listen.
-func (s *socketOperations) Listen(t *kernel.Task, backlog int) *syserr.Error {
+func (s *socketOpsCommon) Listen(t *kernel.Task, backlog int) *syserr.Error {
 	return syserr.FromError(syscall.Listen(s.fd, backlog))
 }
 
 // Shutdown implements socket.Socket.Shutdown.
-func (s *socketOperations) Shutdown(t *kernel.Task, how int) *syserr.Error {
+func (s *socketOpsCommon) Shutdown(t *kernel.Task, how int) *syserr.Error {
 	switch how {
 	case syscall.SHUT_RD, syscall.SHUT_WR, syscall.SHUT_RDWR:
 		return syserr.FromError(syscall.Shutdown(s.fd, how))
@@ -273,34 +319,40 @@ func (s *socketOperations) Shutdown(t *kernel.Task, how int) *syserr.Error {
 }
 
 // GetSockOpt implements socket.Socket.GetSockOpt.
-func (s *socketOperations) GetSockOpt(t *kernel.Task, level int, name int, outLen int) (interface{}, *syserr.Error) {
+func (s *socketOpsCommon) GetSockOpt(t *kernel.Task, level int, name int, outPtr usermem.Addr, outLen int) (interface{}, *syserr.Error) {
 	if outLen < 0 {
 		return nil, syserr.ErrInvalidArgument
 	}
 
 	// Whitelist options and constrain option length.
-	var optlen int
+	optlen := getSockOptLen(t, level, name)
 	switch level {
-	case syscall.SOL_IPV6:
+	case linux.SOL_IP:
 		switch name {
-		case syscall.IPV6_V6ONLY:
+		case linux.IP_TOS, linux.IP_RECVTOS, linux.IP_PKTINFO:
 			optlen = sizeofInt32
 		}
-	case syscall.SOL_SOCKET:
+	case linux.SOL_IPV6:
 		switch name {
-		case syscall.SO_ERROR, syscall.SO_KEEPALIVE, syscall.SO_SNDBUF, syscall.SO_RCVBUF, syscall.SO_REUSEADDR, syscall.SO_TYPE:
+		case linux.IPV6_TCLASS, linux.IPV6_RECVTCLASS, linux.IPV6_V6ONLY:
 			optlen = sizeofInt32
-		case syscall.SO_LINGER:
+		}
+	case linux.SOL_SOCKET:
+		switch name {
+		case linux.SO_ERROR, linux.SO_KEEPALIVE, linux.SO_SNDBUF, linux.SO_RCVBUF, linux.SO_REUSEADDR:
+			optlen = sizeofInt32
+		case linux.SO_LINGER:
 			optlen = syscall.SizeofLinger
 		}
-	case syscall.SOL_TCP:
+	case linux.SOL_TCP:
 		switch name {
-		case syscall.TCP_NODELAY:
+		case linux.TCP_NODELAY:
 			optlen = sizeofInt32
-		case syscall.TCP_INFO:
+		case linux.TCP_INFO:
 			optlen = int(linux.SizeOfTCPInfo)
 		}
 	}
+
 	if optlen == 0 {
 		return nil, syserr.ErrProtocolNotAvailable // ENOPROTOOPT
 	}
@@ -316,26 +368,34 @@ func (s *socketOperations) GetSockOpt(t *kernel.Task, level int, name int, outLe
 }
 
 // SetSockOpt implements socket.Socket.SetSockOpt.
-func (s *socketOperations) SetSockOpt(t *kernel.Task, level int, name int, opt []byte) *syserr.Error {
+func (s *socketOpsCommon) SetSockOpt(t *kernel.Task, level int, name int, opt []byte) *syserr.Error {
 	// Whitelist options and constrain option length.
-	var optlen int
+	optlen := setSockOptLen(t, level, name)
 	switch level {
-	case syscall.SOL_IPV6:
+	case linux.SOL_IP:
 		switch name {
-		case syscall.IPV6_V6ONLY:
+		case linux.IP_TOS, linux.IP_RECVTOS:
+			optlen = sizeofInt32
+		case linux.IP_PKTINFO:
+			optlen = linux.SizeOfControlMessageIPPacketInfo
+		}
+	case linux.SOL_IPV6:
+		switch name {
+		case linux.IPV6_TCLASS, linux.IPV6_RECVTCLASS, linux.IPV6_V6ONLY:
 			optlen = sizeofInt32
 		}
-	case syscall.SOL_SOCKET:
+	case linux.SOL_SOCKET:
 		switch name {
-		case syscall.SO_SNDBUF, syscall.SO_RCVBUF, syscall.SO_REUSEADDR:
+		case linux.SO_SNDBUF, linux.SO_RCVBUF, linux.SO_REUSEADDR:
 			optlen = sizeofInt32
 		}
-	case syscall.SOL_TCP:
+	case linux.SOL_TCP:
 		switch name {
-		case syscall.TCP_NODELAY:
+		case linux.TCP_NODELAY:
 			optlen = sizeofInt32
 		}
 	}
+
 	if optlen == 0 {
 		// Pretend to accept socket options we don't understand. This seems
 		// dangerous, but it's what netstack does...
@@ -354,21 +414,23 @@ func (s *socketOperations) SetSockOpt(t *kernel.Task, level int, name int, opt [
 }
 
 // RecvMsg implements socket.Socket.RecvMsg.
-func (s *socketOperations) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags int, haveDeadline bool, deadline ktime.Time, senderRequested bool, controlDataLen uint64) (int, int, interface{}, uint32, socket.ControlMessages, *syserr.Error) {
+func (s *socketOpsCommon) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags int, haveDeadline bool, deadline ktime.Time, senderRequested bool, controlLen uint64) (int, int, linux.SockAddr, uint32, socket.ControlMessages, *syserr.Error) {
 	// Whitelist flags.
 	//
 	// FIXME(jamieliu): We can't support MSG_ERRQUEUE because it uses ancillary
-	// messages that netstack/tcpip/transport/unix doesn't understand. Kill the
+	// messages that gvisor/pkg/tcpip/transport/unix doesn't understand. Kill the
 	// Socket interface's dependence on netstack.
 	if flags&^(syscall.MSG_DONTWAIT|syscall.MSG_PEEK|syscall.MSG_TRUNC) != 0 {
 		return 0, 0, nil, 0, socket.ControlMessages{}, syserr.ErrInvalidArgument
 	}
 
-	var senderAddr []byte
+	var senderAddr linux.SockAddr
+	var senderAddrBuf []byte
 	if senderRequested {
-		senderAddr = make([]byte, sizeofSockaddr)
+		senderAddrBuf = make([]byte, sizeofSockaddr)
 	}
 
+	var controlBuf []byte
 	var msgFlags int
 
 	recvmsgToBlocks := safemem.ReaderFunc(func(dsts safemem.BlockSeq) (uint64, error) {
@@ -383,26 +445,30 @@ func (s *socketOperations) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags
 		// We always do a non-blocking recv*().
 		sysflags := flags | syscall.MSG_DONTWAIT
 
-		if dsts.NumBlocks() == 1 {
-			// Skip allocating []syscall.Iovec.
-			return recvfrom(s.fd, dsts.Head().ToSlice(), sysflags, &senderAddr)
-		}
-
-		iovs := iovecsFromBlockSeq(dsts)
+		iovs := safemem.IovecsFromBlockSeq(dsts)
 		msg := syscall.Msghdr{
 			Iov:    &iovs[0],
 			Iovlen: uint64(len(iovs)),
 		}
-		if len(senderAddr) != 0 {
-			msg.Name = &senderAddr[0]
-			msg.Namelen = uint32(len(senderAddr))
+		if len(senderAddrBuf) != 0 {
+			msg.Name = &senderAddrBuf[0]
+			msg.Namelen = uint32(len(senderAddrBuf))
+		}
+		if controlLen > 0 {
+			if controlLen > maxControlLen {
+				controlLen = maxControlLen
+			}
+			controlBuf = make([]byte, controlLen)
+			msg.Control = &controlBuf[0]
+			msg.Controllen = controlLen
 		}
 		n, err := recvmsg(s.fd, &msg, sysflags)
 		if err != nil {
 			return 0, err
 		}
-		senderAddr = senderAddr[:msg.Namelen]
+		senderAddrBuf = senderAddrBuf[:msg.Namelen]
 		msgFlags = int(msg.Flags)
+		controlLen = uint64(msg.Controllen)
 		return n, nil
 	})
 
@@ -428,19 +494,61 @@ func (s *socketOperations) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags
 			n, err = dst.CopyOutFrom(t, recvmsgToBlocks)
 		}
 	}
+	if err != nil {
+		return 0, 0, nil, 0, socket.ControlMessages{}, syserr.FromError(err)
+	}
 
-	// We don't allow control messages.
-	msgFlags &^= linux.MSG_CTRUNC
+	if senderRequested {
+		senderAddr = socket.UnmarshalSockAddr(s.family, senderAddrBuf)
+	}
 
-	return int(n), msgFlags, senderAddr, uint32(len(senderAddr)), socket.ControlMessages{}, syserr.FromError(err)
+	unixControlMessages, err := unix.ParseSocketControlMessage(controlBuf[:controlLen])
+	if err != nil {
+		return 0, 0, nil, 0, socket.ControlMessages{}, syserr.FromError(err)
+	}
+
+	controlMessages := socket.ControlMessages{}
+	for _, unixCmsg := range unixControlMessages {
+		switch unixCmsg.Header.Level {
+		case syscall.SOL_IP:
+			switch unixCmsg.Header.Type {
+			case syscall.IP_TOS:
+				controlMessages.IP.HasTOS = true
+				binary.Unmarshal(unixCmsg.Data[:linux.SizeOfControlMessageTOS], usermem.ByteOrder, &controlMessages.IP.TOS)
+
+			case syscall.IP_PKTINFO:
+				controlMessages.IP.HasIPPacketInfo = true
+				var packetInfo linux.ControlMessageIPPacketInfo
+				binary.Unmarshal(unixCmsg.Data[:linux.SizeOfControlMessageIPPacketInfo], usermem.ByteOrder, &packetInfo)
+				controlMessages.IP.PacketInfo = control.NewIPPacketInfo(packetInfo)
+			}
+
+		case syscall.SOL_IPV6:
+			switch unixCmsg.Header.Type {
+			case syscall.IPV6_TCLASS:
+				controlMessages.IP.HasTClass = true
+				binary.Unmarshal(unixCmsg.Data[:linux.SizeOfControlMessageTClass], usermem.ByteOrder, &controlMessages.IP.TClass)
+			}
+		}
+	}
+
+	return int(n), msgFlags, senderAddr, uint32(len(senderAddrBuf)), controlMessages, nil
 }
 
 // SendMsg implements socket.Socket.SendMsg.
-func (s *socketOperations) SendMsg(t *kernel.Task, src usermem.IOSequence, to []byte, flags int, haveDeadline bool, deadline ktime.Time, controlMessages socket.ControlMessages) (int, *syserr.Error) {
+func (s *socketOpsCommon) SendMsg(t *kernel.Task, src usermem.IOSequence, to []byte, flags int, haveDeadline bool, deadline ktime.Time, controlMessages socket.ControlMessages) (int, *syserr.Error) {
 	// Whitelist flags.
 	if flags&^(syscall.MSG_DONTWAIT|syscall.MSG_EOR|syscall.MSG_FASTOPEN|syscall.MSG_MORE|syscall.MSG_NOSIGNAL) != 0 {
 		return 0, syserr.ErrInvalidArgument
 	}
+
+	space := uint64(control.CmsgsSpace(t, controlMessages))
+	if space > maxControlLen {
+		space = maxControlLen
+	}
+	controlBuf := make([]byte, 0, space)
+	// PackControlMessages will append up to space bytes to controlBuf.
+	controlBuf = control.PackControlMessages(t, controlMessages, controlBuf)
 
 	sendmsgFromBlocks := safemem.WriterFunc(func(srcs safemem.BlockSeq) (uint64, error) {
 		// Refuse to do anything if any part of src.Addrs was unusable.
@@ -454,7 +562,7 @@ func (s *socketOperations) SendMsg(t *kernel.Task, src usermem.IOSequence, to []
 		// We always do a non-blocking send*().
 		sysflags := flags | syscall.MSG_DONTWAIT
 
-		if srcs.NumBlocks() == 1 {
+		if srcs.NumBlocks() == 1 && len(controlBuf) == 0 {
 			// Skip allocating []syscall.Iovec.
 			src := srcs.Head()
 			n, _, errno := syscall.Syscall6(syscall.SYS_SENDTO, uintptr(s.fd), src.Addr(), uintptr(src.Len()), uintptr(sysflags), uintptr(firstBytePtr(to)), uintptr(len(to)))
@@ -464,7 +572,7 @@ func (s *socketOperations) SendMsg(t *kernel.Task, src usermem.IOSequence, to []
 			return uint64(n), nil
 		}
 
-		iovs := iovecsFromBlockSeq(srcs)
+		iovs := safemem.IovecsFromBlockSeq(srcs)
 		msg := syscall.Msghdr{
 			Iov:    &iovs[0],
 			Iovlen: uint64(len(iovs)),
@@ -472,6 +580,10 @@ func (s *socketOperations) SendMsg(t *kernel.Task, src usermem.IOSequence, to []
 		if len(to) != 0 {
 			msg.Name = &to[0]
 			msg.Namelen = uint32(len(to))
+		}
+		if len(controlBuf) != 0 {
+			msg.Control = &controlBuf[0]
+			msg.Controllen = uint64(len(controlBuf))
 		}
 		return sendmsg(s.fd, &msg, sysflags)
 	})
@@ -505,21 +617,6 @@ func (s *socketOperations) SendMsg(t *kernel.Task, src usermem.IOSequence, to []
 	return int(n), syserr.FromError(err)
 }
 
-func iovecsFromBlockSeq(bs safemem.BlockSeq) []syscall.Iovec {
-	iovs := make([]syscall.Iovec, 0, bs.NumBlocks())
-	for ; !bs.IsEmpty(); bs = bs.Tail() {
-		b := bs.Head()
-		iovs = append(iovs, syscall.Iovec{
-			Base: &b.ToSlice()[0],
-			Len:  uint64(b.Len()),
-		})
-		// We don't need to care about b.NeedSafecopy(), because the host
-		// kernel will handle such address ranges just fine (by returning
-		// EFAULT).
-	}
-	return iovs
-}
-
 func translateIOSyscallError(err error) error {
 	if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
 		return syserror.ErrWouldBlock
@@ -528,7 +625,7 @@ func translateIOSyscallError(err error) error {
 }
 
 // State implements socket.Socket.State.
-func (s *socketOperations) State() uint32 {
+func (s *socketOpsCommon) State() uint32 {
 	info := linux.TCPInfo{}
 	buf, err := getsockopt(s.fd, syscall.SOL_TCP, syscall.TCP_INFO, linux.SizeOfTCPInfo)
 	if err != nil {
@@ -550,7 +647,7 @@ func (s *socketOperations) State() uint32 {
 }
 
 // Type implements socket.Socket.Type.
-func (s *socketOperations) Type() (family int, skType linux.SockType, protocol int) {
+func (s *socketOpsCommon) Type() (family int, skType linux.SockType, protocol int) {
 	return s.family, s.stype, s.protocol
 }
 
@@ -606,8 +703,11 @@ func (p *socketProvider) Pair(t *kernel.Task, stype linux.SockType, protocol int
 	return nil, nil, nil
 }
 
+// LINT.ThenChange(./socket_vfs2.go)
+
 func init() {
 	for _, family := range []int{syscall.AF_INET, syscall.AF_INET6} {
 		socket.RegisterProvider(family, &socketProvider{family})
+		socket.RegisterProviderVFS2(family, &socketProviderVFS2{})
 	}
 }

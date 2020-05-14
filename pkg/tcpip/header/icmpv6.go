@@ -18,35 +18,75 @@ import (
 	"encoding/binary"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 )
 
 // ICMPv6 represents an ICMPv6 header stored in a byte array.
 type ICMPv6 []byte
 
 const (
+	// ICMPv6HeaderSize is the size of the ICMPv6 header. That is, the
+	// sum of the size of the ICMPv6 Type, Code and Checksum fields, as
+	// per RFC 4443 section 2.1. After the ICMPv6 header, the ICMPv6
+	// message body begins.
+	ICMPv6HeaderSize = 4
+
 	// ICMPv6MinimumSize is the minimum size of a valid ICMP packet.
-	ICMPv6MinimumSize = 4
+	ICMPv6MinimumSize = 8
+
+	// ICMPv6PayloadOffset is the offset of the payload in an
+	// ICMP packet.
+	ICMPv6PayloadOffset = 8
 
 	// ICMPv6ProtocolNumber is the ICMP transport protocol number.
 	ICMPv6ProtocolNumber tcpip.TransportProtocolNumber = 58
 
 	// ICMPv6NeighborSolicitMinimumSize is the minimum size of a
 	// neighbor solicitation packet.
-	ICMPv6NeighborSolicitMinimumSize = ICMPv6MinimumSize + 4 + 16
+	ICMPv6NeighborSolicitMinimumSize = ICMPv6HeaderSize + NDPNSMinimumSize
 
-	// ICMPv6NeighborAdvertSize is size of a neighbor advertisement.
-	ICMPv6NeighborAdvertSize = 32
+	// ICMPv6NeighborAdvertMinimumSize is the minimum size of a
+	// neighbor advertisement packet.
+	ICMPv6NeighborAdvertMinimumSize = ICMPv6HeaderSize + NDPNAMinimumSize
+
+	// ICMPv6NeighborAdvertSize is size of a neighbor advertisement
+	// including the NDP Target Link Layer option for an Ethernet
+	// address.
+	ICMPv6NeighborAdvertSize = ICMPv6HeaderSize + NDPNAMinimumSize + NDPLinkLayerAddressSize
 
 	// ICMPv6EchoMinimumSize is the minimum size of a valid ICMP echo packet.
 	ICMPv6EchoMinimumSize = 8
 
 	// ICMPv6DstUnreachableMinimumSize is the minimum size of a valid ICMP
 	// destination unreachable packet.
-	ICMPv6DstUnreachableMinimumSize = ICMPv6MinimumSize + 4
+	ICMPv6DstUnreachableMinimumSize = ICMPv6MinimumSize
 
 	// ICMPv6PacketTooBigMinimumSize is the minimum size of a valid ICMP
 	// packet-too-big packet.
-	ICMPv6PacketTooBigMinimumSize = ICMPv6MinimumSize + 4
+	ICMPv6PacketTooBigMinimumSize = ICMPv6MinimumSize
+
+	// icmpv6ChecksumOffset is the offset of the checksum field
+	// in an ICMPv6 message.
+	icmpv6ChecksumOffset = 2
+
+	// icmpv6MTUOffset is the offset of the MTU field in an ICMPv6
+	// PacketTooBig message.
+	icmpv6MTUOffset = 4
+
+	// icmpv6IdentOffset is the offset of the ident field
+	// in a ICMPv6 Echo Request/Reply message.
+	icmpv6IdentOffset = 4
+
+	// icmpv6SequenceOffset is the offset of the sequence field
+	// in a ICMPv6 Echo Request/Reply message.
+	icmpv6SequenceOffset = 6
+
+	// NDPHopLimit is the expected IP hop limit value of 255 for received
+	// NDP packets, as per RFC 4861 sections 4.1 - 4.5, 6.1.1, 6.1.2, 7.1.1,
+	// 7.1.2 and 8.1. If the hop limit value is not 255, nodes MUST silently
+	// drop the NDP packet. All outgoing NDP packets must use this value for
+	// its IP hop limit field.
+	NDPHopLimit = 255
 )
 
 // ICMPv6Type is the ICMP type field described in RFC 4443 and friends.
@@ -89,12 +129,12 @@ func (b ICMPv6) SetCode(c byte) { b[1] = c }
 
 // Checksum is the ICMP checksum field.
 func (b ICMPv6) Checksum() uint16 {
-	return binary.BigEndian.Uint16(b[2:])
+	return binary.BigEndian.Uint16(b[icmpv6ChecksumOffset:])
 }
 
-// SetChecksum calculates and sets the ICMP checksum field.
+// SetChecksum sets the ICMP checksum field.
 func (b ICMPv6) SetChecksum(checksum uint16) {
-	binary.BigEndian.PutUint16(b[2:], checksum)
+	binary.BigEndian.PutUint16(b[icmpv6ChecksumOffset:], checksum)
 }
 
 // SourcePort implements Transport.SourcePort.
@@ -115,7 +155,67 @@ func (ICMPv6) SetSourcePort(uint16) {
 func (ICMPv6) SetDestinationPort(uint16) {
 }
 
+// MTU retrieves the MTU field from an ICMPv6 message.
+func (b ICMPv6) MTU() uint32 {
+	return binary.BigEndian.Uint32(b[icmpv6MTUOffset:])
+}
+
+// SetMTU sets the MTU field from an ICMPv6 message.
+func (b ICMPv6) SetMTU(mtu uint32) {
+	binary.BigEndian.PutUint32(b[icmpv6MTUOffset:], mtu)
+}
+
+// Ident retrieves the Ident field from an ICMPv6 message.
+func (b ICMPv6) Ident() uint16 {
+	return binary.BigEndian.Uint16(b[icmpv6IdentOffset:])
+}
+
+// SetIdent sets the Ident field from an ICMPv6 message.
+func (b ICMPv6) SetIdent(ident uint16) {
+	binary.BigEndian.PutUint16(b[icmpv6IdentOffset:], ident)
+}
+
+// Sequence retrieves the Sequence field from an ICMPv6 message.
+func (b ICMPv6) Sequence() uint16 {
+	return binary.BigEndian.Uint16(b[icmpv6SequenceOffset:])
+}
+
+// SetSequence sets the Sequence field from an ICMPv6 message.
+func (b ICMPv6) SetSequence(sequence uint16) {
+	binary.BigEndian.PutUint16(b[icmpv6SequenceOffset:], sequence)
+}
+
+// NDPPayload returns the NDP payload buffer. That is, it returns the ICMPv6
+// packet's message body as defined by RFC 4443 section 2.1; the portion of the
+// ICMPv6 buffer after the first ICMPv6HeaderSize bytes.
+func (b ICMPv6) NDPPayload() []byte {
+	return b[ICMPv6HeaderSize:]
+}
+
 // Payload implements Transport.Payload.
 func (b ICMPv6) Payload() []byte {
-	return b[ICMPv6MinimumSize:]
+	return b[ICMPv6PayloadOffset:]
+}
+
+// ICMPv6Checksum calculates the ICMP checksum over the provided ICMPv6 header,
+// IPv6 src/dst addresses and the payload.
+func ICMPv6Checksum(h ICMPv6, src, dst tcpip.Address, vv buffer.VectorisedView) uint16 {
+	// Calculate the IPv6 pseudo-header upper-layer checksum.
+	xsum := Checksum([]byte(src), 0)
+	xsum = Checksum([]byte(dst), xsum)
+	var upperLayerLength [4]byte
+	binary.BigEndian.PutUint32(upperLayerLength[:], uint32(len(h)+vv.Size()))
+	xsum = Checksum(upperLayerLength[:], xsum)
+	xsum = Checksum([]byte{0, 0, 0, uint8(ICMPv6ProtocolNumber)}, xsum)
+	for _, v := range vv.Views() {
+		xsum = Checksum(v, xsum)
+	}
+
+	// h[2:4] is the checksum itself, set it aside to avoid checksumming the checksum.
+	h2, h3 := h[2], h[3]
+	h[2], h[3] = 0, 0
+	xsum = ^Checksum(h, xsum)
+	h[2], h[3] = h2, h3
+
+	return xsum
 }

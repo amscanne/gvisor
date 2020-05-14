@@ -16,7 +16,7 @@ package kernel
 
 import (
 	"fmt"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/log"
@@ -24,6 +24,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
 	"gvisor.dev/gvisor/pkg/sentry/platform"
 	sentrytime "gvisor.dev/gvisor/pkg/sentry/time"
+	"gvisor.dev/gvisor/pkg/sync"
 )
 
 // Timekeeper manages all of the kernel clocks.
@@ -47,6 +48,9 @@ type Timekeeper struct {
 	//
 	// It is set only once, by SetClocks.
 	monotonicOffset int64 `state:"nosave"`
+
+	// monotonicLowerBound is the lowerBound for monotonic time.
+	monotonicLowerBound int64 `state:"nosave"`
 
 	// restored, if non-nil, indicates that this Timekeeper was restored
 	// from a state file. The clocks are not set until restored is closed.
@@ -122,7 +126,7 @@ func (t *Timekeeper) SetClocks(c sentrytime.Clocks) {
 	//
 	// In a restored sentry, monotonic time jumps forward by approximately
 	// the same amount as real time. There are no guarantees here, we are
-	// just making a best-effort attempt to to make it appear that the app
+	// just making a best-effort attempt to make it appear that the app
 	// was simply not scheduled for a long period, rather than that the
 	// real time clock was changed.
 	//
@@ -271,6 +275,21 @@ func (t *Timekeeper) GetTime(c sentrytime.ClockID) (int64, error) {
 	now, err := t.clocks.GetTime(c)
 	if err == nil && c == sentrytime.Monotonic {
 		now += t.monotonicOffset
+		for {
+			// It's possible that the clock is shaky. This may be due to
+			// platform issues, e.g. the KVM platform relies on the guest
+			// TSC and host TSC, which may not be perfectly in sync. To
+			// work around this issue, ensure that the monotonic time is
+			// always bounded by the last time read.
+			oldLowerBound := atomic.LoadInt64(&t.monotonicLowerBound)
+			if now < oldLowerBound {
+				now = oldLowerBound
+				break
+			}
+			if atomic.CompareAndSwapInt64(&t.monotonicLowerBound, oldLowerBound, now) {
+				break
+			}
+		}
 	}
 	return now, err
 }

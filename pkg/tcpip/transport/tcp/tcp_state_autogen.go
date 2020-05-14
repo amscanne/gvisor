@@ -7,6 +7,36 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 )
 
+func (x *cubicState) beforeSave() {}
+func (x *cubicState) save(m state.Map) {
+	x.beforeSave()
+	var t unixTime = x.saveT()
+	m.SaveValue("t", t)
+	m.Save("wLastMax", &x.wLastMax)
+	m.Save("wMax", &x.wMax)
+	m.Save("numCongestionEvents", &x.numCongestionEvents)
+	m.Save("c", &x.c)
+	m.Save("k", &x.k)
+	m.Save("beta", &x.beta)
+	m.Save("wC", &x.wC)
+	m.Save("wEst", &x.wEst)
+	m.Save("s", &x.s)
+}
+
+func (x *cubicState) afterLoad() {}
+func (x *cubicState) load(m state.Map) {
+	m.Load("wLastMax", &x.wLastMax)
+	m.Load("wMax", &x.wMax)
+	m.Load("numCongestionEvents", &x.numCongestionEvents)
+	m.Load("c", &x.c)
+	m.Load("k", &x.k)
+	m.Load("beta", &x.beta)
+	m.Load("wC", &x.wC)
+	m.Load("wEst", &x.wEst)
+	m.Load("s", &x.s)
+	m.LoadValue("t", new(unixTime), func(y interface{}) { x.loadT(y.(unixTime)) })
+}
+
 func (x *SACKInfo) beforeSave() {}
 func (x *SACKInfo) save(m state.Map) {
 	x.beforeSave()
@@ -20,27 +50,69 @@ func (x *SACKInfo) load(m state.Map) {
 	m.Load("NumBlocks", &x.NumBlocks)
 }
 
+func (x *rcvBufAutoTuneParams) beforeSave() {}
+func (x *rcvBufAutoTuneParams) save(m state.Map) {
+	x.beforeSave()
+	var measureTime unixTime = x.saveMeasureTime()
+	m.SaveValue("measureTime", measureTime)
+	var rttMeasureTime unixTime = x.saveRttMeasureTime()
+	m.SaveValue("rttMeasureTime", rttMeasureTime)
+	m.Save("copied", &x.copied)
+	m.Save("prevCopied", &x.prevCopied)
+	m.Save("rtt", &x.rtt)
+	m.Save("rttMeasureSeqNumber", &x.rttMeasureSeqNumber)
+	m.Save("disabled", &x.disabled)
+}
+
+func (x *rcvBufAutoTuneParams) afterLoad() {}
+func (x *rcvBufAutoTuneParams) load(m state.Map) {
+	m.Load("copied", &x.copied)
+	m.Load("prevCopied", &x.prevCopied)
+	m.Load("rtt", &x.rtt)
+	m.Load("rttMeasureSeqNumber", &x.rttMeasureSeqNumber)
+	m.Load("disabled", &x.disabled)
+	m.LoadValue("measureTime", new(unixTime), func(y interface{}) { x.loadMeasureTime(y.(unixTime)) })
+	m.LoadValue("rttMeasureTime", new(unixTime), func(y interface{}) { x.loadRttMeasureTime(y.(unixTime)) })
+}
+
+func (x *EndpointInfo) beforeSave() {}
+func (x *EndpointInfo) save(m state.Map) {
+	x.beforeSave()
+	var HardError string = x.saveHardError()
+	m.SaveValue("HardError", HardError)
+	m.Save("TransportEndpointInfo", &x.TransportEndpointInfo)
+}
+
+func (x *EndpointInfo) afterLoad() {}
+func (x *EndpointInfo) load(m state.Map) {
+	m.Load("TransportEndpointInfo", &x.TransportEndpointInfo)
+	m.LoadValue("HardError", new(string), func(y interface{}) { x.loadHardError(y.(string)) })
+}
+
 func (x *endpoint) save(m state.Map) {
 	x.beforeSave()
 	var lastError string = x.saveLastError()
 	m.SaveValue("lastError", lastError)
 	var state EndpointState = x.saveState()
 	m.SaveValue("state", state)
-	var hardError string = x.saveHardError()
-	m.SaveValue("hardError", hardError)
 	var acceptedChan []*endpoint = x.saveAcceptedChan()
 	m.SaveValue("acceptedChan", acceptedChan)
-	m.Save("netProto", &x.netProto)
+	m.Save("EndpointInfo", &x.EndpointInfo)
 	m.Save("waiterQueue", &x.waiterQueue)
+	m.Save("uniqueID", &x.uniqueID)
 	m.Save("rcvList", &x.rcvList)
 	m.Save("rcvClosed", &x.rcvClosed)
 	m.Save("rcvBufSize", &x.rcvBufSize)
 	m.Save("rcvBufUsed", &x.rcvBufUsed)
-	m.Save("id", &x.id)
+	m.Save("rcvAutoParams", &x.rcvAutoParams)
+	m.Save("ownedByUser", &x.ownedByUser)
 	m.Save("isRegistered", &x.isRegistered)
+	m.Save("ttl", &x.ttl)
 	m.Save("v6only", &x.v6only)
 	m.Save("isConnectNotified", &x.isConnectNotified)
 	m.Save("broadcast", &x.broadcast)
+	m.Save("boundBindToDevice", &x.boundBindToDevice)
+	m.Save("boundPortFlags", &x.boundPortFlags)
 	m.Save("workerRunning", &x.workerRunning)
 	m.Save("workerCleanup", &x.workerCleanup)
 	m.Save("sendTSOk", &x.sendTSOk)
@@ -50,6 +122,7 @@ func (x *endpoint) save(m state.Map) {
 	m.Save("sackPermitted", &x.sackPermitted)
 	m.Save("sack", &x.sack)
 	m.Save("reusePort", &x.reusePort)
+	m.Save("bindToDevice", &x.bindToDevice)
 	m.Save("delay", &x.delay)
 	m.Save("cork", &x.cork)
 	m.Save("scoreboard", &x.scoreboard)
@@ -57,6 +130,9 @@ func (x *endpoint) save(m state.Map) {
 	m.Save("slowAck", &x.slowAck)
 	m.Save("segmentQueue", &x.segmentQueue)
 	m.Save("synRcvdCount", &x.synRcvdCount)
+	m.Save("userMSS", &x.userMSS)
+	m.Save("maxSynRetries", &x.maxSynRetries)
+	m.Save("windowClamp", &x.windowClamp)
 	m.Save("sndBufSize", &x.sndBufSize)
 	m.Save("sndBufUsed", &x.sndBufUsed)
 	m.Save("sndClosed", &x.sndClosed)
@@ -66,25 +142,37 @@ func (x *endpoint) save(m state.Map) {
 	m.Save("packetTooBigCount", &x.packetTooBigCount)
 	m.Save("sndMTU", &x.sndMTU)
 	m.Save("keepalive", &x.keepalive)
+	m.Save("userTimeout", &x.userTimeout)
+	m.Save("deferAccept", &x.deferAccept)
 	m.Save("rcv", &x.rcv)
 	m.Save("snd", &x.snd)
-	m.Save("bindAddress", &x.bindAddress)
 	m.Save("connectingAddress", &x.connectingAddress)
+	m.Save("amss", &x.amss)
+	m.Save("sendTOS", &x.sendTOS)
 	m.Save("gso", &x.gso)
+	m.Save("tcpLingerTimeout", &x.tcpLingerTimeout)
+	m.Save("closed", &x.closed)
+	m.Save("txHash", &x.txHash)
+	m.Save("owner", &x.owner)
 }
 
 func (x *endpoint) load(m state.Map) {
-	m.Load("netProto", &x.netProto)
+	m.Load("EndpointInfo", &x.EndpointInfo)
 	m.LoadWait("waiterQueue", &x.waiterQueue)
+	m.Load("uniqueID", &x.uniqueID)
 	m.LoadWait("rcvList", &x.rcvList)
 	m.Load("rcvClosed", &x.rcvClosed)
 	m.Load("rcvBufSize", &x.rcvBufSize)
 	m.Load("rcvBufUsed", &x.rcvBufUsed)
-	m.Load("id", &x.id)
+	m.Load("rcvAutoParams", &x.rcvAutoParams)
+	m.Load("ownedByUser", &x.ownedByUser)
 	m.Load("isRegistered", &x.isRegistered)
+	m.Load("ttl", &x.ttl)
 	m.Load("v6only", &x.v6only)
 	m.Load("isConnectNotified", &x.isConnectNotified)
 	m.Load("broadcast", &x.broadcast)
+	m.Load("boundBindToDevice", &x.boundBindToDevice)
+	m.Load("boundPortFlags", &x.boundPortFlags)
 	m.Load("workerRunning", &x.workerRunning)
 	m.Load("workerCleanup", &x.workerCleanup)
 	m.Load("sendTSOk", &x.sendTSOk)
@@ -94,6 +182,7 @@ func (x *endpoint) load(m state.Map) {
 	m.Load("sackPermitted", &x.sackPermitted)
 	m.Load("sack", &x.sack)
 	m.Load("reusePort", &x.reusePort)
+	m.Load("bindToDevice", &x.bindToDevice)
 	m.Load("delay", &x.delay)
 	m.Load("cork", &x.cork)
 	m.Load("scoreboard", &x.scoreboard)
@@ -101,6 +190,9 @@ func (x *endpoint) load(m state.Map) {
 	m.Load("slowAck", &x.slowAck)
 	m.LoadWait("segmentQueue", &x.segmentQueue)
 	m.Load("synRcvdCount", &x.synRcvdCount)
+	m.Load("userMSS", &x.userMSS)
+	m.Load("maxSynRetries", &x.maxSynRetries)
+	m.Load("windowClamp", &x.windowClamp)
 	m.Load("sndBufSize", &x.sndBufSize)
 	m.Load("sndBufUsed", &x.sndBufUsed)
 	m.Load("sndClosed", &x.sndClosed)
@@ -110,14 +202,20 @@ func (x *endpoint) load(m state.Map) {
 	m.Load("packetTooBigCount", &x.packetTooBigCount)
 	m.Load("sndMTU", &x.sndMTU)
 	m.Load("keepalive", &x.keepalive)
+	m.Load("userTimeout", &x.userTimeout)
+	m.Load("deferAccept", &x.deferAccept)
 	m.LoadWait("rcv", &x.rcv)
 	m.LoadWait("snd", &x.snd)
-	m.Load("bindAddress", &x.bindAddress)
 	m.Load("connectingAddress", &x.connectingAddress)
+	m.Load("amss", &x.amss)
+	m.Load("sendTOS", &x.sendTOS)
 	m.Load("gso", &x.gso)
+	m.Load("tcpLingerTimeout", &x.tcpLingerTimeout)
+	m.Load("closed", &x.closed)
+	m.Load("txHash", &x.txHash)
+	m.Load("owner", &x.owner)
 	m.LoadValue("lastError", new(string), func(y interface{}) { x.loadLastError(y.(string)) })
 	m.LoadValue("state", new(EndpointState), func(y interface{}) { x.loadState(y.(EndpointState)) })
-	m.LoadValue("hardError", new(string), func(y interface{}) { x.loadHardError(y.(string)) })
 	m.LoadValue("acceptedChan", new([]*endpoint), func(y interface{}) { x.loadAcceptedChan(y.([]*endpoint)) })
 	m.AfterLoad(x.afterLoad)
 }
@@ -144,9 +242,12 @@ func (x *keepalive) load(m state.Map) {
 func (x *receiver) beforeSave() {}
 func (x *receiver) save(m state.Map) {
 	x.beforeSave()
+	var lastRcvdAckTime unixTime = x.saveLastRcvdAckTime()
+	m.SaveValue("lastRcvdAckTime", lastRcvdAckTime)
 	m.Save("ep", &x.ep)
 	m.Save("rcvNxt", &x.rcvNxt)
 	m.Save("rcvAcc", &x.rcvAcc)
+	m.Save("rcvWnd", &x.rcvWnd)
 	m.Save("rcvWndScale", &x.rcvWndScale)
 	m.Save("closed", &x.closed)
 	m.Save("pendingRcvdSegments", &x.pendingRcvdSegments)
@@ -159,11 +260,13 @@ func (x *receiver) load(m state.Map) {
 	m.Load("ep", &x.ep)
 	m.Load("rcvNxt", &x.rcvNxt)
 	m.Load("rcvAcc", &x.rcvAcc)
+	m.Load("rcvWnd", &x.rcvWnd)
 	m.Load("rcvWndScale", &x.rcvWndScale)
 	m.Load("closed", &x.closed)
 	m.Load("pendingRcvdSegments", &x.pendingRcvdSegments)
 	m.Load("pendingBufUsed", &x.pendingBufUsed)
 	m.Load("pendingBufSize", &x.pendingBufSize)
+	m.LoadValue("lastRcvdAckTime", new(unixTime), func(y interface{}) { x.loadLastRcvdAckTime(y.(unixTime)) })
 }
 
 func (x *renoState) beforeSave() {}
@@ -212,6 +315,7 @@ func (x *segment) save(m state.Map) {
 	m.Save("csumValid", &x.csumValid)
 	m.Save("parsedOptions", &x.parsedOptions)
 	m.Save("hasNewSACKInfo", &x.hasNewSACKInfo)
+	m.Save("xmitCount", &x.xmitCount)
 }
 
 func (x *segment) afterLoad() {}
@@ -227,6 +331,7 @@ func (x *segment) load(m state.Map) {
 	m.Load("csumValid", &x.csumValid)
 	m.Load("parsedOptions", &x.parsedOptions)
 	m.Load("hasNewSACKInfo", &x.hasNewSACKInfo)
+	m.Load("xmitCount", &x.xmitCount)
 	m.LoadValue("data", new(buffer.VectorisedView), func(y interface{}) { x.loadData(y.(buffer.VectorisedView)) })
 	m.LoadValue("options", new([]byte), func(y interface{}) { x.loadOptions(y.([]byte)) })
 	m.LoadValue("rcvdTime", new(unixTime), func(y interface{}) { x.loadRcvdTime(y.(unixTime)) })
@@ -255,6 +360,8 @@ func (x *sender) save(m state.Map) {
 	m.SaveValue("lastSendTime", lastSendTime)
 	var rttMeasureTime unixTime = x.saveRttMeasureTime()
 	m.SaveValue("rttMeasureTime", rttMeasureTime)
+	var firstRetransmittedSegXmitTime unixTime = x.saveFirstRetransmittedSegXmitTime()
+	m.SaveValue("firstRetransmittedSegXmitTime", firstRetransmittedSegXmitTime)
 	m.Save("ep", &x.ep)
 	m.Save("dupAckCount", &x.dupAckCount)
 	m.Save("fr", &x.fr)
@@ -265,18 +372,20 @@ func (x *sender) save(m state.Map) {
 	m.Save("sndWnd", &x.sndWnd)
 	m.Save("sndUna", &x.sndUna)
 	m.Save("sndNxt", &x.sndNxt)
-	m.Save("sndNxtList", &x.sndNxtList)
 	m.Save("rttMeasureSeqNum", &x.rttMeasureSeqNum)
 	m.Save("closed", &x.closed)
 	m.Save("writeNext", &x.writeNext)
 	m.Save("writeList", &x.writeList)
 	m.Save("rtt", &x.rtt)
 	m.Save("rto", &x.rto)
-	m.Save("srttInited", &x.srttInited)
+	m.Save("minRTO", &x.minRTO)
+	m.Save("maxRTO", &x.maxRTO)
+	m.Save("maxRetries", &x.maxRetries)
 	m.Save("maxPayloadSize", &x.maxPayloadSize)
 	m.Save("gso", &x.gso)
 	m.Save("sndWndScale", &x.sndWndScale)
 	m.Save("maxSentAck", &x.maxSentAck)
+	m.Save("state", &x.state)
 	m.Save("cc", &x.cc)
 }
 
@@ -291,21 +400,24 @@ func (x *sender) load(m state.Map) {
 	m.Load("sndWnd", &x.sndWnd)
 	m.Load("sndUna", &x.sndUna)
 	m.Load("sndNxt", &x.sndNxt)
-	m.Load("sndNxtList", &x.sndNxtList)
 	m.Load("rttMeasureSeqNum", &x.rttMeasureSeqNum)
 	m.Load("closed", &x.closed)
 	m.Load("writeNext", &x.writeNext)
 	m.Load("writeList", &x.writeList)
 	m.Load("rtt", &x.rtt)
 	m.Load("rto", &x.rto)
-	m.Load("srttInited", &x.srttInited)
+	m.Load("minRTO", &x.minRTO)
+	m.Load("maxRTO", &x.maxRTO)
+	m.Load("maxRetries", &x.maxRetries)
 	m.Load("maxPayloadSize", &x.maxPayloadSize)
 	m.Load("gso", &x.gso)
 	m.Load("sndWndScale", &x.sndWndScale)
 	m.Load("maxSentAck", &x.maxSentAck)
+	m.Load("state", &x.state)
 	m.Load("cc", &x.cc)
 	m.LoadValue("lastSendTime", new(unixTime), func(y interface{}) { x.loadLastSendTime(y.(unixTime)) })
 	m.LoadValue("rttMeasureTime", new(unixTime), func(y interface{}) { x.loadRttMeasureTime(y.(unixTime)) })
+	m.LoadValue("firstRetransmittedSegXmitTime", new(unixTime), func(y interface{}) { x.loadFirstRetransmittedSegXmitTime(y.(unixTime)) })
 	m.AfterLoad(x.afterLoad)
 }
 
@@ -314,12 +426,14 @@ func (x *rtt) save(m state.Map) {
 	x.beforeSave()
 	m.Save("srtt", &x.srtt)
 	m.Save("rttvar", &x.rttvar)
+	m.Save("srttInited", &x.srttInited)
 }
 
 func (x *rtt) afterLoad() {}
 func (x *rtt) load(m state.Map) {
 	m.Load("srtt", &x.srtt)
 	m.Load("rttvar", &x.rttvar)
+	m.Load("srttInited", &x.srttInited)
 }
 
 func (x *fastRecovery) beforeSave() {}
@@ -356,6 +470,32 @@ func (x *unixTime) load(m state.Map) {
 	m.Load("nano", &x.nano)
 }
 
+func (x *endpointList) beforeSave() {}
+func (x *endpointList) save(m state.Map) {
+	x.beforeSave()
+	m.Save("head", &x.head)
+	m.Save("tail", &x.tail)
+}
+
+func (x *endpointList) afterLoad() {}
+func (x *endpointList) load(m state.Map) {
+	m.Load("head", &x.head)
+	m.Load("tail", &x.tail)
+}
+
+func (x *endpointEntry) beforeSave() {}
+func (x *endpointEntry) save(m state.Map) {
+	x.beforeSave()
+	m.Save("next", &x.next)
+	m.Save("prev", &x.prev)
+}
+
+func (x *endpointEntry) afterLoad() {}
+func (x *endpointEntry) load(m state.Map) {
+	m.Load("next", &x.next)
+	m.Load("prev", &x.prev)
+}
+
 func (x *segmentList) beforeSave() {}
 func (x *segmentList) save(m state.Map) {
 	x.beforeSave()
@@ -383,18 +523,23 @@ func (x *segmentEntry) load(m state.Map) {
 }
 
 func init() {
-	state.Register("tcp.SACKInfo", (*SACKInfo)(nil), state.Fns{Save: (*SACKInfo).save, Load: (*SACKInfo).load})
-	state.Register("tcp.endpoint", (*endpoint)(nil), state.Fns{Save: (*endpoint).save, Load: (*endpoint).load})
-	state.Register("tcp.keepalive", (*keepalive)(nil), state.Fns{Save: (*keepalive).save, Load: (*keepalive).load})
-	state.Register("tcp.receiver", (*receiver)(nil), state.Fns{Save: (*receiver).save, Load: (*receiver).load})
-	state.Register("tcp.renoState", (*renoState)(nil), state.Fns{Save: (*renoState).save, Load: (*renoState).load})
-	state.Register("tcp.SACKScoreboard", (*SACKScoreboard)(nil), state.Fns{Save: (*SACKScoreboard).save, Load: (*SACKScoreboard).load})
-	state.Register("tcp.segment", (*segment)(nil), state.Fns{Save: (*segment).save, Load: (*segment).load})
-	state.Register("tcp.segmentQueue", (*segmentQueue)(nil), state.Fns{Save: (*segmentQueue).save, Load: (*segmentQueue).load})
-	state.Register("tcp.sender", (*sender)(nil), state.Fns{Save: (*sender).save, Load: (*sender).load})
-	state.Register("tcp.rtt", (*rtt)(nil), state.Fns{Save: (*rtt).save, Load: (*rtt).load})
-	state.Register("tcp.fastRecovery", (*fastRecovery)(nil), state.Fns{Save: (*fastRecovery).save, Load: (*fastRecovery).load})
-	state.Register("tcp.unixTime", (*unixTime)(nil), state.Fns{Save: (*unixTime).save, Load: (*unixTime).load})
-	state.Register("tcp.segmentList", (*segmentList)(nil), state.Fns{Save: (*segmentList).save, Load: (*segmentList).load})
-	state.Register("tcp.segmentEntry", (*segmentEntry)(nil), state.Fns{Save: (*segmentEntry).save, Load: (*segmentEntry).load})
+	state.Register("pkg/tcpip/transport/tcp.cubicState", (*cubicState)(nil), state.Fns{Save: (*cubicState).save, Load: (*cubicState).load})
+	state.Register("pkg/tcpip/transport/tcp.SACKInfo", (*SACKInfo)(nil), state.Fns{Save: (*SACKInfo).save, Load: (*SACKInfo).load})
+	state.Register("pkg/tcpip/transport/tcp.rcvBufAutoTuneParams", (*rcvBufAutoTuneParams)(nil), state.Fns{Save: (*rcvBufAutoTuneParams).save, Load: (*rcvBufAutoTuneParams).load})
+	state.Register("pkg/tcpip/transport/tcp.EndpointInfo", (*EndpointInfo)(nil), state.Fns{Save: (*EndpointInfo).save, Load: (*EndpointInfo).load})
+	state.Register("pkg/tcpip/transport/tcp.endpoint", (*endpoint)(nil), state.Fns{Save: (*endpoint).save, Load: (*endpoint).load})
+	state.Register("pkg/tcpip/transport/tcp.keepalive", (*keepalive)(nil), state.Fns{Save: (*keepalive).save, Load: (*keepalive).load})
+	state.Register("pkg/tcpip/transport/tcp.receiver", (*receiver)(nil), state.Fns{Save: (*receiver).save, Load: (*receiver).load})
+	state.Register("pkg/tcpip/transport/tcp.renoState", (*renoState)(nil), state.Fns{Save: (*renoState).save, Load: (*renoState).load})
+	state.Register("pkg/tcpip/transport/tcp.SACKScoreboard", (*SACKScoreboard)(nil), state.Fns{Save: (*SACKScoreboard).save, Load: (*SACKScoreboard).load})
+	state.Register("pkg/tcpip/transport/tcp.segment", (*segment)(nil), state.Fns{Save: (*segment).save, Load: (*segment).load})
+	state.Register("pkg/tcpip/transport/tcp.segmentQueue", (*segmentQueue)(nil), state.Fns{Save: (*segmentQueue).save, Load: (*segmentQueue).load})
+	state.Register("pkg/tcpip/transport/tcp.sender", (*sender)(nil), state.Fns{Save: (*sender).save, Load: (*sender).load})
+	state.Register("pkg/tcpip/transport/tcp.rtt", (*rtt)(nil), state.Fns{Save: (*rtt).save, Load: (*rtt).load})
+	state.Register("pkg/tcpip/transport/tcp.fastRecovery", (*fastRecovery)(nil), state.Fns{Save: (*fastRecovery).save, Load: (*fastRecovery).load})
+	state.Register("pkg/tcpip/transport/tcp.unixTime", (*unixTime)(nil), state.Fns{Save: (*unixTime).save, Load: (*unixTime).load})
+	state.Register("pkg/tcpip/transport/tcp.endpointList", (*endpointList)(nil), state.Fns{Save: (*endpointList).save, Load: (*endpointList).load})
+	state.Register("pkg/tcpip/transport/tcp.endpointEntry", (*endpointEntry)(nil), state.Fns{Save: (*endpointEntry).save, Load: (*endpointEntry).load})
+	state.Register("pkg/tcpip/transport/tcp.segmentList", (*segmentList)(nil), state.Fns{Save: (*segmentList).save, Load: (*segmentList).load})
+	state.Register("pkg/tcpip/transport/tcp.segmentEntry", (*segmentEntry)(nil), state.Fns{Save: (*segmentEntry).save, Load: (*segmentEntry).load})
 }

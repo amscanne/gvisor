@@ -19,10 +19,10 @@ package time
 import (
 	"fmt"
 	"math"
-	"sync"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/syserror"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
@@ -142,6 +142,11 @@ func (t Time) Timeval() linux.Timeval {
 	return linux.NsecToTimeval(t.Nanoseconds())
 }
 
+// StatxTimestamp converts Time to a Linux statx_timestamp.
+func (t Time) StatxTimestamp() linux.StatxTimestamp {
+	return linux.NsecToStatxTimestamp(t.Nanoseconds())
+}
+
 // Add adds the duration of d to t.
 func (t Time) Add(d time.Duration) Time {
 	if t.ns > 0 && d.Nanoseconds() > math.MaxInt64-int64(t.ns) {
@@ -240,7 +245,7 @@ type Clock interface {
 type WallRateClock struct{}
 
 // WallTimeUntil implements Clock.WallTimeUntil.
-func (WallRateClock) WallTimeUntil(t, now Time) time.Duration {
+func (*WallRateClock) WallTimeUntil(t, now Time) time.Duration {
 	return t.Sub(now)
 }
 
@@ -249,16 +254,16 @@ func (WallRateClock) WallTimeUntil(t, now Time) time.Duration {
 type NoClockEvents struct{}
 
 // Readiness implements waiter.Waitable.Readiness.
-func (NoClockEvents) Readiness(mask waiter.EventMask) waiter.EventMask {
+func (*NoClockEvents) Readiness(mask waiter.EventMask) waiter.EventMask {
 	return 0
 }
 
 // EventRegister implements waiter.Waitable.EventRegister.
-func (NoClockEvents) EventRegister(e *waiter.Entry, mask waiter.EventMask) {
+func (*NoClockEvents) EventRegister(e *waiter.Entry, mask waiter.EventMask) {
 }
 
 // EventUnregister implements waiter.Waitable.EventUnregister.
-func (NoClockEvents) EventUnregister(e *waiter.Entry) {
+func (*NoClockEvents) EventUnregister(e *waiter.Entry) {
 }
 
 // ClockEventsQueue implements waiter.Waitable by wrapping waiter.Queue and
@@ -268,20 +273,23 @@ type ClockEventsQueue struct {
 }
 
 // Readiness implements waiter.Waitable.Readiness.
-func (ClockEventsQueue) Readiness(mask waiter.EventMask) waiter.EventMask {
+func (*ClockEventsQueue) Readiness(mask waiter.EventMask) waiter.EventMask {
 	return 0
 }
 
 // A TimerListener receives expirations from a Timer.
 type TimerListener interface {
 	// Notify is called when its associated Timer expires. exp is the number of
-	// expirations.
+	// expirations. setting is the next timer Setting.
 	//
 	// Notify is called with the associated Timer's mutex locked, so Notify
 	// must not take any locks that precede Timer.mu in lock order.
 	//
+	// If Notify returns true, the timer will use the returned setting
+	// rather than the passed one.
+	//
 	// Preconditions: exp > 0.
-	Notify(exp uint64)
+	Notify(exp uint64, setting Setting) (newSetting Setting, update bool)
 
 	// Destroy is called when the timer is destroyed.
 	Destroy()
@@ -528,7 +536,9 @@ func (t *Timer) Tick() {
 	s, exp := t.setting.At(now)
 	t.setting = s
 	if exp > 0 {
-		t.listener.Notify(exp)
+		if newS, ok := t.listener.Notify(exp, t.setting); ok {
+			t.setting = newS
+		}
 	}
 	t.resetKickerLocked(now)
 }
@@ -583,7 +593,9 @@ func (t *Timer) Get() (Time, Setting) {
 	s, exp := t.setting.At(now)
 	t.setting = s
 	if exp > 0 {
-		t.listener.Notify(exp)
+		if newS, ok := t.listener.Notify(exp, t.setting); ok {
+			t.setting = newS
+		}
 	}
 	t.resetKickerLocked(now)
 	return now, s
@@ -615,7 +627,9 @@ func (t *Timer) SwapAnd(s Setting, f func()) (Time, Setting) {
 	}
 	oldS, oldExp := t.setting.At(now)
 	if oldExp > 0 {
-		t.listener.Notify(oldExp)
+		t.listener.Notify(oldExp, oldS)
+		// N.B. The returned Setting doesn't matter because we're about
+		// to overwrite.
 	}
 	if f != nil {
 		f()
@@ -623,7 +637,9 @@ func (t *Timer) SwapAnd(s Setting, f func()) (Time, Setting) {
 	newS, newExp := s.At(now)
 	t.setting = newS
 	if newExp > 0 {
-		t.listener.Notify(newExp)
+		if newS, ok := t.listener.Notify(newExp, t.setting); ok {
+			t.setting = newS
+		}
 	}
 	t.resetKickerLocked(now)
 	return now, oldS
@@ -678,11 +694,13 @@ func NewChannelNotifier() (TimerListener, <-chan struct{}) {
 }
 
 // Notify implements ktime.TimerListener.Notify.
-func (c *ChannelNotifier) Notify(uint64) {
+func (c *ChannelNotifier) Notify(uint64, Setting) (Setting, bool) {
 	select {
 	case c.tchan <- struct{}{}:
 	default:
 	}
+
+	return Setting{}, false
 }
 
 // Destroy implements ktime.TimerListener.Destroy and will close the channel.

@@ -24,7 +24,9 @@ func (x *Lock) load(m state.Map) {
 func (x *Locks) beforeSave() {}
 func (x *Locks) save(m state.Map) {
 	x.beforeSave()
-	if !state.IsZeroValue(x.blockedQueue) { m.Failf("blockedQueue is %v, expected zero", x.blockedQueue) }
+	if !state.IsZeroValue(&x.blockedQueue) {
+		m.Failf("blockedQueue is %#v, expected zero", &x.blockedQueue)
+	}
 	m.Save("locks", &x.locks)
 }
 
@@ -97,10 +99,10 @@ func (x *LockSegmentDataSlices) load(m state.Map) {
 }
 
 func init() {
-	state.Register("lock.Lock", (*Lock)(nil), state.Fns{Save: (*Lock).save, Load: (*Lock).load})
-	state.Register("lock.Locks", (*Locks)(nil), state.Fns{Save: (*Locks).save, Load: (*Locks).load})
-	state.Register("lock.LockRange", (*LockRange)(nil), state.Fns{Save: (*LockRange).save, Load: (*LockRange).load})
-	state.Register("lock.LockSet", (*LockSet)(nil), state.Fns{Save: (*LockSet).save, Load: (*LockSet).load})
-	state.Register("lock.Locknode", (*Locknode)(nil), state.Fns{Save: (*Locknode).save, Load: (*Locknode).load})
-	state.Register("lock.LockSegmentDataSlices", (*LockSegmentDataSlices)(nil), state.Fns{Save: (*LockSegmentDataSlices).save, Load: (*LockSegmentDataSlices).load})
+	state.Register("pkg/sentry/fs/lock.Lock", (*Lock)(nil), state.Fns{Save: (*Lock).save, Load: (*Lock).load})
+	state.Register("pkg/sentry/fs/lock.Locks", (*Locks)(nil), state.Fns{Save: (*Locks).save, Load: (*Locks).load})
+	state.Register("pkg/sentry/fs/lock.LockRange", (*LockRange)(nil), state.Fns{Save: (*LockRange).save, Load: (*LockRange).load})
+	state.Register("pkg/sentry/fs/lock.LockSet", (*LockSet)(nil), state.Fns{Save: (*LockSet).save, Load: (*LockSet).load})
+	state.Register("pkg/sentry/fs/lock.Locknode", (*Locknode)(nil), state.Fns{Save: (*Locknode).save, Load: (*Locknode).load})
+	state.Register("pkg/sentry/fs/lock.LockSegmentDataSlices", (*LockSegmentDataSlices)(nil), state.Fns{Save: (*LockSegmentDataSlices).save, Load: (*LockSegmentDataSlices).load})
 }

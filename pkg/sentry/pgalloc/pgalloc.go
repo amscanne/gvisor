@@ -25,19 +25,19 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/log"
-	"gvisor.dev/gvisor/pkg/sentry/context"
+	"gvisor.dev/gvisor/pkg/safemem"
 	"gvisor.dev/gvisor/pkg/sentry/hostmm"
 	"gvisor.dev/gvisor/pkg/sentry/platform"
-	"gvisor.dev/gvisor/pkg/sentry/safemem"
 	"gvisor.dev/gvisor/pkg/sentry/usage"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 )
 
 // MemoryFile is a platform.File whose pages may be allocated to arbitrary
@@ -180,6 +180,11 @@ type MemoryFileOpts struct {
 	// notifications to determine when eviction is necessary. This option has
 	// no effect unless DelayedEviction is DelayedEvictionEnabled.
 	UseHostMemcgPressure bool
+
+	// If ManualZeroing is true, MemoryFile must not assume that new pages
+	// obtained from the host are zero-filled, such that MemoryFile must manually
+	// zero newly-allocated pages.
+	ManualZeroing bool
 }
 
 // DelayedEvictionType is the type of MemoryFileOpts.DelayedEviction.
@@ -285,7 +290,10 @@ func NewMemoryFile(file *os.File, opts MemoryFileOpts) (*MemoryFile, error) {
 	switch opts.DelayedEviction {
 	case DelayedEvictionDefault:
 		opts.DelayedEviction = DelayedEvictionEnabled
-	case DelayedEvictionDisabled, DelayedEvictionEnabled, DelayedEvictionManual:
+	case DelayedEvictionDisabled, DelayedEvictionManual:
+		opts.UseHostMemcgPressure = false
+	case DelayedEvictionEnabled:
+		// ok
 	default:
 		return nil, fmt.Errorf("invalid MemoryFileOpts.DelayedEviction: %v", opts.DelayedEviction)
 	}
@@ -429,6 +437,15 @@ func (f *MemoryFile) Allocate(length uint64, kind usage.MemoryKind) (platform.Fi
 
 	// Mark selected pages as in use.
 	fr := platform.FileRange{start, end}
+	if f.opts.ManualZeroing {
+		if err := f.forEachMappingSlice(fr, func(bs []byte) {
+			for i := range bs {
+				bs[i] = 0
+			}
+		}); err != nil {
+			return platform.FileRange{}, err
+		}
+	}
 	if !f.usage.Add(fr, usageInfo{
 		kind: kind,
 		refs: 1,
@@ -775,6 +792,14 @@ func (f *MemoryFile) MarkAllUnevictable(user EvictableMemoryUser) {
 	if !info.evicting {
 		delete(f.evictable, user)
 	}
+}
+
+// ShouldCacheEvictable returns true if f is meaningfully delaying evictions of
+// evictable memory, such that it may be advantageous to cache data in
+// evictable memory. The value returned by ShouldCacheEvictable may change
+// between calls.
+func (f *MemoryFile) ShouldCacheEvictable() bool {
+	return f.opts.DelayedEviction == DelayedEvictionManual || f.opts.UseHostMemcgPressure
 }
 
 // UpdateUsage ensures that the memory usage statistics in

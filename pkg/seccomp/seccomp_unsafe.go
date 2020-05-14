@@ -21,13 +21,6 @@ import (
 	"gvisor.dev/gvisor/pkg/abi/linux"
 )
 
-// sockFprog is sock_fprog taken from <linux/filter.h>.
-type sockFprog struct {
-	Len    uint16
-	pad    [6]byte
-	Filter *linux.BPFInstruction
-}
-
 // SetFilter installs the given BPF program.
 //
 // This is safe to call from an afterFork context.
@@ -35,11 +28,11 @@ type sockFprog struct {
 //go:nosplit
 func SetFilter(instrs []linux.BPFInstruction) syscall.Errno {
 	// PR_SET_NO_NEW_PRIVS is required in order to enable seccomp. See seccomp(2) for details.
-	if _, _, errno := syscall.RawSyscall(syscall.SYS_PRCTL, linux.PR_SET_NO_NEW_PRIVS, 1, 0); errno != 0 {
+	if _, _, errno := syscall.RawSyscall6(syscall.SYS_PRCTL, linux.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0, 0); errno != 0 {
 		return errno
 	}
 
-	sockProg := sockFprog{
+	sockProg := linux.SockFprog{
 		Len:    uint16(len(instrs)),
 		Filter: (*linux.BPFInstruction)(unsafe.Pointer(&instrs[0])),
 	}

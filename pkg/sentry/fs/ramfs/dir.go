@@ -12,18 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package ramfs provides the fundamentals for a simple in-memory filesystem.
 package ramfs
 
 import (
 	"fmt"
-	"sync"
 	"syscall"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
-	"gvisor.dev/gvisor/pkg/sentry/context"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/fs/fsutil"
 	"gvisor.dev/gvisor/pkg/sentry/socket/unix/transport"
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/syserror"
 )
 
@@ -52,7 +53,6 @@ type Dir struct {
 	fsutil.InodeGenericChecker `state:"nosave"`
 	fsutil.InodeIsDirAllocate  `state:"nosave"`
 	fsutil.InodeIsDirTruncate  `state:"nosave"`
-	fsutil.InodeNoopRelease    `state:"nosave"`
 	fsutil.InodeNoopWriteOut   `state:"nosave"`
 	fsutil.InodeNotMappable    `state:"nosave"`
 	fsutil.InodeNotSocket      `state:"nosave"`
@@ -83,7 +83,8 @@ type Dir struct {
 
 var _ fs.InodeOperations = (*Dir)(nil)
 
-// NewDir returns a new Dir with the given contents and attributes.
+// NewDir returns a new Dir with the given contents and attributes. A reference
+// on each fs.Inode in the `contents` map will be donated to this Dir.
 func NewDir(ctx context.Context, contents map[string]*fs.Inode, owner fs.FileOwner, perms fs.FilePermissions) *Dir {
 	d := &Dir{
 		InodeSimpleAttributes: fsutil.NewInodeSimpleAttributes(ctx, owner, perms, linux.RAMFS_MAGIC),
@@ -137,7 +138,7 @@ func (d *Dir) addChildLocked(ctx context.Context, name string, inode *fs.Inode) 
 	d.NotifyModificationAndStatusChange(ctx)
 }
 
-// AddChild adds a child to this dir.
+// AddChild adds a child to this dir, inheriting its reference.
 func (d *Dir) AddChild(ctx context.Context, name string, inode *fs.Inode) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -171,7 +172,9 @@ func (d *Dir) Children() ([]string, map[string]fs.DentAttr) {
 	return namesCopy, entriesCopy
 }
 
-// removeChildLocked attempts to remove an entry from this directory.
+// removeChildLocked attempts to remove an entry from this directory. It
+// returns the removed fs.Inode along with its reference, which callers are
+// responsible for decrementing.
 func (d *Dir) removeChildLocked(ctx context.Context, name string) (*fs.Inode, error) {
 	inode, ok := d.children[name]
 	if !ok {
@@ -252,7 +255,8 @@ func (d *Dir) RemoveDirectory(ctx context.Context, _ *fs.Inode, name string) err
 	return nil
 }
 
-// Lookup loads an inode at p into a Dirent.
+// Lookup loads an inode at p into a Dirent. It returns the fs.Dirent along
+// with a reference.
 func (d *Dir) Lookup(ctx context.Context, _ *fs.Inode, p string) (*fs.Dirent, error) {
 	if len(p) > linux.NAME_MAX {
 		return nil, syserror.ENAMETOOLONG
@@ -269,7 +273,7 @@ func (d *Dir) Lookup(ctx context.Context, _ *fs.Inode, p string) (*fs.Dirent, er
 	// Take a reference on the inode before returning it.  This reference
 	// is owned by the dirent we are about to create.
 	inode.IncRef()
-	return fs.NewDirent(inode, p), nil
+	return fs.NewDirent(ctx, inode, p), nil
 }
 
 // walkLocked must be called with d.mu held.
@@ -321,7 +325,7 @@ func (d *Dir) Create(ctx context.Context, dir *fs.Inode, name string, flags fs.F
 	inode.IncRef()
 
 	// Create the Dirent and corresponding file.
-	created := fs.NewDirent(inode, name)
+	created := fs.NewDirent(ctx, inode, name)
 	defer created.DecRef()
 	return created.Inode.GetFile(ctx, created, flags)
 }
@@ -382,7 +386,7 @@ func (d *Dir) Bind(ctx context.Context, dir *fs.Inode, name string, ep transport
 	}
 	// Take another ref on inode which will be donated to the new dirent.
 	inode.IncRef()
-	return fs.NewDirent(inode, name), nil
+	return fs.NewDirent(ctx, inode, name), nil
 }
 
 // CreateFifo implements fs.InodeOperations.CreateFifo.
@@ -405,6 +409,16 @@ func (d *Dir) GetFile(ctx context.Context, dirent *fs.Dirent, flags fs.FileFlags
 // Rename implements fs.InodeOperations.Rename.
 func (*Dir) Rename(ctx context.Context, inode *fs.Inode, oldParent *fs.Inode, oldName string, newParent *fs.Inode, newName string, replacement bool) error {
 	return Rename(ctx, oldParent.InodeOperations, oldName, newParent.InodeOperations, newName, replacement)
+}
+
+// Release implements fs.InodeOperation.Release.
+func (d *Dir) Release(_ context.Context) {
+	// Drop references on all children.
+	d.mu.Lock()
+	for _, i := range d.children {
+		i.DecRef()
+	}
+	d.mu.Unlock()
 }
 
 // dirFileOperations implements fs.FileOperations for a ramfs directory.
@@ -430,7 +444,7 @@ func (dfo *dirFileOperations) Seek(ctx context.Context, file *fs.File, whence fs
 }
 
 // IterateDir implements DirIterator.IterateDir.
-func (dfo *dirFileOperations) IterateDir(ctx context.Context, dirCtx *fs.DirCtx, offset int) (int, error) {
+func (dfo *dirFileOperations) IterateDir(ctx context.Context, d *fs.Dirent, dirCtx *fs.DirCtx, offset int) (int, error) {
 	dfo.dir.mu.Lock()
 	defer dfo.dir.mu.Unlock()
 

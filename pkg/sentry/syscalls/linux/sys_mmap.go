@@ -20,11 +20,10 @@ import (
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
-	"gvisor.dev/gvisor/pkg/sentry/kernel/kdefs"
 	"gvisor.dev/gvisor/pkg/sentry/memmap"
 	"gvisor.dev/gvisor/pkg/sentry/mm"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 )
 
 // Brk implements linux syscall brk(2).
@@ -36,11 +35,13 @@ func Brk(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallCo
 	return uintptr(addr), nil, nil
 }
 
+// LINT.IfChange
+
 // Mmap implements linux syscall mmap(2).
 func Mmap(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	prot := args[2].Int()
 	flags := args[3].Int()
-	fd := kdefs.FD(args[4].Int())
+	fd := args[4].Int()
 	fixed := flags&linux.MAP_FIXED != 0
 	private := flags&linux.MAP_PRIVATE != 0
 	shared := flags&linux.MAP_SHARED != 0
@@ -80,7 +81,7 @@ func Mmap(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallC
 
 	if !anon {
 		// Convert the passed FD to a file reference.
-		file := t.FDMap().GetFile(fd)
+		file := t.GetFile(fd)
 		if file == nil {
 			return 0, nil, syserror.EBADF
 		}
@@ -104,6 +105,8 @@ func Mmap(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallC
 	rv, err := t.MemoryManager().MMap(t, opts)
 	return uintptr(rv), nil, err
 }
+
+// LINT.ThenChange(vfs2/mmap.go)
 
 // Munmap implements linux syscall munmap(2).
 func Munmap(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
@@ -180,6 +183,10 @@ func Madvise(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysca
 	switch adv {
 	case linux.MADV_DONTNEED:
 		return 0, nil, t.MemoryManager().Decommit(addr, length)
+	case linux.MADV_DOFORK:
+		return 0, nil, t.MemoryManager().SetDontFork(addr, length, false)
+	case linux.MADV_DONTFORK:
+		return 0, nil, t.MemoryManager().SetDontFork(addr, length, true)
 	case linux.MADV_HUGEPAGE, linux.MADV_NOHUGEPAGE:
 		fallthrough
 	case linux.MADV_MERGEABLE, linux.MADV_UNMERGEABLE:
@@ -191,7 +198,7 @@ func Madvise(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysca
 	case linux.MADV_NORMAL, linux.MADV_RANDOM, linux.MADV_SEQUENTIAL, linux.MADV_WILLNEED:
 		// Do nothing, we totally ignore the suggestions above.
 		return 0, nil, nil
-	case linux.MADV_REMOVE, linux.MADV_DOFORK, linux.MADV_DONTFORK:
+	case linux.MADV_REMOVE:
 		// These "suggestions" have application-visible side effects, so we
 		// have to indicate that we don't support them.
 		return 0, nil, syserror.ENOSYS

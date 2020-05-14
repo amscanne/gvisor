@@ -21,11 +21,10 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/eventfd"
-	"gvisor.dev/gvisor/pkg/sentry/kernel/kdefs"
 	ktime "gvisor.dev/gvisor/pkg/sentry/kernel/time"
 	"gvisor.dev/gvisor/pkg/sentry/mm"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 )
 
 // I/O commands.
@@ -55,7 +54,7 @@ type ioCallback struct {
 
 	OpCode  uint16
 	ReqPrio int16
-	FD      uint32
+	FD      int32
 
 	Buf    uint64
 	Bytes  uint64
@@ -65,7 +64,7 @@ type ioCallback struct {
 	Flags     uint32
 
 	// eventfd to signal if IOCB_FLAG_RESFD is set in flags.
-	ResFD uint32
+	ResFD int32
 }
 
 // ioEvent describes an I/O result.
@@ -115,14 +114,28 @@ func IoSetup(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysca
 func IoDestroy(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	id := args[0].Uint64()
 
-	// Destroy the given context.
-	if !t.MemoryManager().DestroyAIOContext(t, id) {
+	ctx := t.MemoryManager().DestroyAIOContext(t, id)
+	if ctx == nil {
 		// Does not exist.
 		return 0, nil, syserror.EINVAL
 	}
-	// FIXME(fvoznika): Linux blocks until all AIO to the destroyed context is
-	// done.
-	return 0, nil, nil
+
+	// Drain completed requests amd wait for pending requests until there are no
+	// more.
+	for {
+		ctx.Drain()
+
+		ch := ctx.WaitChannel()
+		if ch == nil {
+			// No more requests, we're done.
+			return 0, nil, nil
+		}
+		// The task cannot be interrupted during the wait. Equivalent to
+		// TASK_UNINTERRUPTIBLE in Linux.
+		t.UninterruptibleSleepStart(true /* deactivate */)
+		<-ch
+		t.UninterruptibleSleepFinish(true /* activate */)
+	}
 }
 
 // IoGetevents implements linux syscall io_getevents(2).
@@ -201,13 +214,13 @@ func IoGetevents(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.S
 func waitForRequest(ctx *mm.AIOContext, t *kernel.Task, haveDeadline bool, deadline ktime.Time) (interface{}, error) {
 	for {
 		if v, ok := ctx.PopRequest(); ok {
-			// Request was readly available. Just return it.
+			// Request was readily available. Just return it.
 			return v, nil
 		}
 
 		// Need to wait for request completion.
-		done, active := ctx.WaitChannel()
-		if !active {
+		done := ctx.WaitChannel()
+		if done == nil {
 			// Context has been destroyed.
 			return nil, syserror.EINVAL
 		}
@@ -249,6 +262,10 @@ func memoryFor(t *kernel.Task, cb *ioCallback) (usermem.IOSequence, error) {
 }
 
 func performCallback(t *kernel.Task, file *fs.File, cbAddr usermem.Addr, cb *ioCallback, ioseq usermem.IOSequence, ctx *mm.AIOContext, eventFile *fs.File) {
+	if ctx.Dead() {
+		ctx.CancelPendingRequest()
+		return
+	}
 	ev := &ioEvent{
 		Data: cb.Data,
 		Obj:  uint64(cbAddr),
@@ -273,7 +290,7 @@ func performCallback(t *kernel.Task, file *fs.File, cbAddr usermem.Addr, cb *ioC
 	// Update the result.
 	if err != nil {
 		err = handleIOError(t, ev.Result != 0 /* partial */, err, nil /* never interrupted */, "aio", file)
-		ev.Result = -int64(t.ExtractErrno(err, 0))
+		ev.Result = -int64(kernel.ExtractErrno(err, 0))
 	}
 
 	file.DecRef()
@@ -292,7 +309,7 @@ func performCallback(t *kernel.Task, file *fs.File, cbAddr usermem.Addr, cb *ioC
 
 // submitCallback processes a single callback.
 func submitCallback(t *kernel.Task, id uint64, cb *ioCallback, cbAddr usermem.Addr) error {
-	file := t.FDMap().GetFile(kdefs.FD(cb.FD))
+	file := t.GetFile(cb.FD)
 	if file == nil {
 		// File not found.
 		return syserror.EBADF
@@ -302,7 +319,7 @@ func submitCallback(t *kernel.Task, id uint64, cb *ioCallback, cbAddr usermem.Ad
 	// Was there an eventFD? Extract it.
 	var eventFile *fs.File
 	if cb.Flags&_IOCB_FLAG_RESFD != 0 {
-		eventFile = t.FDMap().GetFile(kdefs.FD(cb.ResFD))
+		eventFile = t.GetFile(cb.ResFD)
 		if eventFile == nil {
 			// Bad FD.
 			return syserror.EBADF

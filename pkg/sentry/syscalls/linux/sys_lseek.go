@@ -18,17 +18,18 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
-	"gvisor.dev/gvisor/pkg/sentry/kernel/kdefs"
 	"gvisor.dev/gvisor/pkg/syserror"
 )
 
+// LINT.IfChange
+
 // Lseek implements linux syscall lseek(2).
 func Lseek(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
-	fd := kdefs.FD(args[0].Int())
+	fd := args[0].Int()
 	offset := args[1].Int64()
 	whence := args[2].Int()
 
-	file := t.FDMap().GetFile(fd)
+	file := t.GetFile(fd)
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
@@ -53,3 +54,5 @@ func Lseek(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 	}
 	return uintptr(offset), nil, err
 }
+
+// LINT.ThenChange(vfs2/read_write.go)

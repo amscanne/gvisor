@@ -23,6 +23,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"github.com/cenkalti/backoff"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/bits"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 )
@@ -90,7 +92,13 @@ func ValidateSpec(spec *specs.Spec) error {
 		log.Warningf("AppArmor profile %q is being ignored", spec.Process.ApparmorProfile)
 	}
 
-	// TODO(b/72226747): Apply seccomp to application inside sandbox.
+	// PR_SET_NO_NEW_PRIVS is assumed to always be set.
+	// See kernel.Task.updateCredsForExecLocked.
+	if !spec.Process.NoNewPrivileges {
+		log.Warningf("noNewPrivileges ignored. PR_SET_NO_NEW_PRIVS is assumed to always be set.")
+	}
+
+	// TODO(gvisor.dev/issue/510): Apply seccomp to application inside sandbox.
 	if spec.Linux != nil && spec.Linux.Seccomp != nil {
 		log.Warningf("Seccomp spec is being ignored")
 	}
@@ -106,23 +114,18 @@ func ValidateSpec(spec *specs.Spec) error {
 		}
 	}
 
-	// Two annotations are use by containerd to support multi-container pods.
-	//   "io.kubernetes.cri.container-type"
-	//   "io.kubernetes.cri.sandbox-id"
-	containerType, hasContainerType := spec.Annotations[ContainerdContainerTypeAnnotation]
-	_, hasSandboxID := spec.Annotations[ContainerdSandboxIDAnnotation]
-	switch {
-	// Non-containerd use won't set a container type.
-	case !hasContainerType:
-	case containerType == ContainerdContainerTypeSandbox:
-	// When starting a container in an existing sandbox, the sandbox ID
-	// must be set.
-	case containerType == ContainerdContainerTypeContainer:
-		if !hasSandboxID {
-			return fmt.Errorf("spec has container-type of %s, but no sandbox ID set", containerType)
+	// CRI specifies whether a container should start a new sandbox, or run
+	// another container in an existing sandbox.
+	switch SpecContainerType(spec) {
+	case ContainerTypeContainer:
+		// When starting a container in an existing sandbox, the
+		// sandbox ID must be set.
+		if _, ok := SandboxID(spec); !ok {
+			return fmt.Errorf("spec has container-type of container, but no sandbox ID set")
 		}
+	case ContainerTypeUnknown:
+		return fmt.Errorf("unknown container-type")
 	default:
-		return fmt.Errorf("unknown container-type: %s", containerType)
 	}
 
 	return nil
@@ -240,6 +243,15 @@ func AllCapabilities() *specs.LinuxCapabilities {
 	}
 }
 
+// AllCapabilitiesUint64 returns a bitmask containing all capabilities set.
+func AllCapabilitiesUint64() uint64 {
+	var rv uint64
+	for _, cap := range capFromName {
+		rv |= bits.MaskOf64(int(cap))
+	}
+	return rv
+}
+
 var capFromName = map[string]linux.Capability{
 	"CAP_CHOWN":            linux.CAP_CHOWN,
 	"CAP_DAC_OVERRIDE":     linux.CAP_DAC_OVERRIDE,
@@ -299,7 +311,19 @@ func capsFromNames(names []string, skipSet map[linux.Capability]struct{}) (auth.
 
 // Is9PMount returns true if the given mount can be mounted as an external gofer.
 func Is9PMount(m specs.Mount) bool {
-	return m.Type == "bind" && m.Source != "" && IsSupportedDevMount(m)
+	var isBind bool
+	switch m.Type {
+	case "bind":
+		isBind = true
+	default:
+		for _, opt := range m.Options {
+			if opt == "bind" || opt == "rbind" {
+				isBind = true
+				break
+			}
+		}
+	}
+	return isBind && m.Source != "" && IsSupportedDevMount(m)
 }
 
 // IsSupportedDevMount returns true if the mount is a supported /dev mount.
@@ -325,39 +349,6 @@ func IsSupportedDevMount(m specs.Mount) bool {
 		}
 	}
 	return true
-}
-
-const (
-	// ContainerdContainerTypeAnnotation is the OCI annotation set by
-	// containerd to indicate whether the container to create should have
-	// its own sandbox or a container within an existing sandbox.
-	ContainerdContainerTypeAnnotation = "io.kubernetes.cri.container-type"
-	// ContainerdContainerTypeContainer is the container type value
-	// indicating the container should be created in an existing sandbox.
-	ContainerdContainerTypeContainer = "container"
-	// ContainerdContainerTypeSandbox is the container type value
-	// indicating the container should be created in a new sandbox.
-	ContainerdContainerTypeSandbox = "sandbox"
-
-	// ContainerdSandboxIDAnnotation is the OCI annotation set to indicate
-	// which sandbox the container should be created in when the container
-	// is not the first container in the sandbox.
-	ContainerdSandboxIDAnnotation = "io.kubernetes.cri.sandbox-id"
-)
-
-// ShouldCreateSandbox returns true if the spec indicates that a new sandbox
-// should be created for the container. If false, the container should be
-// started in an existing sandbox.
-func ShouldCreateSandbox(spec *specs.Spec) bool {
-	t, ok := spec.Annotations[ContainerdContainerTypeAnnotation]
-	return !ok || t == ContainerdContainerTypeSandbox
-}
-
-// SandboxID returns the ID of the sandbox to join and whether an ID was found
-// in the spec.
-func SandboxID(spec *specs.Spec) (string, bool) {
-	id, ok := spec.Annotations[ContainerdSandboxIDAnnotation]
-	return id, ok
 }
 
 // WaitForReady waits for a process to become ready. The process is ready when
@@ -394,17 +385,19 @@ func WaitForReady(pid int, timeout time.Duration, ready func() (bool, error)) er
 
 // DebugLogFile opens a log file using 'logPattern' as location. If 'logPattern'
 // ends with '/', it's used as a directory with default file name.
-// 'logPattern' can contain variables that are substitued:
+// 'logPattern' can contain variables that are substituted:
 //   - %TIMESTAMP%: is replaced with a timestamp using the following format:
 //			<yyyymmdd-hhmmss.uuuuuu>
 //	 - %COMMAND%: is replaced with 'command'
-func DebugLogFile(logPattern, command string) (*os.File, error) {
+//	 - %TEST%: is replaced with 'test' (omitted by default)
+func DebugLogFile(logPattern, command, test string) (*os.File, error) {
 	if strings.HasSuffix(logPattern, "/") {
 		// Default format: <debug-log>/runsc.log.<yyyymmdd-hhmmss.uuuuuu>.<command>
 		logPattern += "runsc.log.%TIMESTAMP%.%COMMAND%"
 	}
 	logPattern = strings.Replace(logPattern, "%TIMESTAMP%", time.Now().Format("20060102-150405.000000"), -1)
 	logPattern = strings.Replace(logPattern, "%COMMAND%", command, -1)
+	logPattern = strings.Replace(logPattern, "%TEST%", test, -1)
 
 	dir := filepath.Dir(logPattern)
 	if err := os.MkdirAll(dir, 0775); err != nil {
@@ -491,4 +484,70 @@ func (c *Cleanup) Clean() {
 // called after this point.
 func (c *Cleanup) Release() {
 	c.clean = nil
+}
+
+// RetryEintr retries the function until an error different than EINTR is
+// returned.
+func RetryEintr(f func() (uintptr, uintptr, error)) (uintptr, uintptr, error) {
+	for {
+		r1, r2, err := f()
+		if err != syscall.EINTR {
+			return r1, r2, err
+		}
+	}
+}
+
+// GetOOMScoreAdj reads the given process' oom_score_adj
+func GetOOMScoreAdj(pid int) (int, error) {
+	data, err := ioutil.ReadFile(fmt.Sprintf("/proc/%d/oom_score_adj", pid))
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(strings.TrimSpace(string(data)))
+}
+
+// GetParentPid gets the parent process ID of the specified PID.
+func GetParentPid(pid int) (int, error) {
+	data, err := ioutil.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0, err
+	}
+
+	var cpid string
+	var name string
+	var state string
+	var ppid int
+	// Parse after the binary name.
+	_, err = fmt.Sscanf(string(data),
+		"%v %v %v %d",
+		// cpid is ignored.
+		&cpid,
+		// name is ignored.
+		&name,
+		// state is ignored.
+		&state,
+		&ppid)
+
+	if err != nil {
+		return 0, err
+	}
+
+	return ppid, nil
+}
+
+// EnvVar looks for a varible value in the env slice assuming the following
+// format: "NAME=VALUE".
+func EnvVar(env []string, name string) (string, bool) {
+	prefix := name + "="
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			return strings.TrimPrefix(e, prefix), true
+		}
+	}
+	return "", false
+}
+
+// FaqErrorMsg returns an error message pointing to the FAQ.
+func FaqErrorMsg(anchor, msg string) string {
+	return fmt.Sprintf("%s; see https://gvisor.dev/faq#%s for more details", msg, anchor)
 }

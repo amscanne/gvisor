@@ -17,12 +17,12 @@ package usage
 import (
 	"fmt"
 	"os"
-	"sync"
 	"sync/atomic"
 	"syscall"
 
 	"gvisor.dev/gvisor/pkg/bits"
 	"gvisor.dev/gvisor/pkg/memutil"
+	"gvisor.dev/gvisor/pkg/sync"
 )
 
 // MemoryKind represents a type of memory used by the application.
@@ -252,14 +252,23 @@ func (m *MemoryLocked) Copy() (MemoryStats, uint64) {
 	return ms, m.totalLocked()
 }
 
-// MinimumTotalMemoryBytes is the minimum reported total system memory.
-var MinimumTotalMemoryBytes uint64 = 2 << 30 // 2 GB
+// These options control how much total memory the is reported to the application.
+// They may only be set before the application starts executing, and must not
+// be modified.
+var (
+	// MinimumTotalMemoryBytes is the minimum reported total system memory.
+	MinimumTotalMemoryBytes uint64 = 2 << 30 // 2 GB
+
+	// MaximumTotalMemoryBytes is the maximum reported total system memory.
+	// The 0 value indicates no maximum.
+	MaximumTotalMemoryBytes uint64
+)
 
 // TotalMemory returns the "total usable memory" available.
 //
 // This number doesn't really have a true value so it's based on the following
-// inputs and further bounded to be above some minimum guaranteed value (2GB),
-// additionally ensuring that total memory reported is always less than used.
+// inputs and further bounded to be above the MinumumTotalMemoryBytes and below
+// MaximumTotalMemoryBytes.
 //
 // memSize should be the platform.Memory size reported by platform.Memory.TotalSize()
 // used is the total memory reported by MemoryLocked.Total()
@@ -275,10 +284,8 @@ func TotalMemory(memSize, used uint64) uint64 {
 			memSize = uint64(1) << (uint(msb) + 1)
 		}
 	}
+	if MaximumTotalMemoryBytes > 0 && memSize > MaximumTotalMemoryBytes {
+		memSize = MaximumTotalMemoryBytes
+	}
 	return memSize
 }
-
-// IncrementalMappedAccounting controls whether host mapped memory is accounted
-// incrementally during map translation. This may be modified during early
-// initialization, and is read-only afterward.
-var IncrementalMappedAccounting = false

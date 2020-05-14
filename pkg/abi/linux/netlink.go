@@ -41,10 +41,10 @@ const (
 
 // SockAddrNetlink is struct sockaddr_nl, from uapi/linux/netlink.h.
 type SockAddrNetlink struct {
-	Family  uint16
-	Padding uint16
-	PortID  uint32
-	Groups  uint32
+	Family uint16
+	_      uint16
+	PortID uint32
+	Groups uint32
 }
 
 // SockAddrNetlinkSize is the size of SockAddrNetlink.
@@ -122,3 +122,9 @@ const (
 	NETLINK_EXT_ACK          = 11
 	NETLINK_DUMP_STRICT_CHK  = 12
 )
+
+// NetlinkErrorMessage is struct nlmsgerr, from uapi/linux/netlink.h.
+type NetlinkErrorMessage struct {
+	Error  int32
+	Header NetlinkMessageHeader
+}

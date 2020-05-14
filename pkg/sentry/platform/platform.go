@@ -19,11 +19,13 @@ package platform
 
 import (
 	"fmt"
+	"os"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/safemem"
+	"gvisor.dev/gvisor/pkg/seccomp"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
-	"gvisor.dev/gvisor/pkg/sentry/safemem"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
+	"gvisor.dev/gvisor/pkg/usermem"
 )
 
 // Platform provides abstractions for execution contexts (Context,
@@ -93,6 +95,9 @@ type Platform interface {
 	// Platforms for which this does not hold may panic if PreemptAllCPUs is
 	// called.
 	PreemptAllCPUs() error
+
+	// SyscallFilters returns syscalls made exclusively by this platform.
+	SyscallFilters() seccomp.SyscallRules
 }
 
 // NoCPUPreemptionDetection implements Platform.DetectsCPUPreemption and
@@ -143,6 +148,9 @@ type Context interface {
 	// Interrupt interrupts a concurrent call to Switch(), causing it to return
 	// ErrContextInterrupt.
 	Interrupt()
+
+	// Release() releases any resources associated with this context.
+	Release()
 }
 
 var (
@@ -256,7 +264,7 @@ type AddressSpaceIO interface {
 	LoadUint32(addr usermem.Addr) (uint32, error)
 }
 
-// NoAddressSpaceIO implements AddressSpaceIO methods by panicing.
+// NoAddressSpaceIO implements AddressSpaceIO methods by panicking.
 type NoAddressSpaceIO struct{}
 
 // CopyOut implements AddressSpaceIO.CopyOut.
@@ -346,4 +354,45 @@ type File interface {
 // String implements fmt.Stringer.String.
 func (fr FileRange) String() string {
 	return fmt.Sprintf("[%#x, %#x)", fr.Start, fr.End)
+}
+
+// Requirements is used to specify platform specific requirements.
+type Requirements struct {
+	// RequiresCurrentPIDNS indicates that the sandbox has to be started in the
+	// current pid namespace.
+	RequiresCurrentPIDNS bool
+	// RequiresCapSysPtrace indicates that the sandbox has to be started with
+	// the CAP_SYS_PTRACE capability.
+	RequiresCapSysPtrace bool
+}
+
+// Constructor represents a platform type.
+type Constructor interface {
+	// New returns a new platform instance.
+	//
+	// Arguments:
+	//
+	// * deviceFile - the device file (e.g. /dev/kvm for the KVM platform).
+	New(deviceFile *os.File) (Platform, error)
+	OpenDevice() (*os.File, error)
+
+	// Requirements returns platform specific requirements.
+	Requirements() Requirements
+}
+
+// platforms contains all available platform types.
+var platforms = map[string]Constructor{}
+
+// Register registers a new platform type.
+func Register(name string, platform Constructor) {
+	platforms[name] = platform
+}
+
+// Lookup looks up the platform constructor by name.
+func Lookup(name string) (Constructor, error) {
+	p, ok := platforms[name]
+	if !ok {
+		return nil, fmt.Errorf("unknown platform: %v", name)
+	}
+	return p, nil
 }

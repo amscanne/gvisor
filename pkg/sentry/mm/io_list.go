@@ -52,11 +52,21 @@ func (l *ioList) Back() *ioResult {
 	return l.tail
 }
 
+// Len returns the number of elements in the list.
+//
+// NOTE: This is an O(n) operation.
+func (l *ioList) Len() (count int) {
+	for e := l.Front(); e != nil; e = e.Next() {
+		count++
+	}
+	return count
+}
+
 // PushFront inserts the element e at the front of list l.
 func (l *ioList) PushFront(e *ioResult) {
-	ioElementMapper{}.linkerFor(e).SetNext(l.head)
-	ioElementMapper{}.linkerFor(e).SetPrev(nil)
-
+	linker := ioElementMapper{}.linkerFor(e)
+	linker.SetNext(l.head)
+	linker.SetPrev(nil)
 	if l.head != nil {
 		ioElementMapper{}.linkerFor(l.head).SetPrev(e)
 	} else {
@@ -68,9 +78,9 @@ func (l *ioList) PushFront(e *ioResult) {
 
 // PushBack inserts the element e at the back of list l.
 func (l *ioList) PushBack(e *ioResult) {
-	ioElementMapper{}.linkerFor(e).SetNext(nil)
-	ioElementMapper{}.linkerFor(e).SetPrev(l.tail)
-
+	linker := ioElementMapper{}.linkerFor(e)
+	linker.SetNext(nil)
+	linker.SetPrev(l.tail)
 	if l.tail != nil {
 		ioElementMapper{}.linkerFor(l.tail).SetNext(e)
 	} else {
@@ -91,17 +101,20 @@ func (l *ioList) PushBackList(m *ioList) {
 
 		l.tail = m.tail
 	}
-
 	m.head = nil
 	m.tail = nil
 }
 
 // InsertAfter inserts e after b.
 func (l *ioList) InsertAfter(b, e *ioResult) {
-	a := ioElementMapper{}.linkerFor(b).Next()
-	ioElementMapper{}.linkerFor(e).SetNext(a)
-	ioElementMapper{}.linkerFor(e).SetPrev(b)
-	ioElementMapper{}.linkerFor(b).SetNext(e)
+	bLinker := ioElementMapper{}.linkerFor(b)
+	eLinker := ioElementMapper{}.linkerFor(e)
+
+	a := bLinker.Next()
+
+	eLinker.SetNext(a)
+	eLinker.SetPrev(b)
+	bLinker.SetNext(e)
 
 	if a != nil {
 		ioElementMapper{}.linkerFor(a).SetPrev(e)
@@ -112,10 +125,13 @@ func (l *ioList) InsertAfter(b, e *ioResult) {
 
 // InsertBefore inserts e before a.
 func (l *ioList) InsertBefore(a, e *ioResult) {
-	b := ioElementMapper{}.linkerFor(a).Prev()
-	ioElementMapper{}.linkerFor(e).SetNext(a)
-	ioElementMapper{}.linkerFor(e).SetPrev(b)
-	ioElementMapper{}.linkerFor(a).SetPrev(e)
+	aLinker := ioElementMapper{}.linkerFor(a)
+	eLinker := ioElementMapper{}.linkerFor(e)
+
+	b := aLinker.Prev()
+	eLinker.SetNext(a)
+	eLinker.SetPrev(b)
+	aLinker.SetPrev(e)
 
 	if b != nil {
 		ioElementMapper{}.linkerFor(b).SetNext(e)
@@ -126,8 +142,9 @@ func (l *ioList) InsertBefore(a, e *ioResult) {
 
 // Remove removes e from l.
 func (l *ioList) Remove(e *ioResult) {
-	prev := ioElementMapper{}.linkerFor(e).Prev()
-	next := ioElementMapper{}.linkerFor(e).Next()
+	linker := ioElementMapper{}.linkerFor(e)
+	prev := linker.Prev()
+	next := linker.Next()
 
 	if prev != nil {
 		ioElementMapper{}.linkerFor(prev).SetNext(next)
@@ -140,6 +157,9 @@ func (l *ioList) Remove(e *ioResult) {
 	} else {
 		l.tail = prev
 	}
+
+	linker.SetNext(nil)
+	linker.SetPrev(nil)
 }
 
 // Entry is a default implementation of Linker. Users can add anonymous fields

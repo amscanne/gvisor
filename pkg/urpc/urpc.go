@@ -27,10 +27,10 @@ import (
 	"os"
 	"reflect"
 	"runtime"
-	"sync"
 
 	"gvisor.dev/gvisor/pkg/fd"
 	"gvisor.dev/gvisor/pkg/log"
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/unet"
 )
 
@@ -72,7 +72,7 @@ type FilePayload struct {
 	Files []*os.File `json:"-"`
 }
 
-// ReleaseFD releases the indexth FD.
+// ReleaseFD releases the FD at the specified index.
 func (f *FilePayload) ReleaseFD(index int) (*fd.FD, error) {
 	return fd.NewFromFile(f.Files[index])
 }

@@ -27,6 +27,11 @@ const (
 	udpChecksum = 6
 )
 
+const (
+	// UDPMaximumPacketSize is the largest possible UDP packet.
+	UDPMaximumPacketSize = 0xffff
+)
+
 // UDPFields contains the fields of a UDP packet. It is used to describe the
 // fields of a packet that needs to be encoded.
 type UDPFields struct {
@@ -92,6 +97,11 @@ func (b UDP) SetDestinationPort(port uint16) {
 // SetChecksum sets the "checksum" field of the udp header.
 func (b UDP) SetChecksum(checksum uint16) {
 	binary.BigEndian.PutUint16(b[udpChecksum:], checksum)
+}
+
+// SetLength sets the "length" field of the udp header.
+func (b UDP) SetLength(length uint16) {
+	binary.BigEndian.PutUint16(b[udpLength:], length)
 }
 
 // CalculateChecksum calculates the checksum of the udp packet, given the

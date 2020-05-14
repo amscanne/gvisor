@@ -15,16 +15,17 @@
 package fs
 
 import (
-	"sync"
+	"io"
 	"sync/atomic"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
-	"gvisor.dev/gvisor/pkg/sentry/context"
 	"gvisor.dev/gvisor/pkg/sentry/memmap"
 	"gvisor.dev/gvisor/pkg/sentry/uniqueid"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
@@ -142,7 +143,10 @@ func (i *Inotify) Read(ctx context.Context, _ *File, dst usermem.IOSequence, _ i
 	}
 
 	var writeLen int64
-	for event := i.events.Front(); event != nil; event = event.Next() {
+	for it := i.events.Front(); it != nil; {
+		event := it
+		it = it.Next()
+
 		// Does the buffer have enough remaining space to hold the event we're
 		// about to write out?
 		if dst.NumBytes() < int64(event.sizeOf()) {
@@ -172,7 +176,7 @@ func (i *Inotify) Read(ctx context.Context, _ *File, dst usermem.IOSequence, _ i
 }
 
 // WriteTo implements FileOperations.WriteTo.
-func (*Inotify) WriteTo(context.Context, *File, *File, SpliceOpts) (int64, error) {
+func (*Inotify) WriteTo(context.Context, *File, io.Writer, int64, bool) (int64, error) {
 	return 0, syserror.ENOSYS
 }
 
@@ -182,7 +186,7 @@ func (*Inotify) Fsync(context.Context, *File, int64, int64, SyncType) error {
 }
 
 // ReadFrom implements FileOperations.ReadFrom.
-func (*Inotify) ReadFrom(context.Context, *File, *File, SpliceOpts) (int64, error) {
+func (*Inotify) ReadFrom(context.Context, *File, io.Reader, int64) (int64, error) {
 	return 0, syserror.ENOSYS
 }
 
@@ -202,7 +206,7 @@ func (i *Inotify) UnstableAttr(ctx context.Context, file *File) (UnstableAttr, e
 }
 
 // Ioctl implements fs.FileOperations.Ioctl.
-func (i *Inotify) Ioctl(ctx context.Context, io usermem.IO, args arch.SyscallArguments) (uintptr, error) {
+func (i *Inotify) Ioctl(ctx context.Context, _ *File, io usermem.IO, args arch.SyscallArguments) (uintptr, error) {
 	switch args[1].Int() {
 	case linux.FIONREAD:
 		i.evMu.Lock()

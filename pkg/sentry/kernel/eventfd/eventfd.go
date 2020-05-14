@@ -18,17 +18,17 @@ package eventfd
 
 import (
 	"math"
-	"sync"
 	"syscall"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/fdnotifier"
-	"gvisor.dev/gvisor/pkg/sentry/context"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/fs/anon"
 	"gvisor.dev/gvisor/pkg/sentry/fs/fsutil"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
@@ -68,7 +68,7 @@ type EventOperations struct {
 // New creates a new event object with the supplied initial value and mode.
 func New(ctx context.Context, initVal uint64, semMode bool) *fs.File {
 	// name matches fs/eventfd.c:eventfd_file_create.
-	dirent := fs.NewDirent(anon.NewInode(ctx), "anon_inode:[eventfd]")
+	dirent := fs.NewDirent(ctx, anon.NewInode(ctx), "anon_inode:[eventfd]")
 	// Release the initial dirent reference after NewFile takes a reference.
 	defer dirent.DecRef()
 	return fs.NewFile(ctx, dirent, fs.FileFlags{Read: true, Write: true}, &EventOperations{

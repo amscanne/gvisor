@@ -16,7 +16,8 @@ package fs
 
 import (
 	"fmt"
-	"sync"
+
+	"gvisor.dev/gvisor/pkg/sync"
 )
 
 // DirentCache is an LRU cache of Dirents. The Dirent's refCount is
@@ -100,8 +101,6 @@ func (c *DirentCache) remove(d *Dirent) {
 		panic(fmt.Sprintf("trying to remove %v, which is not in the dirent cache", d))
 	}
 	c.list.Remove(d)
-	d.SetPrev(nil)
-	d.SetNext(nil)
 	d.DecRef()
 	c.currentSize--
 	if c.limit != nil {
@@ -146,7 +145,7 @@ func (c *DirentCache) contains(d *Dirent) bool {
 	return c.list.Front() == d
 }
 
-// Invalidate removes all Dirents from the cache, caling DecRef on each.
+// Invalidate removes all Dirents from the cache, calling DecRef on each.
 func (c *DirentCache) Invalidate() {
 	if c == nil {
 		return
@@ -159,7 +158,7 @@ func (c *DirentCache) Invalidate() {
 }
 
 // setMaxSize sets cache max size. If current size is larger than max size, the
-// cache shrinks to acommodate the new max.
+// cache shrinks to accommodate the new max.
 func (c *DirentCache) setMaxSize(max uint64) {
 	c.mu.Lock()
 	c.maxSize = max

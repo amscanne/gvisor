@@ -15,17 +15,18 @@
 package host
 
 import (
-	"sync"
-
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
-	"gvisor.dev/gvisor/pkg/sentry/context"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/unimpl"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 )
+
+// LINT.IfChange
 
 // TTYFileOperations implements fs.FileOperations for a host file descriptor
 // that wraps a TTY FD.
@@ -43,12 +44,16 @@ type TTYFileOperations struct {
 	// fgProcessGroup is the foreground process group that is currently
 	// connected to this TTY.
 	fgProcessGroup *kernel.ProcessGroup
+
+	// termios contains the terminal attributes for this TTY.
+	termios linux.KernelTermios
 }
 
 // newTTYFile returns a new fs.File that wraps a TTY FD.
 func newTTYFile(ctx context.Context, dirent *fs.Dirent, flags fs.FileFlags, iops *inodeOperations) *fs.File {
 	return fs.NewFile(ctx, dirent, flags, &TTYFileOperations{
 		fileOperations: fileOperations{iops: iops},
+		termios:        linux.DefaultSlaveTermios,
 	})
 }
 
@@ -97,9 +102,12 @@ func (t *TTYFileOperations) Write(ctx context.Context, file *fs.File, src userme
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	// Are we allowed to do the write?
-	if err := t.checkChange(ctx, linux.SIGTTOU); err != nil {
-		return 0, err
+	// Check whether TOSTOP is enabled. This corresponds to the check in
+	// drivers/tty/n_tty.c:n_tty_write().
+	if t.termios.LEnabled(linux.TOSTOP) {
+		if err := t.checkChange(ctx, linux.SIGTTOU); err != nil {
+			return 0, err
+		}
 	}
 	return t.fileOperations.Write(ctx, file, src, offset)
 }
@@ -114,7 +122,7 @@ func (t *TTYFileOperations) Release() {
 }
 
 // Ioctl implements fs.FileOperations.Ioctl.
-func (t *TTYFileOperations) Ioctl(ctx context.Context, io usermem.IO, args arch.SyscallArguments) (uintptr, error) {
+func (t *TTYFileOperations) Ioctl(ctx context.Context, _ *fs.File, io usermem.IO, args arch.SyscallArguments) (uintptr, error) {
 	// Ignore arg[0].  This is the real FD:
 	fd := t.fileOperations.iops.fileState.FD()
 	ioctl := args[1].Uint64()
@@ -144,6 +152,9 @@ func (t *TTYFileOperations) Ioctl(ctx context.Context, io usermem.IO, args arch.
 			return 0, err
 		}
 		err := ioctlSetTermios(fd, ioctl, &termios)
+		if err == nil {
+			t.termios.FromTermios(termios)
+		}
 		return 0, err
 
 	case linux.TIOCGPGRP:
@@ -349,3 +360,5 @@ func (t *TTYFileOperations) checkChange(ctx context.Context, sig linux.Signal) e
 	_ = pg.SendSignal(kernel.SignalInfoPriv(sig))
 	return kernel.ERESTARTSYS
 }
+
+// LINT.ThenChange(../../fsimpl/host/tty.go)

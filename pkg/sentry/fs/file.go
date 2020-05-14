@@ -16,20 +16,20 @@ package fs
 
 import (
 	"math"
-	"sync"
 	"sync/atomic"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/amutex"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/metric"
 	"gvisor.dev/gvisor/pkg/refs"
-	"gvisor.dev/gvisor/pkg/sentry/context"
 	"gvisor.dev/gvisor/pkg/sentry/fs/lock"
 	"gvisor.dev/gvisor/pkg/sentry/limits"
 	"gvisor.dev/gvisor/pkg/sentry/memmap"
 	"gvisor.dev/gvisor/pkg/sentry/uniqueid"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
@@ -44,7 +44,7 @@ var (
 	RecordWaitTime = false
 
 	reads    = metric.MustCreateNewUint64Metric("/fs/reads", false /* sync */, "Number of file reads.")
-	readWait = metric.MustCreateNewUint64Metric("/fs/read_wait", false /* sync */, "Time waiting on file reads, in nanoseconds.")
+	readWait = metric.MustCreateNewUint64NanosecondsMetric("/fs/read_wait", false /* sync */, "Time waiting on file reads, in nanoseconds.")
 )
 
 // IncrementWait increments the given wait time metric, if enabled.
@@ -130,14 +130,15 @@ type File struct {
 // to false respectively.
 func NewFile(ctx context.Context, dirent *Dirent, flags FileFlags, fops FileOperations) *File {
 	dirent.IncRef()
-	f := &File{
+	f := File{
 		UniqueID:       uniqueid.GlobalFromContext(ctx),
 		Dirent:         dirent,
 		FileOperations: fops,
 		flags:          flags,
 	}
 	f.mu.Init()
-	return f
+	f.EnableLeakCheck("fs.File")
+	return &f
 }
 
 // DecRef destroys the File when it is no longer referenced.
@@ -267,7 +268,7 @@ func (f *File) Readv(ctx context.Context, dst usermem.IOSequence) (int64, error)
 
 	reads.Increment()
 	n, err := f.FileOperations.Read(ctx, f, dst, f.offset)
-	if n > 0 {
+	if n > 0 && !f.flags.NonSeekable {
 		atomic.AddInt64(&f.offset, n)
 	}
 	f.mu.Unlock()
@@ -310,9 +311,11 @@ func (f *File) Writev(ctx context.Context, src usermem.IOSequence) (int64, error
 		return 0, syserror.ErrInterrupted
 	}
 
+	unlockAppendMu := f.Dirent.Inode.lockAppendMu(f.Flags().Append)
 	// Handle append mode.
 	if f.Flags().Append {
 		if err := f.offsetForAppend(ctx, &f.offset); err != nil {
+			unlockAppendMu()
 			f.mu.Unlock()
 			return 0, err
 		}
@@ -322,6 +325,7 @@ func (f *File) Writev(ctx context.Context, src usermem.IOSequence) (int64, error
 	limit, ok := f.checkLimit(ctx, f.offset)
 	switch {
 	case ok && limit == 0:
+		unlockAppendMu()
 		f.mu.Unlock()
 		return 0, syserror.ErrExceedsFileSizeLimit
 	case ok:
@@ -330,9 +334,10 @@ func (f *File) Writev(ctx context.Context, src usermem.IOSequence) (int64, error
 
 	// We must hold the lock during the write.
 	n, err := f.FileOperations.Write(ctx, f, src, f.offset)
-	if n >= 0 {
+	if n >= 0 && !f.flags.NonSeekable {
 		atomic.StoreInt64(&f.offset, f.offset+n)
 	}
+	unlockAppendMu()
 	f.mu.Unlock()
 	return n, err
 }
@@ -348,13 +353,11 @@ func (f *File) Pwritev(ctx context.Context, src usermem.IOSequence, offset int64
 	// However, on Linux, if a file is opened with O_APPEND,  pwrite()
 	// appends data to the end of the file, regardless of the value of
 	// offset."
+	unlockAppendMu := f.Dirent.Inode.lockAppendMu(f.Flags().Append)
+	defer unlockAppendMu()
+
 	if f.Flags().Append {
-		if !f.mu.Lock(ctx) {
-			return 0, syserror.ErrInterrupted
-		}
-		defer f.mu.Unlock()
 		if err := f.offsetForAppend(ctx, &offset); err != nil {
-			f.mu.Unlock()
 			return 0, err
 		}
 	}
@@ -373,7 +376,7 @@ func (f *File) Pwritev(ctx context.Context, src usermem.IOSequence, offset int64
 
 // offsetForAppend sets the given offset to the end of the file.
 //
-// Precondition: the underlying file mutex should be held.
+// Precondition: the file.Dirent.Inode.appendMu mutex should be held for writing.
 func (f *File) offsetForAppend(ctx context.Context, offset *int64) error {
 	uattr, err := f.Dirent.Inode.UnstableAttr(ctx)
 	if err != nil {
@@ -512,6 +515,11 @@ type lockedReader struct {
 
 	// File is the file to read from.
 	File *File
+
+	// Offset is the offset to start at.
+	//
+	// This applies only to Read, not ReadAt.
+	Offset int64
 }
 
 // Read implements io.Reader.Read.
@@ -519,7 +527,8 @@ func (r *lockedReader) Read(buf []byte) (int, error) {
 	if r.Ctx.Interrupted() {
 		return 0, syserror.ErrInterrupted
 	}
-	n, err := r.File.FileOperations.Read(r.Ctx, r.File, usermem.BytesIOSequence(buf), r.File.offset)
+	n, err := r.File.FileOperations.Read(r.Ctx, r.File, usermem.BytesIOSequence(buf), r.Offset)
+	r.Offset += n
 	return int(n), err
 }
 
@@ -541,11 +550,21 @@ type lockedWriter struct {
 
 	// File is the file to write to.
 	File *File
+
+	// Offset is the offset to start at.
+	//
+	// This applies only to Write, not WriteAt.
+	Offset int64
 }
 
 // Write implements io.Writer.Write.
 func (w *lockedWriter) Write(buf []byte) (int, error) {
-	return w.WriteAt(buf, w.File.offset)
+	if w.Ctx.Interrupted() {
+		return 0, syserror.ErrInterrupted
+	}
+	n, err := w.WriteAt(buf, w.Offset)
+	w.Offset += int64(n)
+	return int(n), err
 }
 
 // WriteAt implements io.Writer.WriteAt.
@@ -559,6 +578,9 @@ func (w *lockedWriter) WriteAt(buf []byte, offset int64) (int, error) {
 	// io.Copy, since our own Write interface does not have this same
 	// contract. Enforce that here.
 	for written < len(buf) {
+		if w.Ctx.Interrupted() {
+			return written, syserror.ErrInterrupted
+		}
 		var n int64
 		n, err = w.File.FileOperations.Write(w.Ctx, w.File, usermem.BytesIOSequence(buf[written:]), offset+int64(written))
 		if n > 0 {

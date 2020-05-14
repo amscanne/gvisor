@@ -19,16 +19,16 @@ import (
 	"fmt"
 	"math"
 	"strconv"
-	"sync"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
-	"gvisor.dev/gvisor/pkg/sentry/context"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/fs/fsutil"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/socket/unix/transport"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
@@ -114,7 +114,7 @@ func newDir(ctx context.Context, m *fs.MountSource) *fs.Inode {
 		InodeID: d.master.StableAttr.InodeID,
 	})
 
-	return fs.NewInode(d, m, fs.StableAttr{
+	return fs.NewInode(ctx, d, m, fs.StableAttr{
 		DeviceID: ptsDevice.DeviceID(),
 		// N.B. Linux always uses inode id 1 for the directory. See
 		// fs/devpts/inode.c:devpts_fill_super.
@@ -129,6 +129,9 @@ func newDir(ctx context.Context, m *fs.MountSource) *fs.Inode {
 
 // Release implements fs.InodeOperations.Release.
 func (d *dirInodeOperations) Release(ctx context.Context) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	d.master.DecRef()
 	if len(d.slaves) != 0 {
 		panic(fmt.Sprintf("devpts directory still contains active terminals: %+v", d))
@@ -143,7 +146,7 @@ func (d *dirInodeOperations) Lookup(ctx context.Context, dir *fs.Inode, name str
 	// Master?
 	if name == "ptmx" {
 		d.master.IncRef()
-		return fs.NewDirent(d.master, name), nil
+		return fs.NewDirent(ctx, d.master, name), nil
 	}
 
 	// Slave number?
@@ -159,7 +162,7 @@ func (d *dirInodeOperations) Lookup(ctx context.Context, dir *fs.Inode, name str
 	}
 
 	s.IncRef()
-	return fs.NewDirent(s, name), nil
+	return fs.NewDirent(ctx, s, name), nil
 }
 
 // Create implements fs.InodeOperations.Create.
@@ -307,7 +310,7 @@ type dirFileOperations struct {
 var _ fs.FileOperations = (*dirFileOperations)(nil)
 
 // IterateDir implements DirIterator.IterateDir.
-func (df *dirFileOperations) IterateDir(ctx context.Context, dirCtx *fs.DirCtx, offset int) (int, error) {
+func (df *dirFileOperations) IterateDir(ctx context.Context, d *fs.Dirent, dirCtx *fs.DirCtx, offset int) (int, error) {
 	df.di.mu.Lock()
 	defer df.di.mu.Unlock()
 

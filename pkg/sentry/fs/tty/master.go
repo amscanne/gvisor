@@ -16,15 +16,17 @@ package tty
 
 import (
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
-	"gvisor.dev/gvisor/pkg/sentry/context"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/fs/fsutil"
 	"gvisor.dev/gvisor/pkg/sentry/unimpl"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
+
+// LINT.IfChange
 
 // masterInodeOperations are the fs.InodeOperations for the master end of the
 // Terminal (ptmx file).
@@ -46,7 +48,7 @@ func newMasterInode(ctx context.Context, d *dirInodeOperations, owner fs.FileOwn
 		d:               d,
 	}
 
-	return fs.NewInode(iops, d.msrc, fs.StableAttr{
+	return fs.NewInode(ctx, iops, d.msrc, fs.StableAttr{
 		DeviceID: ptsDevice.DeviceID(),
 		// N.B. Linux always uses inode id 2 for ptmx. See
 		// fs/devpts/inode.c:mknod_ptmx.
@@ -74,6 +76,11 @@ func newMasterInode(ctx context.Context, d *dirInodeOperations, owner fs.FileOwn
 
 // Release implements fs.InodeOperations.Release.
 func (mi *masterInodeOperations) Release(ctx context.Context) {
+}
+
+// Truncate implements fs.InodeOperations.Truncate.
+func (*masterInodeOperations) Truncate(context.Context, *fs.Inode, int64) error {
+	return nil
 }
 
 // GetFile implements fs.InodeOperations.GetFile.
@@ -144,7 +151,7 @@ func (mf *masterFileOperations) Write(ctx context.Context, _ *fs.File, src userm
 }
 
 // Ioctl implements fs.FileOperations.Ioctl.
-func (mf *masterFileOperations) Ioctl(ctx context.Context, io usermem.IO, args arch.SyscallArguments) (uintptr, error) {
+func (mf *masterFileOperations) Ioctl(ctx context.Context, _ *fs.File, io usermem.IO, args arch.SyscallArguments) (uintptr, error) {
 	switch cmd := args[1].Uint(); cmd {
 	case linux.FIONREAD: // linux.FIONREAD == linux.TIOCINQ
 		// Get the number of bytes in the output queue read buffer.
@@ -172,6 +179,19 @@ func (mf *masterFileOperations) Ioctl(ctx context.Context, io usermem.IO, args a
 		return 0, mf.t.ld.windowSize(ctx, io, args)
 	case linux.TIOCSWINSZ:
 		return 0, mf.t.ld.setWindowSize(ctx, io, args)
+	case linux.TIOCSCTTY:
+		// Make the given terminal the controlling terminal of the
+		// calling process.
+		return 0, mf.t.setControllingTTY(ctx, io, args, true /* isMaster */)
+	case linux.TIOCNOTTY:
+		// Release this process's controlling terminal.
+		return 0, mf.t.releaseControllingTTY(ctx, io, args, true /* isMaster */)
+	case linux.TIOCGPGRP:
+		// Get the foreground process group.
+		return mf.t.foregroundProcessGroup(ctx, io, args, true /* isMaster */)
+	case linux.TIOCSPGRP:
+		// Set the foreground process group.
+		return mf.t.setForegroundProcessGroup(ctx, io, args, true /* isMaster */)
 	default:
 		maybeEmitUnimplementedEvent(ctx, cmd)
 		return 0, syserror.ENOTTY
@@ -185,8 +205,6 @@ func maybeEmitUnimplementedEvent(ctx context.Context, cmd uint32) {
 		linux.TCSETS,
 		linux.TCSETSW,
 		linux.TCSETSF,
-		linux.TIOCGPGRP,
-		linux.TIOCSPGRP,
 		linux.TIOCGWINSZ,
 		linux.TIOCSWINSZ,
 		linux.TIOCSETD,
@@ -200,8 +218,6 @@ func maybeEmitUnimplementedEvent(ctx context.Context, cmd uint32) {
 		linux.TIOCEXCL,
 		linux.TIOCNXCL,
 		linux.TIOCGEXCL,
-		linux.TIOCNOTTY,
-		linux.TIOCSCTTY,
 		linux.TIOCGSID,
 		linux.TIOCGETD,
 		linux.TIOCVHANGUP,
@@ -218,3 +234,5 @@ func maybeEmitUnimplementedEvent(ctx context.Context, cmd uint32) {
 		unimpl.EmitUnimplementedEvent(ctx)
 	}
 }
+
+// LINT.ThenChange(../../fsimpl/devpts/master.go)

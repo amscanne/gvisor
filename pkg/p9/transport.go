@@ -19,11 +19,11 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"sync"
 	"syscall"
 
 	"gvisor.dev/gvisor/pkg/fd"
 	"gvisor.dev/gvisor/pkg/log"
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/unet"
 )
 
@@ -54,7 +54,10 @@ const (
 	headerLength uint32 = 7
 
 	// maximumLength is the largest possible message.
-	maximumLength uint32 = 4 * 1024 * 1024
+	maximumLength uint32 = 1 << 20
+
+	// DefaultMessageSize is a sensible default.
+	DefaultMessageSize uint32 = 64 << 10
 
 	// initialBufferLength is the initial data buffer we allocate.
 	initialBufferLength uint32 = 64
@@ -77,7 +80,7 @@ func send(s *unet.Socket, tag Tag, m message) error {
 	}
 
 	// Encode the message. The buffer will grow automatically.
-	m.Encode(&dataBuf)
+	m.encode(&dataBuf)
 
 	// Get our vectors to send.
 	var hdr [headerLength]byte
@@ -313,7 +316,7 @@ func recv(s *unet.Socket, msize uint32, lookup lookupTagAndType) (Tag, message, 
 	}
 
 	// Decode the message data.
-	m.Decode(&dataBuf)
+	m.decode(&dataBuf)
 	if dataBuf.isOverrun() {
 		// No need to drain the socket.
 		return NoTag, nil, ErrNoValidMessage

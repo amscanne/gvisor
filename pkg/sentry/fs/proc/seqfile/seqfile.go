@@ -12,20 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package seqfile provides dynamic ordered files.
 package seqfile
 
 import (
 	"io"
-	"sync"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
-	"gvisor.dev/gvisor/pkg/sentry/context"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/fs/fsutil"
 	"gvisor.dev/gvisor/pkg/sentry/fs/proc/device"
 	ktime "gvisor.dev/gvisor/pkg/sentry/kernel/time"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
@@ -133,7 +134,7 @@ func NewSeqFileInode(ctx context.Context, source SeqSource, msrc *fs.MountSource
 		BlockSize: usermem.PageSize,
 		Type:      fs.SpecialFile,
 	}
-	return fs.NewInode(iops, msrc, sattr)
+	return fs.NewInode(ctx, iops, msrc, sattr)
 }
 
 // UnstableAttr returns unstable attributes of the SeqFile.

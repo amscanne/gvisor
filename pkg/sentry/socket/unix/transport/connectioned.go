@@ -15,9 +15,9 @@
 package transport
 
 import (
-	"sync"
-
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/context"
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/syserr"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/waiter"
@@ -111,8 +111,13 @@ type connectionedEndpoint struct {
 	acceptedChan chan *connectionedEndpoint `state:".([]*connectionedEndpoint)"`
 }
 
+var (
+	_ = BoundEndpoint((*connectionedEndpoint)(nil))
+	_ = Endpoint((*connectionedEndpoint)(nil))
+)
+
 // NewConnectioned creates a new unbound connectionedEndpoint.
-func NewConnectioned(stype linux.SockType, uid UniqueIDProvider) Endpoint {
+func NewConnectioned(ctx context.Context, stype linux.SockType, uid UniqueIDProvider) Endpoint {
 	return &connectionedEndpoint{
 		baseEndpoint: baseEndpoint{Queue: &waiter.Queue{}},
 		id:           uid.UniqueID(),
@@ -122,7 +127,7 @@ func NewConnectioned(stype linux.SockType, uid UniqueIDProvider) Endpoint {
 }
 
 // NewPair allocates a new pair of connected unix-domain connectionedEndpoints.
-func NewPair(stype linux.SockType, uid UniqueIDProvider) (Endpoint, Endpoint) {
+func NewPair(ctx context.Context, stype linux.SockType, uid UniqueIDProvider) (Endpoint, Endpoint) {
 	a := &connectionedEndpoint{
 		baseEndpoint: baseEndpoint{Queue: &waiter.Queue{}},
 		id:           uid.UniqueID(),
@@ -137,7 +142,9 @@ func NewPair(stype linux.SockType, uid UniqueIDProvider) (Endpoint, Endpoint) {
 	}
 
 	q1 := &queue{ReaderQueue: a.Queue, WriterQueue: b.Queue, limit: initialLimit}
+	q1.EnableLeakCheck("transport.queue")
 	q2 := &queue{ReaderQueue: b.Queue, WriterQueue: a.Queue, limit: initialLimit}
+	q2.EnableLeakCheck("transport.queue")
 
 	if stype == linux.SOCK_STREAM {
 		a.receiver = &streamQueueReceiver{queueReceiver: queueReceiver{q1}}
@@ -163,7 +170,7 @@ func NewPair(stype linux.SockType, uid UniqueIDProvider) (Endpoint, Endpoint) {
 
 // NewExternal creates a new externally backed Endpoint. It behaves like a
 // socketpair.
-func NewExternal(stype linux.SockType, uid UniqueIDProvider, queue *waiter.Queue, receiver Receiver, connected ConnectedEndpoint) Endpoint {
+func NewExternal(ctx context.Context, stype linux.SockType, uid UniqueIDProvider, queue *waiter.Queue, receiver Receiver, connected ConnectedEndpoint) Endpoint {
 	return &connectionedEndpoint{
 		baseEndpoint: baseEndpoint{Queue: queue, receiver: receiver, connected: connected},
 		id:           uid.UniqueID(),
@@ -212,6 +219,11 @@ func (e *connectionedEndpoint) Close() {
 	case e.Connected():
 		e.connected.CloseSend()
 		e.receiver.CloseRecv()
+		// Still have unread data? If yes, we set this into the write
+		// end so that the peer can get ECONNRESET) when it does read.
+		if e.receiver.RecvQueuedSize() > 0 {
+			e.connected.CloseUnread()
+		}
 		c = e.connected
 		r = e.receiver
 		e.connected = nil
@@ -238,7 +250,7 @@ func (e *connectionedEndpoint) Close() {
 }
 
 // BidirectionalConnect implements BoundEndpoint.BidirectionalConnect.
-func (e *connectionedEndpoint) BidirectionalConnect(ce ConnectingEndpoint, returnConnect func(Receiver, ConnectedEndpoint)) *syserr.Error {
+func (e *connectionedEndpoint) BidirectionalConnect(ctx context.Context, ce ConnectingEndpoint, returnConnect func(Receiver, ConnectedEndpoint)) *syserr.Error {
 	if ce.Type() != e.stype {
 		return syserr.ErrConnectionRefused
 	}
@@ -288,12 +300,14 @@ func (e *connectionedEndpoint) BidirectionalConnect(ce ConnectingEndpoint, retur
 	}
 
 	readQueue := &queue{ReaderQueue: ce.WaiterQueue(), WriterQueue: ne.Queue, limit: initialLimit}
+	readQueue.EnableLeakCheck("transport.queue")
 	ne.connected = &connectedEndpoint{
 		endpoint:   ce,
 		writeQueue: readQueue,
 	}
 
 	writeQueue := &queue{ReaderQueue: ne.Queue, WriterQueue: ce.WaiterQueue(), limit: initialLimit}
+	writeQueue.EnableLeakCheck("transport.queue")
 	if e.stype == linux.SOCK_STREAM {
 		ne.receiver = &streamQueueReceiver{queueReceiver: queueReceiver{readQueue: writeQueue}}
 	} else {
@@ -334,19 +348,19 @@ func (e *connectionedEndpoint) BidirectionalConnect(ce ConnectingEndpoint, retur
 }
 
 // UnidirectionalConnect implements BoundEndpoint.UnidirectionalConnect.
-func (e *connectionedEndpoint) UnidirectionalConnect() (ConnectedEndpoint, *syserr.Error) {
+func (e *connectionedEndpoint) UnidirectionalConnect(ctx context.Context) (ConnectedEndpoint, *syserr.Error) {
 	return nil, syserr.ErrConnectionRefused
 }
 
 // Connect attempts to directly connect to another Endpoint.
 // Implements Endpoint.Connect.
-func (e *connectionedEndpoint) Connect(server BoundEndpoint) *syserr.Error {
+func (e *connectionedEndpoint) Connect(ctx context.Context, server BoundEndpoint) *syserr.Error {
 	returnConnect := func(r Receiver, ce ConnectedEndpoint) {
 		e.receiver = r
 		e.connected = ce
 	}
 
-	return server.BidirectionalConnect(e, returnConnect)
+	return server.BidirectionalConnect(ctx, e, returnConnect)
 }
 
 // Listen starts listening on the connection.
@@ -426,13 +440,13 @@ func (e *connectionedEndpoint) Bind(addr tcpip.FullAddress, commit func() *syser
 
 // SendMsg writes data and a control message to the endpoint's peer.
 // This method does not block if the data cannot be written.
-func (e *connectionedEndpoint) SendMsg(data [][]byte, c ControlMessages, to BoundEndpoint) (uintptr, *syserr.Error) {
+func (e *connectionedEndpoint) SendMsg(ctx context.Context, data [][]byte, c ControlMessages, to BoundEndpoint) (int64, *syserr.Error) {
 	// Stream sockets do not support specifying the endpoint. Seqpacket
 	// sockets ignore the passed endpoint.
 	if e.stype == linux.SOCK_STREAM && to != nil {
 		return 0, syserr.ErrNotSupported
 	}
-	return e.baseEndpoint.SendMsg(data, c, to)
+	return e.baseEndpoint.SendMsg(ctx, data, c, to)
 }
 
 // Readiness returns the current readiness of the connectionedEndpoint. For

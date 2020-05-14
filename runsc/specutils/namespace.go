@@ -33,19 +33,19 @@ import (
 func nsCloneFlag(nst specs.LinuxNamespaceType) uintptr {
 	switch nst {
 	case specs.IPCNamespace:
-		return syscall.CLONE_NEWIPC
+		return unix.CLONE_NEWIPC
 	case specs.MountNamespace:
-		return syscall.CLONE_NEWNS
+		return unix.CLONE_NEWNS
 	case specs.NetworkNamespace:
-		return syscall.CLONE_NEWNET
+		return unix.CLONE_NEWNET
 	case specs.PIDNamespace:
-		return syscall.CLONE_NEWPID
+		return unix.CLONE_NEWPID
 	case specs.UTSNamespace:
-		return syscall.CLONE_NEWUTS
+		return unix.CLONE_NEWUTS
 	case specs.UserNamespace:
-		return syscall.CLONE_NEWUSER
+		return unix.CLONE_NEWUSER
 	case specs.CgroupNamespace:
-		panic("cgroup namespace has no associated clone flag")
+		return unix.CLONE_NEWCGROUP
 	default:
 		panic(fmt.Sprintf("unknown namespace %v", nst))
 	}
@@ -204,7 +204,7 @@ func SetUIDGIDMappings(cmd *exec.Cmd, s *specs.Spec) {
 	}
 }
 
-// HasCapabilities returns true if the user has all capabilties in 'cs'.
+// HasCapabilities returns true if the user has all capabilities in 'cs'.
 func HasCapabilities(cs ...capability.Cap) bool {
 	caps, err := capability.NewPid2(os.Getpid())
 	if err != nil {
@@ -252,6 +252,9 @@ func MaybeRunAsRoot() error {
 		},
 		Credential:                 &syscall.Credential{Uid: 0, Gid: 0},
 		GidMappingsEnableSetgroups: false,
+
+		// Make sure child is killed when the parent terminates.
+		Pdeathsig: syscall.SIGKILL,
 	}
 
 	cmd.Env = os.Environ()

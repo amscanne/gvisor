@@ -52,11 +52,21 @@ func (l *waiterList) Back() *Waiter {
 	return l.tail
 }
 
+// Len returns the number of elements in the list.
+//
+// NOTE: This is an O(n) operation.
+func (l *waiterList) Len() (count int) {
+	for e := l.Front(); e != nil; e = e.Next() {
+		count++
+	}
+	return count
+}
+
 // PushFront inserts the element e at the front of list l.
 func (l *waiterList) PushFront(e *Waiter) {
-	waiterElementMapper{}.linkerFor(e).SetNext(l.head)
-	waiterElementMapper{}.linkerFor(e).SetPrev(nil)
-
+	linker := waiterElementMapper{}.linkerFor(e)
+	linker.SetNext(l.head)
+	linker.SetPrev(nil)
 	if l.head != nil {
 		waiterElementMapper{}.linkerFor(l.head).SetPrev(e)
 	} else {
@@ -68,9 +78,9 @@ func (l *waiterList) PushFront(e *Waiter) {
 
 // PushBack inserts the element e at the back of list l.
 func (l *waiterList) PushBack(e *Waiter) {
-	waiterElementMapper{}.linkerFor(e).SetNext(nil)
-	waiterElementMapper{}.linkerFor(e).SetPrev(l.tail)
-
+	linker := waiterElementMapper{}.linkerFor(e)
+	linker.SetNext(nil)
+	linker.SetPrev(l.tail)
 	if l.tail != nil {
 		waiterElementMapper{}.linkerFor(l.tail).SetNext(e)
 	} else {
@@ -91,17 +101,20 @@ func (l *waiterList) PushBackList(m *waiterList) {
 
 		l.tail = m.tail
 	}
-
 	m.head = nil
 	m.tail = nil
 }
 
 // InsertAfter inserts e after b.
 func (l *waiterList) InsertAfter(b, e *Waiter) {
-	a := waiterElementMapper{}.linkerFor(b).Next()
-	waiterElementMapper{}.linkerFor(e).SetNext(a)
-	waiterElementMapper{}.linkerFor(e).SetPrev(b)
-	waiterElementMapper{}.linkerFor(b).SetNext(e)
+	bLinker := waiterElementMapper{}.linkerFor(b)
+	eLinker := waiterElementMapper{}.linkerFor(e)
+
+	a := bLinker.Next()
+
+	eLinker.SetNext(a)
+	eLinker.SetPrev(b)
+	bLinker.SetNext(e)
 
 	if a != nil {
 		waiterElementMapper{}.linkerFor(a).SetPrev(e)
@@ -112,10 +125,13 @@ func (l *waiterList) InsertAfter(b, e *Waiter) {
 
 // InsertBefore inserts e before a.
 func (l *waiterList) InsertBefore(a, e *Waiter) {
-	b := waiterElementMapper{}.linkerFor(a).Prev()
-	waiterElementMapper{}.linkerFor(e).SetNext(a)
-	waiterElementMapper{}.linkerFor(e).SetPrev(b)
-	waiterElementMapper{}.linkerFor(a).SetPrev(e)
+	aLinker := waiterElementMapper{}.linkerFor(a)
+	eLinker := waiterElementMapper{}.linkerFor(e)
+
+	b := aLinker.Prev()
+	eLinker.SetNext(a)
+	eLinker.SetPrev(b)
+	aLinker.SetPrev(e)
 
 	if b != nil {
 		waiterElementMapper{}.linkerFor(b).SetNext(e)
@@ -126,8 +142,9 @@ func (l *waiterList) InsertBefore(a, e *Waiter) {
 
 // Remove removes e from l.
 func (l *waiterList) Remove(e *Waiter) {
-	prev := waiterElementMapper{}.linkerFor(e).Prev()
-	next := waiterElementMapper{}.linkerFor(e).Next()
+	linker := waiterElementMapper{}.linkerFor(e)
+	prev := linker.Prev()
+	next := linker.Next()
 
 	if prev != nil {
 		waiterElementMapper{}.linkerFor(prev).SetNext(next)
@@ -140,6 +157,9 @@ func (l *waiterList) Remove(e *Waiter) {
 	} else {
 		l.tail = prev
 	}
+
+	linker.SetNext(nil)
+	linker.SetPrev(nil)
 }
 
 // Entry is a default implementation of Linker. Users can add anonymous fields

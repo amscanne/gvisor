@@ -21,16 +21,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 
-	"flag"
 	"github.com/google/subcommands"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/p9"
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/unet"
 	"gvisor.dev/gvisor/runsc/boot"
+	"gvisor.dev/gvisor/runsc/flag"
 	"gvisor.dev/gvisor/runsc/fsgofer"
 	"gvisor.dev/gvisor/runsc/fsgofer/filter"
 	"gvisor.dev/gvisor/runsc/specutils"
@@ -135,7 +136,7 @@ func (g *Gofer) Execute(_ context.Context, f *flag.FlagSet, args ...interface{})
 	//
 	// Note that all mount points have been mounted in the proper location in
 	// setupRootFS().
-	cleanMounts, err := resolveMounts(spec.Mounts, root)
+	cleanMounts, err := resolveMounts(conf, spec.Mounts, root)
 	if err != nil {
 		Fatalf("Failure to resolve mounts: %v", err)
 	}
@@ -151,6 +152,10 @@ func (g *Gofer) Execute(_ context.Context, f *flag.FlagSet, args ...interface{})
 	// fsgofer should run with a umask of 0, because we want to preserve file
 	// modes exactly as sent by the sandbox, which will have applied its own umask.
 	syscall.Umask(0)
+
+	if err := fsgofer.OpenProcSelfFD(); err != nil {
+		Fatalf("failed to open /proc/self/fd: %v", err)
+	}
 
 	if err := syscall.Chroot(root); err != nil {
 		Fatalf("failed to chroot to %q: %v", root, err)
@@ -178,6 +183,7 @@ func (g *Gofer) Execute(_ context.Context, f *flag.FlagSet, args ...interface{})
 			cfg := fsgofer.Config{
 				ROMount:      isReadonlyMount(m.Options),
 				PanicOnWrite: g.panicOnWrite,
+				HostUDS:      conf.FSGoferHostUDS,
 			}
 			ap, err := fsgofer.NewAttachPoint(m.Destination, cfg)
 			if err != nil {
@@ -194,6 +200,10 @@ func (g *Gofer) Execute(_ context.Context, f *flag.FlagSet, args ...interface{})
 	}
 	if mountIdx != len(g.ioFDs) {
 		Fatalf("too many FDs passed for mounts. mounts: %d, FDs: %d", mountIdx, len(g.ioFDs))
+	}
+
+	if conf.FSGoferHostUDS {
+		filter.InstallUDSFilters()
 	}
 
 	if err := filter.Install(); err != nil {
@@ -262,9 +272,8 @@ func setupRootFS(spec *specs.Spec, conf *boot.Config) error {
 
 	root := spec.Root.Path
 	if !conf.TestOnlyAllowRunAsCurrentUserWithoutChroot {
-		// FIXME: runsc can't be re-executed without
-		// /proc, so we create a tmpfs mount, mount ./proc and ./root
-		// there, then move this mount to the root and after
+		// runsc can't be re-executed without /proc, so we create a tmpfs mount,
+		// mount ./proc and ./root there, then move this mount to the root and after
 		// setCapsAndCallSelf, runsc will chroot into /root.
 		//
 		// We need a directory to construct a new root and we know that
@@ -325,7 +334,7 @@ func setupRootFS(spec *specs.Spec, conf *boot.Config) error {
 
 	if !conf.TestOnlyAllowRunAsCurrentUserWithoutChroot {
 		if err := pivotRoot("/proc"); err != nil {
-			Fatalf("faild to change the root file system: %v", err)
+			Fatalf("failed to change the root file system: %v", err)
 		}
 		if err := os.Chdir("/"); err != nil {
 			Fatalf("failed to change working directory")
@@ -371,7 +380,7 @@ func setupMounts(mounts []specs.Mount, root string) error {
 // Otherwise, it may follow symlinks to locations that would be overwritten
 // with another mount point and return the wrong location. In short, make sure
 // setupMounts() has been called before.
-func resolveMounts(mounts []specs.Mount, root string) ([]specs.Mount, error) {
+func resolveMounts(conf *boot.Config, mounts []specs.Mount, root string) ([]specs.Mount, error) {
 	cleanMounts := make([]specs.Mount, 0, len(mounts))
 	for _, m := range mounts {
 		if m.Type != "bind" || !specutils.IsSupportedDevMount(m) {
@@ -386,8 +395,15 @@ func resolveMounts(mounts []specs.Mount, root string) ([]specs.Mount, error) {
 		if err != nil {
 			panic(fmt.Sprintf("%q could not be made relative to %q: %v", dst, root, err))
 		}
+
+		opts, err := adjustMountOptions(conf, filepath.Join(root, relDst), m.Options)
+		if err != nil {
+			return nil, err
+		}
+
 		cpy := m
 		cpy.Destination = filepath.Join("/", relDst)
+		cpy.Options = opts
 		cleanMounts = append(cleanMounts, cpy)
 	}
 	return cleanMounts, nil
@@ -414,7 +430,7 @@ func resolveSymlinksImpl(root, base, rel string, followCount uint) (string, erro
 		path := filepath.Join(base, name)
 		if !strings.HasPrefix(path, root) {
 			// One cannot '..' their way out of root.
-			path = root
+			base = root
 			continue
 		}
 		fi, err := os.Lstat(path)
@@ -443,4 +459,21 @@ func resolveSymlinksImpl(root, base, rel string, followCount uint) (string, erro
 		base = path
 	}
 	return base, nil
+}
+
+// adjustMountOptions adds 'overlayfs_stale_read' if mounting over overlayfs.
+func adjustMountOptions(conf *boot.Config, path string, opts []string) ([]string, error) {
+	rv := make([]string, len(opts))
+	copy(rv, opts)
+
+	if conf.OverlayfsStaleRead {
+		statfs := syscall.Statfs_t{}
+		if err := syscall.Statfs(path, &statfs); err != nil {
+			return nil, err
+		}
+		if statfs.Type == unix.OVERLAYFS_SUPER_MAGIC {
+			rv = append(rv, "overlayfs_stale_read")
+		}
+	}
+	return rv, nil
 }

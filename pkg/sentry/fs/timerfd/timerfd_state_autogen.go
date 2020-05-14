@@ -9,7 +9,9 @@ import (
 func (x *TimerOperations) beforeSave() {}
 func (x *TimerOperations) save(m state.Map) {
 	x.beforeSave()
-	if !state.IsZeroValue(x.events) { m.Failf("events is %v, expected zero", x.events) }
+	if !state.IsZeroValue(&x.events) {
+		m.Failf("events is %#v, expected zero", &x.events)
+	}
 	m.Save("timer", &x.timer)
 	m.Save("val", &x.val)
 }
@@ -21,5 +23,5 @@ func (x *TimerOperations) load(m state.Map) {
 }
 
 func init() {
-	state.Register("timerfd.TimerOperations", (*TimerOperations)(nil), state.Fns{Save: (*TimerOperations).save, Load: (*TimerOperations).load})
+	state.Register("pkg/sentry/fs/timerfd.TimerOperations", (*TimerOperations)(nil), state.Fns{Save: (*TimerOperations).save, Load: (*TimerOperations).load})
 }

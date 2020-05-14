@@ -19,7 +19,7 @@ import (
 	"strconv"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
-	"gvisor.dev/gvisor/pkg/sentry/context"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 )
@@ -44,9 +44,6 @@ const (
 	// lookup.
 	cacheRevalidate = "revalidate"
 
-	// TODO(edahlgren/mpratt): support a tmpfs size limit.
-	// size = "size"
-
 	// Permissions that exceed modeMask will be rejected.
 	modeMask = 01777
 
@@ -65,7 +62,7 @@ func init() {
 	fs.RegisterFilesystem(&Filesystem{})
 }
 
-// FilesystemName is the name underwhich the filesystem is registered.
+// FilesystemName is the name under which the filesystem is registered.
 // Name matches mm/shmem.c:shmem_fs_type.name.
 const FilesystemName = "tmpfs"
 
@@ -133,12 +130,15 @@ func (f *Filesystem) Mount(ctx context.Context, device string, flags fs.MountSou
 	}
 
 	// Construct a mount which will follow the cache options provided.
+	//
+	// TODO(gvisor.dev/issue/179): There should be no reason to disable
+	// caching once bind mounts are properly supported.
 	var msrc *fs.MountSource
 	switch options[cacheKey] {
 	case "", cacheAll:
-		msrc = fs.NewCachingMountSource(f, flags)
+		msrc = fs.NewCachingMountSource(ctx, f, flags)
 	case cacheRevalidate:
-		msrc = fs.NewRevalidatingMountSource(f, flags)
+		msrc = fs.NewRevalidatingMountSource(ctx, f, flags)
 	default:
 		return nil, fmt.Errorf("invalid cache policy option %q", options[cacheKey])
 	}

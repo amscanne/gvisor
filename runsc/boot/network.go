@@ -17,18 +17,47 @@ package boot
 import (
 	"fmt"
 	"net"
+	"runtime"
+	"strings"
 	"syscall"
 
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/link/fdbased"
 	"gvisor.dev/gvisor/pkg/tcpip/link/loopback"
+	"gvisor.dev/gvisor/pkg/tcpip/link/qdisc/fifo"
 	"gvisor.dev/gvisor/pkg/tcpip/link/sniffer"
 	"gvisor.dev/gvisor/pkg/tcpip/network/arp"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/urpc"
+)
+
+var (
+	// DefaultLoopbackLink contains IP addresses and routes of "127.0.0.1/8" and
+	// "::1/8" on "lo" interface.
+	DefaultLoopbackLink = LoopbackLink{
+		Name: "lo",
+		Addresses: []net.IP{
+			net.IP("\x7f\x00\x00\x01"),
+			net.IPv6loopback,
+		},
+		Routes: []Route{
+			{
+				Destination: net.IPNet{
+					IP:   net.IPv4(0x7f, 0, 0, 0),
+					Mask: net.IPv4Mask(0xff, 0, 0, 0),
+				},
+			},
+			{
+				Destination: net.IPNet{
+					IP:   net.IPv6loopback,
+					Mask: net.IPMask(strings.Repeat("\xff", net.IPv6len)),
+				},
+			},
+		},
+	}
 )
 
 // Network exposes methods that can be used to configure a network stack.
@@ -38,8 +67,7 @@ type Network struct {
 
 // Route represents a route in the network stack.
 type Route struct {
-	Destination net.IP
-	Mask        net.IPMask
+	Destination net.IPNet
 	Gateway     net.IP
 }
 
@@ -49,14 +77,54 @@ type DefaultRoute struct {
 	Name  string
 }
 
+// QueueingDiscipline is used to specify the kind of Queueing Discipline to
+// apply for a give FDBasedLink.
+type QueueingDiscipline int
+
+const (
+	// QDiscNone disables any queueing for the underlying FD.
+	QDiscNone QueueingDiscipline = iota
+
+	// QDiscFIFO applies a simple fifo based queue to the underlying
+	// FD.
+	QDiscFIFO
+)
+
+// MakeQueueingDiscipline if possible the equivalent QueuingDiscipline for s
+// else returns an error.
+func MakeQueueingDiscipline(s string) (QueueingDiscipline, error) {
+	switch s {
+	case "none":
+		return QDiscNone, nil
+	case "fifo":
+		return QDiscFIFO, nil
+	default:
+		return 0, fmt.Errorf("unsupported qdisc specified: %q", s)
+	}
+}
+
+// String implements fmt.Stringer.
+func (q QueueingDiscipline) String() string {
+	switch q {
+	case QDiscNone:
+		return "none"
+	case QDiscFIFO:
+		return "fifo"
+	default:
+		panic(fmt.Sprintf("Invalid queueing discipline: %d", q))
+	}
+}
+
 // FDBasedLink configures an fd-based link.
 type FDBasedLink struct {
-	Name        string
-	MTU         int
-	Addresses   []net.IP
-	Routes      []Route
-	GSOMaxSize  uint32
-	LinkAddress net.HardwareAddr
+	Name               string
+	MTU                int
+	Addresses          []net.IP
+	Routes             []Route
+	GSOMaxSize         uint32
+	SoftwareGSOEnabled bool
+	LinkAddress        net.HardwareAddr
+	QDisc              QueueingDiscipline
 
 	// NumChannels controls how many underlying FD's are to be used to
 	// create this endpoint.
@@ -80,21 +148,25 @@ type CreateLinksAndRoutesArgs struct {
 	LoopbackLinks []LoopbackLink
 	FDBasedLinks  []FDBasedLink
 
-	DefaultGateway DefaultRoute
+	Defaultv4Gateway DefaultRoute
+	Defaultv6Gateway DefaultRoute
 }
 
 // Empty returns true if route hasn't been set.
 func (r *Route) Empty() bool {
-	return r.Destination == nil && r.Mask == nil && r.Gateway == nil
+	return r.Destination.IP == nil && r.Destination.Mask == nil && r.Gateway == nil
 }
 
-func (r *Route) toTcpipRoute(id tcpip.NICID) tcpip.Route {
-	return tcpip.Route{
-		Destination: ipToAddress(r.Destination),
-		Gateway:     ipToAddress(r.Gateway),
-		Mask:        ipToAddressMask(net.IP(r.Mask)),
-		NIC:         id,
+func (r *Route) toTcpipRoute(id tcpip.NICID) (tcpip.Route, error) {
+	subnet, err := tcpip.NewSubnet(ipToAddress(r.Destination.IP), ipMaskToAddressMask(r.Destination.Mask))
+	if err != nil {
+		return tcpip.Route{}, err
 	}
+	return tcpip.Route{
+		Destination: subnet,
+		Gateway:     ipToAddress(r.Gateway),
+		NIC:         id,
+	}, nil
 }
 
 // CreateLinksAndRoutes creates links and routes in a network stack.  It should
@@ -122,13 +194,17 @@ func (n *Network) CreateLinksAndRoutes(args *CreateLinksAndRoutesArgs, _ *struct
 		linkEP := loopback.New()
 
 		log.Infof("Enabling loopback interface %q with id %d on addresses %+v", link.Name, nicID, link.Addresses)
-		if err := n.createNICWithAddrs(nicID, link.Name, linkEP, link.Addresses, true /* loopback */); err != nil {
+		if err := n.createNICWithAddrs(nicID, link.Name, linkEP, link.Addresses); err != nil {
 			return err
 		}
 
 		// Collect the routes from this link.
 		for _, r := range link.Routes {
-			routes = append(routes, r.toTcpipRoute(nicID))
+			route, err := r.toTcpipRoute(nicID)
+			if err != nil {
+				return err
+			}
+			routes = append(routes, route)
 		}
 	}
 
@@ -150,6 +226,8 @@ func (n *Network) CreateLinksAndRoutes(args *CreateLinksAndRoutesArgs, _ *struct
 		}
 
 		mac := tcpip.LinkAddress(link.LinkAddress)
+		log.Infof("gso max size is: %d", link.GSOMaxSize)
+
 		linkEP, err := fdbased.New(&fdbased.Options{
 			FDs:                FDs,
 			MTU:                uint32(link.MTU),
@@ -157,29 +235,57 @@ func (n *Network) CreateLinksAndRoutes(args *CreateLinksAndRoutesArgs, _ *struct
 			Address:            mac,
 			PacketDispatchMode: fdbased.RecvMMsg,
 			GSOMaxSize:         link.GSOMaxSize,
+			SoftwareGSOEnabled: link.SoftwareGSOEnabled,
 			RXChecksumOffload:  true,
 		})
 		if err != nil {
 			return err
 		}
 
+		switch link.QDisc {
+		case QDiscNone:
+		case QDiscFIFO:
+			log.Infof("Enabling FIFO QDisc on %q", link.Name)
+			linkEP = fifo.New(linkEP, runtime.GOMAXPROCS(0), 1000)
+		}
+
 		log.Infof("Enabling interface %q with id %d on addresses %+v (%v) w/ %d channels", link.Name, nicID, link.Addresses, mac, link.NumChannels)
-		if err := n.createNICWithAddrs(nicID, link.Name, linkEP, link.Addresses, false /* loopback */); err != nil {
+		if err := n.createNICWithAddrs(nicID, link.Name, linkEP, link.Addresses); err != nil {
 			return err
 		}
 
 		// Collect the routes from this link.
 		for _, r := range link.Routes {
-			routes = append(routes, r.toTcpipRoute(nicID))
+			route, err := r.toTcpipRoute(nicID)
+			if err != nil {
+				return err
+			}
+			routes = append(routes, route)
 		}
 	}
 
-	if !args.DefaultGateway.Route.Empty() {
-		nicID, ok := nicids[args.DefaultGateway.Name]
+	if !args.Defaultv4Gateway.Route.Empty() {
+		nicID, ok := nicids[args.Defaultv4Gateway.Name]
 		if !ok {
-			return fmt.Errorf("invalid interface name %q for default route", args.DefaultGateway.Name)
+			return fmt.Errorf("invalid interface name %q for default route", args.Defaultv4Gateway.Name)
 		}
-		routes = append(routes, args.DefaultGateway.Route.toTcpipRoute(nicID))
+		route, err := args.Defaultv4Gateway.Route.toTcpipRoute(nicID)
+		if err != nil {
+			return err
+		}
+		routes = append(routes, route)
+	}
+
+	if !args.Defaultv6Gateway.Route.Empty() {
+		nicID, ok := nicids[args.Defaultv6Gateway.Name]
+		if !ok {
+			return fmt.Errorf("invalid interface name %q for default route", args.Defaultv6Gateway.Name)
+		}
+		route, err := args.Defaultv6Gateway.Route.toTcpipRoute(nicID)
+		if err != nil {
+			return err
+		}
+		routes = append(routes, route)
 	}
 
 	log.Infof("Setting routes %+v", routes)
@@ -189,15 +295,10 @@ func (n *Network) CreateLinksAndRoutes(args *CreateLinksAndRoutesArgs, _ *struct
 
 // createNICWithAddrs creates a NIC in the network stack and adds the given
 // addresses.
-func (n *Network) createNICWithAddrs(id tcpip.NICID, name string, linkEP tcpip.LinkEndpointID, addrs []net.IP, loopback bool) error {
-	if loopback {
-		if err := n.Stack.CreateNamedLoopbackNIC(id, name, sniffer.New(linkEP)); err != nil {
-			return fmt.Errorf("CreateNamedLoopbackNIC(%v, %v, %v) failed: %v", id, name, linkEP, err)
-		}
-	} else {
-		if err := n.Stack.CreateNamedNIC(id, name, sniffer.New(linkEP)); err != nil {
-			return fmt.Errorf("CreateNamedNIC(%v, %v, %v) failed: %v", id, name, linkEP, err)
-		}
+func (n *Network) createNICWithAddrs(id tcpip.NICID, name string, ep stack.LinkEndpoint, addrs []net.IP) error {
+	opts := stack.NICOptions{Name: name}
+	if err := n.Stack.CreateNICWithOptions(id, sniffer.New(ep), opts); err != nil {
+		return fmt.Errorf("CreateNICWithOptions(%d, _, %+v) failed: %v", id, opts, err)
 	}
 
 	// Always start with an arp address for the NIC.
@@ -230,8 +331,8 @@ func ipToAddress(ip net.IP) tcpip.Address {
 	return addr
 }
 
-// ipToAddressMask converts IP to tcpip.AddressMask, ignoring the protocol.
-func ipToAddressMask(ip net.IP) tcpip.AddressMask {
-	_, addr := ipToAddressAndProto(ip)
-	return tcpip.AddressMask(addr)
+// ipMaskToAddressMask converts IPMask to tcpip.AddressMask, ignoring the
+// protocol.
+func ipMaskToAddressMask(ipMask net.IPMask) tcpip.AddressMask {
+	return tcpip.AddressMask(ipToAddress(net.IP(ipMask)))
 }

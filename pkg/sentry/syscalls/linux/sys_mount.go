@@ -19,8 +19,8 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 )
 
 // Mount implements Linux syscall mount(2).
@@ -109,9 +109,17 @@ func Mount(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 		return 0, nil, syserror.EINVAL
 	}
 
-	return 0, nil, fileOpOn(t, linux.AT_FDCWD, targetPath, true /* resolve */, func(root *fs.Dirent, d *fs.Dirent) error {
+	if err := fileOpOn(t, linux.AT_FDCWD, targetPath, true /* resolve */, func(root *fs.Dirent, d *fs.Dirent, _ uint) error {
+		// Mount will take a reference on rootInode if successful.
 		return t.MountNamespace().Mount(t, d, rootInode)
-	})
+	}); err != nil {
+		// Something went wrong. Drop our ref on rootInode before
+		// returning the error.
+		rootInode.DecRef()
+		return 0, nil, err
+	}
+
+	return 0, nil, nil
 }
 
 // Umount2 implements Linux syscall umount2(2).
@@ -140,7 +148,7 @@ func Umount2(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysca
 	resolve := flags&linux.UMOUNT_NOFOLLOW != linux.UMOUNT_NOFOLLOW
 	detachOnly := flags&linux.MNT_DETACH == linux.MNT_DETACH
 
-	return 0, nil, fileOpOn(t, linux.AT_FDCWD, path, resolve, func(root *fs.Dirent, d *fs.Dirent) error {
+	return 0, nil, fileOpOn(t, linux.AT_FDCWD, path, resolve, func(root *fs.Dirent, d *fs.Dirent, _ uint) error {
 		return t.MountNamespace().Unmount(t, d, detachOnly)
 	})
 }

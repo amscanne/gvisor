@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"strconv"
 
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/p9"
-	"gvisor.dev/gvisor/pkg/sentry/context"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 )
 
@@ -54,6 +54,14 @@ const (
 	// sandbox using files backed by the gofer. If set to false, unix sockets
 	// cannot be bound to gofer files without an overlay on top.
 	privateUnixSocketKey = "privateunixsocket"
+
+	// If present, sets CachingInodeOperationsOptions.LimitHostFDTranslation to
+	// true.
+	limitHostFDTranslationKey = "limit_host_fd_translation"
+
+	// overlayfsStaleRead if present closes cached readonly file after the first
+	// write. This is done to workaround a limitation of Linux overlayfs.
+	overlayfsStaleRead = "overlayfs_stale_read"
 )
 
 // defaultAname is the default attach name.
@@ -134,12 +142,14 @@ func (f *filesystem) Mount(ctx context.Context, device string, flags fs.MountSou
 
 // opts are parsed 9p mount options.
 type opts struct {
-	fd                int
-	aname             string
-	policy            cachePolicy
-	msize             uint32
-	version           string
-	privateunixsocket bool
+	fd                     int
+	aname                  string
+	policy                 cachePolicy
+	msize                  uint32
+	version                string
+	privateunixsocket      bool
+	limitHostFDTranslation bool
+	overlayfsStaleRead     bool
 }
 
 // options parses mount(2) data into structured options.
@@ -235,6 +245,16 @@ func options(data string) (opts, error) {
 		}
 		o.privateunixsocket = b
 		delete(options, privateUnixSocketKey)
+	}
+
+	if _, ok := options[limitHostFDTranslationKey]; ok {
+		o.limitHostFDTranslation = true
+		delete(options, limitHostFDTranslationKey)
+	}
+
+	if _, ok := options[overlayfsStaleRead]; ok {
+		o.overlayfsStaleRead = true
+		delete(options, overlayfsStaleRead)
 	}
 
 	// Fail to attach if the caller wanted us to do something that we

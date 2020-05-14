@@ -15,7 +15,7 @@
 package sys
 
 import (
-	"gvisor.dev/gvisor/pkg/sentry/context"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 )
 
@@ -30,7 +30,7 @@ func init() {
 	fs.RegisterFilesystem(&filesystem{})
 }
 
-// FilesystemName is the name underwhich the filesystem is registered.
+// FilesystemName is the name under which the filesystem is registered.
 // Name matches fs/sysfs/mount.c:sysfs_fs_type.name.
 const FilesystemName = "sysfs"
 
@@ -61,5 +61,5 @@ func (f *filesystem) Mount(ctx context.Context, device string, flags fs.MountSou
 	// device is always ignored.
 	// sysfs ignores data, see fs/sysfs/mount.c:sysfs_mount.
 
-	return New(ctx, fs.NewNonCachingMountSource(f, flags)), nil
+	return New(ctx, fs.NewNonCachingMountSource(ctx, f, flags)), nil
 }

@@ -61,8 +61,12 @@ func (x *superOperations) load(m state.Map) {
 func (x *lineDiscipline) beforeSave() {}
 func (x *lineDiscipline) save(m state.Map) {
 	x.beforeSave()
-	if !state.IsZeroValue(x.masterWaiter) { m.Failf("masterWaiter is %v, expected zero", x.masterWaiter) }
-	if !state.IsZeroValue(x.slaveWaiter) { m.Failf("slaveWaiter is %v, expected zero", x.slaveWaiter) }
+	if !state.IsZeroValue(&x.masterWaiter) {
+		m.Failf("masterWaiter is %#v, expected zero", &x.masterWaiter)
+	}
+	if !state.IsZeroValue(&x.slaveWaiter) {
+		m.Failf("slaveWaiter is %#v, expected zero", &x.slaveWaiter)
+	}
 	m.Save("size", &x.size)
 	m.Save("inQueue", &x.inQueue)
 	m.Save("outQueue", &x.outQueue)
@@ -175,6 +179,8 @@ func (x *Terminal) save(m state.Map) {
 	m.Save("n", &x.n)
 	m.Save("d", &x.d)
 	m.Save("ld", &x.ld)
+	m.Save("masterKTTY", &x.masterKTTY)
+	m.Save("slaveKTTY", &x.slaveKTTY)
 }
 
 func (x *Terminal) afterLoad() {}
@@ -183,20 +189,22 @@ func (x *Terminal) load(m state.Map) {
 	m.Load("n", &x.n)
 	m.Load("d", &x.d)
 	m.Load("ld", &x.ld)
+	m.Load("masterKTTY", &x.masterKTTY)
+	m.Load("slaveKTTY", &x.slaveKTTY)
 }
 
 func init() {
-	state.Register("tty.dirInodeOperations", (*dirInodeOperations)(nil), state.Fns{Save: (*dirInodeOperations).save, Load: (*dirInodeOperations).load})
-	state.Register("tty.dirFileOperations", (*dirFileOperations)(nil), state.Fns{Save: (*dirFileOperations).save, Load: (*dirFileOperations).load})
-	state.Register("tty.filesystem", (*filesystem)(nil), state.Fns{Save: (*filesystem).save, Load: (*filesystem).load})
-	state.Register("tty.superOperations", (*superOperations)(nil), state.Fns{Save: (*superOperations).save, Load: (*superOperations).load})
-	state.Register("tty.lineDiscipline", (*lineDiscipline)(nil), state.Fns{Save: (*lineDiscipline).save, Load: (*lineDiscipline).load})
-	state.Register("tty.outputQueueTransformer", (*outputQueueTransformer)(nil), state.Fns{Save: (*outputQueueTransformer).save, Load: (*outputQueueTransformer).load})
-	state.Register("tty.inputQueueTransformer", (*inputQueueTransformer)(nil), state.Fns{Save: (*inputQueueTransformer).save, Load: (*inputQueueTransformer).load})
-	state.Register("tty.masterInodeOperations", (*masterInodeOperations)(nil), state.Fns{Save: (*masterInodeOperations).save, Load: (*masterInodeOperations).load})
-	state.Register("tty.masterFileOperations", (*masterFileOperations)(nil), state.Fns{Save: (*masterFileOperations).save, Load: (*masterFileOperations).load})
-	state.Register("tty.queue", (*queue)(nil), state.Fns{Save: (*queue).save, Load: (*queue).load})
-	state.Register("tty.slaveInodeOperations", (*slaveInodeOperations)(nil), state.Fns{Save: (*slaveInodeOperations).save, Load: (*slaveInodeOperations).load})
-	state.Register("tty.slaveFileOperations", (*slaveFileOperations)(nil), state.Fns{Save: (*slaveFileOperations).save, Load: (*slaveFileOperations).load})
-	state.Register("tty.Terminal", (*Terminal)(nil), state.Fns{Save: (*Terminal).save, Load: (*Terminal).load})
+	state.Register("pkg/sentry/fs/tty.dirInodeOperations", (*dirInodeOperations)(nil), state.Fns{Save: (*dirInodeOperations).save, Load: (*dirInodeOperations).load})
+	state.Register("pkg/sentry/fs/tty.dirFileOperations", (*dirFileOperations)(nil), state.Fns{Save: (*dirFileOperations).save, Load: (*dirFileOperations).load})
+	state.Register("pkg/sentry/fs/tty.filesystem", (*filesystem)(nil), state.Fns{Save: (*filesystem).save, Load: (*filesystem).load})
+	state.Register("pkg/sentry/fs/tty.superOperations", (*superOperations)(nil), state.Fns{Save: (*superOperations).save, Load: (*superOperations).load})
+	state.Register("pkg/sentry/fs/tty.lineDiscipline", (*lineDiscipline)(nil), state.Fns{Save: (*lineDiscipline).save, Load: (*lineDiscipline).load})
+	state.Register("pkg/sentry/fs/tty.outputQueueTransformer", (*outputQueueTransformer)(nil), state.Fns{Save: (*outputQueueTransformer).save, Load: (*outputQueueTransformer).load})
+	state.Register("pkg/sentry/fs/tty.inputQueueTransformer", (*inputQueueTransformer)(nil), state.Fns{Save: (*inputQueueTransformer).save, Load: (*inputQueueTransformer).load})
+	state.Register("pkg/sentry/fs/tty.masterInodeOperations", (*masterInodeOperations)(nil), state.Fns{Save: (*masterInodeOperations).save, Load: (*masterInodeOperations).load})
+	state.Register("pkg/sentry/fs/tty.masterFileOperations", (*masterFileOperations)(nil), state.Fns{Save: (*masterFileOperations).save, Load: (*masterFileOperations).load})
+	state.Register("pkg/sentry/fs/tty.queue", (*queue)(nil), state.Fns{Save: (*queue).save, Load: (*queue).load})
+	state.Register("pkg/sentry/fs/tty.slaveInodeOperations", (*slaveInodeOperations)(nil), state.Fns{Save: (*slaveInodeOperations).save, Load: (*slaveInodeOperations).load})
+	state.Register("pkg/sentry/fs/tty.slaveFileOperations", (*slaveFileOperations)(nil), state.Fns{Save: (*slaveFileOperations).save, Load: (*slaveFileOperations).load})
+	state.Register("pkg/sentry/fs/tty.Terminal", (*Terminal)(nil), state.Fns{Save: (*Terminal).save, Load: (*Terminal).load})
 }

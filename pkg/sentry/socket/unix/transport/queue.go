@@ -15,10 +15,11 @@
 package transport
 
 import (
-	"sync"
-
 	"gvisor.dev/gvisor/pkg/refs"
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/syserr"
+	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
@@ -33,6 +34,7 @@ type queue struct {
 
 	mu       sync.Mutex `state:"nosave"`
 	closed   bool
+	unread   bool
 	used     int64
 	limit    int64
 	dataList messageList
@@ -100,12 +102,16 @@ func (q *queue) IsWritable() bool {
 
 // Enqueue adds an entry to the data queue if room is available.
 //
-// If truncate is true, Enqueue may truncate the message beforing enqueuing it.
-// Otherwise, the entire message must fit. If n < e.Length(), err indicates why.
+// If discardEmpty is true and there are zero bytes of data, the packet is
+// dropped.
+//
+// If truncate is true, Enqueue may truncate the message before enqueuing it.
+// Otherwise, the entire message must fit. If l is less than the size of data,
+// err indicates why.
 //
 // If notify is true, ReaderQueue.Notify must be called:
 // q.ReaderQueue.Notify(waiter.EventIn)
-func (q *queue) Enqueue(e *message, truncate bool) (l int64, notify bool, err *syserr.Error) {
+func (q *queue) Enqueue(data [][]byte, c ControlMessages, from tcpip.FullAddress, discardEmpty bool, truncate bool) (l int64, notify bool, err *syserr.Error) {
 	q.mu.Lock()
 
 	if q.closed {
@@ -113,9 +119,16 @@ func (q *queue) Enqueue(e *message, truncate bool) (l int64, notify bool, err *s
 		return 0, false, syserr.ErrClosedForSend
 	}
 
-	free := q.limit - q.used
+	for _, d := range data {
+		l += int64(len(d))
+	}
+	if discardEmpty && l == 0 {
+		q.mu.Unlock()
+		c.Release()
+		return 0, false, nil
+	}
 
-	l = e.Length()
+	free := q.limit - q.used
 
 	if l > free && truncate {
 		if free == 0 {
@@ -124,8 +137,7 @@ func (q *queue) Enqueue(e *message, truncate bool) (l int64, notify bool, err *s
 			return 0, false, syserr.ErrWouldBlock
 		}
 
-		e.Truncate(free)
-		l = e.Length()
+		l = free
 		err = syserr.ErrWouldBlock
 	}
 
@@ -136,14 +148,26 @@ func (q *queue) Enqueue(e *message, truncate bool) (l int64, notify bool, err *s
 	}
 
 	if l > free {
-		// Message can't fit right now.
+		// Message can't fit right now, and could not be truncated.
 		q.mu.Unlock()
 		return 0, false, syserr.ErrWouldBlock
 	}
 
+	// Aggregate l bytes of data. This will truncate the data if l is less than
+	// the total bytes held in data.
+	v := make([]byte, l)
+	for i, b := 0, v; i < len(data) && len(b) > 0; i++ {
+		n := copy(b, data[i])
+		b = b[n:]
+	}
+
 	notify = q.dataList.Front() == nil
 	q.used += l
-	q.dataList.PushBack(e)
+	q.dataList.PushBack(&message{
+		Data:    buffer.View(v),
+		Control: c,
+		Address: from,
+	})
 
 	q.mu.Unlock()
 
@@ -161,6 +185,9 @@ func (q *queue) Dequeue() (e *message, notify bool, err *syserr.Error) {
 		err := syserr.ErrWouldBlock
 		if q.closed {
 			err = syserr.ErrClosedForReceive
+			if q.unread {
+				err = syserr.ErrConnectionReset
+			}
 		}
 		q.mu.Unlock()
 
@@ -188,7 +215,9 @@ func (q *queue) Peek() (*message, *syserr.Error) {
 	if q.dataList.Front() == nil {
 		err := syserr.ErrWouldBlock
 		if q.closed {
-			err = syserr.ErrClosedForReceive
+			if err = syserr.ErrClosedForReceive; q.unread {
+				err = syserr.ErrConnectionReset
+			}
 		}
 		return nil, err
 	}
@@ -207,4 +236,12 @@ func (q *queue) QueuedSize() int64 {
 // MaxQueueSize returns the maximum number of bytes storable in the queue.
 func (q *queue) MaxQueueSize() int64 {
 	return q.limit
+}
+
+// CloseUnread sets flag to indicate that the peer is closed (not shutdown)
+// with unread data. So if read on this queue shall return ECONNRESET error.
+func (q *queue) CloseUnread() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.unread = true
 }

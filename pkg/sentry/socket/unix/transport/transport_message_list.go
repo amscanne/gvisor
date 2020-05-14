@@ -52,11 +52,21 @@ func (l *messageList) Back() *message {
 	return l.tail
 }
 
+// Len returns the number of elements in the list.
+//
+// NOTE: This is an O(n) operation.
+func (l *messageList) Len() (count int) {
+	for e := l.Front(); e != nil; e = e.Next() {
+		count++
+	}
+	return count
+}
+
 // PushFront inserts the element e at the front of list l.
 func (l *messageList) PushFront(e *message) {
-	messageElementMapper{}.linkerFor(e).SetNext(l.head)
-	messageElementMapper{}.linkerFor(e).SetPrev(nil)
-
+	linker := messageElementMapper{}.linkerFor(e)
+	linker.SetNext(l.head)
+	linker.SetPrev(nil)
 	if l.head != nil {
 		messageElementMapper{}.linkerFor(l.head).SetPrev(e)
 	} else {
@@ -68,9 +78,9 @@ func (l *messageList) PushFront(e *message) {
 
 // PushBack inserts the element e at the back of list l.
 func (l *messageList) PushBack(e *message) {
-	messageElementMapper{}.linkerFor(e).SetNext(nil)
-	messageElementMapper{}.linkerFor(e).SetPrev(l.tail)
-
+	linker := messageElementMapper{}.linkerFor(e)
+	linker.SetNext(nil)
+	linker.SetPrev(l.tail)
 	if l.tail != nil {
 		messageElementMapper{}.linkerFor(l.tail).SetNext(e)
 	} else {
@@ -91,17 +101,20 @@ func (l *messageList) PushBackList(m *messageList) {
 
 		l.tail = m.tail
 	}
-
 	m.head = nil
 	m.tail = nil
 }
 
 // InsertAfter inserts e after b.
 func (l *messageList) InsertAfter(b, e *message) {
-	a := messageElementMapper{}.linkerFor(b).Next()
-	messageElementMapper{}.linkerFor(e).SetNext(a)
-	messageElementMapper{}.linkerFor(e).SetPrev(b)
-	messageElementMapper{}.linkerFor(b).SetNext(e)
+	bLinker := messageElementMapper{}.linkerFor(b)
+	eLinker := messageElementMapper{}.linkerFor(e)
+
+	a := bLinker.Next()
+
+	eLinker.SetNext(a)
+	eLinker.SetPrev(b)
+	bLinker.SetNext(e)
 
 	if a != nil {
 		messageElementMapper{}.linkerFor(a).SetPrev(e)
@@ -112,10 +125,13 @@ func (l *messageList) InsertAfter(b, e *message) {
 
 // InsertBefore inserts e before a.
 func (l *messageList) InsertBefore(a, e *message) {
-	b := messageElementMapper{}.linkerFor(a).Prev()
-	messageElementMapper{}.linkerFor(e).SetNext(a)
-	messageElementMapper{}.linkerFor(e).SetPrev(b)
-	messageElementMapper{}.linkerFor(a).SetPrev(e)
+	aLinker := messageElementMapper{}.linkerFor(a)
+	eLinker := messageElementMapper{}.linkerFor(e)
+
+	b := aLinker.Prev()
+	eLinker.SetNext(a)
+	eLinker.SetPrev(b)
+	aLinker.SetPrev(e)
 
 	if b != nil {
 		messageElementMapper{}.linkerFor(b).SetNext(e)
@@ -126,8 +142,9 @@ func (l *messageList) InsertBefore(a, e *message) {
 
 // Remove removes e from l.
 func (l *messageList) Remove(e *message) {
-	prev := messageElementMapper{}.linkerFor(e).Prev()
-	next := messageElementMapper{}.linkerFor(e).Next()
+	linker := messageElementMapper{}.linkerFor(e)
+	prev := linker.Prev()
+	next := linker.Next()
 
 	if prev != nil {
 		messageElementMapper{}.linkerFor(prev).SetNext(next)
@@ -140,6 +157,9 @@ func (l *messageList) Remove(e *message) {
 	} else {
 		l.tail = prev
 	}
+
+	linker.SetNext(nil)
+	linker.SetPrev(nil)
 }
 
 // Entry is a default implementation of Linker. Users can add anonymous fields

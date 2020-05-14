@@ -52,11 +52,21 @@ func (l *socketList) Back() *SocketEntry {
 	return l.tail
 }
 
+// Len returns the number of elements in the list.
+//
+// NOTE: This is an O(n) operation.
+func (l *socketList) Len() (count int) {
+	for e := l.Front(); e != nil; e = e.Next() {
+		count++
+	}
+	return count
+}
+
 // PushFront inserts the element e at the front of list l.
 func (l *socketList) PushFront(e *SocketEntry) {
-	socketElementMapper{}.linkerFor(e).SetNext(l.head)
-	socketElementMapper{}.linkerFor(e).SetPrev(nil)
-
+	linker := socketElementMapper{}.linkerFor(e)
+	linker.SetNext(l.head)
+	linker.SetPrev(nil)
 	if l.head != nil {
 		socketElementMapper{}.linkerFor(l.head).SetPrev(e)
 	} else {
@@ -68,9 +78,9 @@ func (l *socketList) PushFront(e *SocketEntry) {
 
 // PushBack inserts the element e at the back of list l.
 func (l *socketList) PushBack(e *SocketEntry) {
-	socketElementMapper{}.linkerFor(e).SetNext(nil)
-	socketElementMapper{}.linkerFor(e).SetPrev(l.tail)
-
+	linker := socketElementMapper{}.linkerFor(e)
+	linker.SetNext(nil)
+	linker.SetPrev(l.tail)
 	if l.tail != nil {
 		socketElementMapper{}.linkerFor(l.tail).SetNext(e)
 	} else {
@@ -91,17 +101,20 @@ func (l *socketList) PushBackList(m *socketList) {
 
 		l.tail = m.tail
 	}
-
 	m.head = nil
 	m.tail = nil
 }
 
 // InsertAfter inserts e after b.
 func (l *socketList) InsertAfter(b, e *SocketEntry) {
-	a := socketElementMapper{}.linkerFor(b).Next()
-	socketElementMapper{}.linkerFor(e).SetNext(a)
-	socketElementMapper{}.linkerFor(e).SetPrev(b)
-	socketElementMapper{}.linkerFor(b).SetNext(e)
+	bLinker := socketElementMapper{}.linkerFor(b)
+	eLinker := socketElementMapper{}.linkerFor(e)
+
+	a := bLinker.Next()
+
+	eLinker.SetNext(a)
+	eLinker.SetPrev(b)
+	bLinker.SetNext(e)
 
 	if a != nil {
 		socketElementMapper{}.linkerFor(a).SetPrev(e)
@@ -112,10 +125,13 @@ func (l *socketList) InsertAfter(b, e *SocketEntry) {
 
 // InsertBefore inserts e before a.
 func (l *socketList) InsertBefore(a, e *SocketEntry) {
-	b := socketElementMapper{}.linkerFor(a).Prev()
-	socketElementMapper{}.linkerFor(e).SetNext(a)
-	socketElementMapper{}.linkerFor(e).SetPrev(b)
-	socketElementMapper{}.linkerFor(a).SetPrev(e)
+	aLinker := socketElementMapper{}.linkerFor(a)
+	eLinker := socketElementMapper{}.linkerFor(e)
+
+	b := aLinker.Prev()
+	eLinker.SetNext(a)
+	eLinker.SetPrev(b)
+	aLinker.SetPrev(e)
 
 	if b != nil {
 		socketElementMapper{}.linkerFor(b).SetNext(e)
@@ -126,8 +142,9 @@ func (l *socketList) InsertBefore(a, e *SocketEntry) {
 
 // Remove removes e from l.
 func (l *socketList) Remove(e *SocketEntry) {
-	prev := socketElementMapper{}.linkerFor(e).Prev()
-	next := socketElementMapper{}.linkerFor(e).Next()
+	linker := socketElementMapper{}.linkerFor(e)
+	prev := linker.Prev()
+	next := linker.Next()
 
 	if prev != nil {
 		socketElementMapper{}.linkerFor(prev).SetNext(next)
@@ -140,6 +157,9 @@ func (l *socketList) Remove(e *SocketEntry) {
 	} else {
 		l.tail = prev
 	}
+
+	linker.SetNext(nil)
+	linker.SetPrev(nil)
 }
 
 // Entry is a default implementation of Linker. Users can add anonymous fields

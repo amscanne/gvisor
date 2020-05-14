@@ -27,7 +27,6 @@ import (
 	"syscall"
 	"time"
 
-	"flag"
 	"github.com/google/subcommands"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"gvisor.dev/gvisor/pkg/log"
@@ -37,6 +36,7 @@ import (
 	"gvisor.dev/gvisor/runsc/boot"
 	"gvisor.dev/gvisor/runsc/console"
 	"gvisor.dev/gvisor/runsc/container"
+	"gvisor.dev/gvisor/runsc/flag"
 	"gvisor.dev/gvisor/runsc/specutils"
 )
 
@@ -105,17 +105,20 @@ func (ex *Exec) SetFlags(f *flag.FlagSet) {
 // Execute implements subcommands.Command.Execute. It starts a process in an
 // already created container.
 func (ex *Exec) Execute(_ context.Context, f *flag.FlagSet, args ...interface{}) subcommands.ExitStatus {
-	e, id, err := ex.parseArgs(f)
+	conf := args[0].(*boot.Config)
+	e, id, err := ex.parseArgs(f, conf.EnableRaw)
 	if err != nil {
 		Fatalf("parsing process spec: %v", err)
 	}
-	conf := args[0].(*boot.Config)
 	waitStatus := args[1].(*syscall.WaitStatus)
 
 	c, err := container.Load(conf.RootDir, id)
 	if err != nil {
 		Fatalf("loading sandbox: %v", err)
 	}
+
+	log.Debugf("Exec arguments: %+v", e)
+	log.Debugf("Exec capablities: %+v", e.Capabilities)
 
 	// Replace empty settings with defaults from container.
 	if e.WorkingDirectory == "" {
@@ -127,15 +130,13 @@ func (ex *Exec) Execute(_ context.Context, f *flag.FlagSet, args ...interface{})
 			Fatalf("getting environment variables: %v", err)
 		}
 	}
+
 	if e.Capabilities == nil {
-		// enableRaw is set to true to prevent the filtering out of
-		// CAP_NET_RAW. This is the opposite of Create() because exec
-		// requires the capability to be set explicitly, while 'docker
-		// run' sets it by default.
-		e.Capabilities, err = specutils.Capabilities(true /* enableRaw */, c.Spec.Process.Capabilities)
+		e.Capabilities, err = specutils.Capabilities(conf.EnableRaw, c.Spec.Process.Capabilities)
 		if err != nil {
 			Fatalf("creating capabilities: %v", err)
 		}
+		log.Infof("Using exec capabilities from container: %+v", e.Capabilities)
 	}
 
 	// containerd expects an actual process to represent the container being
@@ -235,7 +236,11 @@ func (ex *Exec) execChildAndWait(waitStatus *syscall.WaitStatus) subcommands.Exi
 		cmd.SysProcAttr = &syscall.SysProcAttr{
 			Setsid:  true,
 			Setctty: true,
-			Ctty:    int(tty.Fd()),
+			// The Ctty FD must be the FD in the child process's FD
+			// table. Since we set cmd.Stdin/Stdout/Stderr to the
+			// tty FD, we can use any of 0, 1, or 2 here.
+			// See https://github.com/golang/go/issues/29458.
+			Ctty: 0,
 		}
 	}
 
@@ -278,14 +283,14 @@ func (ex *Exec) execChildAndWait(waitStatus *syscall.WaitStatus) subcommands.Exi
 // parseArgs parses exec information from the command line or a JSON file
 // depending on whether the --process flag was used. Returns an ExecArgs and
 // the ID of the container to be used.
-func (ex *Exec) parseArgs(f *flag.FlagSet) (*control.ExecArgs, string, error) {
+func (ex *Exec) parseArgs(f *flag.FlagSet, enableRaw bool) (*control.ExecArgs, string, error) {
 	if ex.processPath == "" {
 		// Requires at least a container ID and command.
 		if f.NArg() < 2 {
 			f.Usage()
 			return nil, "", fmt.Errorf("both a container-id and command are required")
 		}
-		e, err := ex.argsFromCLI(f.Args()[1:])
+		e, err := ex.argsFromCLI(f.Args()[1:], enableRaw)
 		return e, f.Arg(0), err
 	}
 	// Requires only the container ID.
@@ -293,11 +298,11 @@ func (ex *Exec) parseArgs(f *flag.FlagSet) (*control.ExecArgs, string, error) {
 		f.Usage()
 		return nil, "", fmt.Errorf("a container-id is required")
 	}
-	e, err := ex.argsFromProcessFile()
+	e, err := ex.argsFromProcessFile(enableRaw)
 	return e, f.Arg(0), err
 }
 
-func (ex *Exec) argsFromCLI(argv []string) (*control.ExecArgs, error) {
+func (ex *Exec) argsFromCLI(argv []string, enableRaw bool) (*control.ExecArgs, error) {
 	extraKGIDs := make([]auth.KGID, 0, len(ex.extraKGIDs))
 	for _, s := range ex.extraKGIDs {
 		kgid, err := strconv.Atoi(s)
@@ -310,7 +315,7 @@ func (ex *Exec) argsFromCLI(argv []string) (*control.ExecArgs, error) {
 	var caps *auth.TaskCapabilities
 	if len(ex.caps) > 0 {
 		var err error
-		caps, err = capabilities(ex.caps)
+		caps, err = capabilities(ex.caps, enableRaw)
 		if err != nil {
 			return nil, fmt.Errorf("capabilities error: %v", err)
 		}
@@ -328,7 +333,7 @@ func (ex *Exec) argsFromCLI(argv []string) (*control.ExecArgs, error) {
 	}, nil
 }
 
-func (ex *Exec) argsFromProcessFile() (*control.ExecArgs, error) {
+func (ex *Exec) argsFromProcessFile(enableRaw bool) (*control.ExecArgs, error) {
 	f, err := os.Open(ex.processPath)
 	if err != nil {
 		return nil, fmt.Errorf("error opening process file: %s, %v", ex.processPath, err)
@@ -338,21 +343,21 @@ func (ex *Exec) argsFromProcessFile() (*control.ExecArgs, error) {
 	if err := json.NewDecoder(f).Decode(&p); err != nil {
 		return nil, fmt.Errorf("error parsing process file: %s, %v", ex.processPath, err)
 	}
-	return argsFromProcess(&p)
+	return argsFromProcess(&p, enableRaw)
 }
 
 // argsFromProcess performs all the non-IO conversion from the Process struct
 // to ExecArgs.
-func argsFromProcess(p *specs.Process) (*control.ExecArgs, error) {
+func argsFromProcess(p *specs.Process, enableRaw bool) (*control.ExecArgs, error) {
 	// Create capabilities.
 	var caps *auth.TaskCapabilities
 	if p.Capabilities != nil {
 		var err error
-		// enableRaw is set to true to prevent the filtering out of
-		// CAP_NET_RAW. This is the opposite of Create() because exec
-		// requires the capability to be set explicitly, while 'docker
-		// run' sets it by default.
-		caps, err = specutils.Capabilities(true /* enableRaw */, p.Capabilities)
+		// Starting from Docker 19, capabilities are explicitly set for exec (instead
+		// of nil like before). So we can't distinguish 'exec' from
+		// 'exec --privileged', as both specify CAP_NET_RAW. Therefore, filter
+		// CAP_NET_RAW in the same way as container start.
+		caps, err = specutils.Capabilities(enableRaw, p.Capabilities)
 		if err != nil {
 			return nil, fmt.Errorf("error creating capabilities: %v", err)
 		}
@@ -405,7 +410,7 @@ func resolveEnvs(envs ...[]string) ([]string, error) {
 // capabilities takes a list of capabilities as strings and returns an
 // auth.TaskCapabilities struct with those capabilities in every capability set.
 // This mimics runc's behavior.
-func capabilities(cs []string) (*auth.TaskCapabilities, error) {
+func capabilities(cs []string, enableRaw bool) (*auth.TaskCapabilities, error) {
 	var specCaps specs.LinuxCapabilities
 	for _, cap := range cs {
 		specCaps.Ambient = append(specCaps.Ambient, cap)
@@ -414,11 +419,11 @@ func capabilities(cs []string) (*auth.TaskCapabilities, error) {
 		specCaps.Inheritable = append(specCaps.Inheritable, cap)
 		specCaps.Permitted = append(specCaps.Permitted, cap)
 	}
-	// enableRaw is set to true to prevent the filtering out of
-	// CAP_NET_RAW. This is the opposite of Create() because exec requires
-	// the capability to be set explicitly, while 'docker run' sets it by
-	// default.
-	return specutils.Capabilities(true /* enableRaw */, &specCaps)
+	// Starting from Docker 19, capabilities are explicitly set for exec (instead
+	// of nil like before). So we can't distinguish 'exec' from
+	// 'exec --privileged', as both specify CAP_NET_RAW. Therefore, filter
+	// CAP_NET_RAW in the same way as container start.
+	return specutils.Capabilities(enableRaw, &specCaps)
 }
 
 // stringSlice allows a flag to be used multiple times, where each occurrence

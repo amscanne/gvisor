@@ -16,23 +16,31 @@ package linux
 
 import (
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
-	"gvisor.dev/gvisor/pkg/sentry/kernel/kdefs"
 	"gvisor.dev/gvisor/pkg/syserror"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
 // doSplice implements a blocking splice operation.
 func doSplice(t *kernel.Task, outFile, inFile *fs.File, opts fs.SpliceOpts, nonBlocking bool) (int64, error) {
+	log.Infof("NLAC: doSplice opts: %+v", opts)
+	if opts.Length < 0 || opts.SrcStart < 0 || opts.DstStart < 0 || (opts.SrcStart+opts.Length < 0) {
+		return 0, syserror.EINVAL
+	}
+
+	if opts.Length > int64(kernel.MAX_RW_COUNT) {
+		opts.Length = int64(kernel.MAX_RW_COUNT)
+	}
+
 	var (
 		total int64
 		n     int64
 		err   error
-		ch    chan struct{}
-		inW   bool
-		outW  bool
+		inCh  chan struct{}
+		outCh chan struct{}
 	)
 	for opts.Length > 0 {
 		n, err = fs.Splice(t, outFile, inFile, opts)
@@ -44,30 +52,33 @@ func doSplice(t *kernel.Task, outFile, inFile *fs.File, opts fs.SpliceOpts, nonB
 			break
 		}
 
-		// Are we a registered waiter?
-		if ch == nil {
-			ch = make(chan struct{}, 1)
+		// Note that the blocking behavior here is a bit different than the
+		// normal pattern. Because we need to have both data to read and data
+		// to write simultaneously, we actually explicitly block on both of
+		// these cases in turn before returning to the splice operation.
+		if inFile.Readiness(EventMaskRead) == 0 {
+			if inCh == nil {
+				inCh = make(chan struct{}, 1)
+				inW, _ := waiter.NewChannelEntry(inCh)
+				inFile.EventRegister(&inW, EventMaskRead)
+				defer inFile.EventUnregister(&inW)
+				continue // Need to refresh readiness.
+			}
+			if err = t.Block(inCh); err != nil {
+				break
+			}
 		}
-		if !inW && inFile.Readiness(EventMaskRead) == 0 && !inFile.Flags().NonBlocking {
-			w, _ := waiter.NewChannelEntry(ch)
-			inFile.EventRegister(&w, EventMaskRead)
-			defer inFile.EventUnregister(&w)
-			inW = true // Registered.
-		} else if !outW && outFile.Readiness(EventMaskWrite) == 0 && !outFile.Flags().NonBlocking {
-			w, _ := waiter.NewChannelEntry(ch)
-			outFile.EventRegister(&w, EventMaskWrite)
-			defer outFile.EventUnregister(&w)
-			outW = true // Registered.
-		}
-
-		// Was anything registered? If no, everything is non-blocking.
-		if !inW && !outW {
-			break
-		}
-
-		// Block until there's data.
-		if err = t.Block(ch); err != nil {
-			break
+		if outFile.Readiness(EventMaskWrite) == 0 {
+			if outCh == nil {
+				outCh = make(chan struct{}, 1)
+				outW, _ := waiter.NewChannelEntry(outCh)
+				outFile.EventRegister(&outW, EventMaskWrite)
+				defer outFile.EventUnregister(&outW)
+				continue // Need to refresh readiness.
+			}
+			if err = t.Block(outCh); err != nil {
+				break
+			}
 		}
 	}
 
@@ -76,33 +87,35 @@ func doSplice(t *kernel.Task, outFile, inFile *fs.File, opts fs.SpliceOpts, nonB
 
 // Sendfile implements linux system call sendfile(2).
 func Sendfile(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
-	outFD := kdefs.FD(args[0].Int())
-	inFD := kdefs.FD(args[1].Int())
+	outFD := args[0].Int()
+	inFD := args[1].Int()
 	offsetAddr := args[2].Pointer()
 	count := int64(args[3].SizeT())
 
-	// Don't send a negative number of bytes.
-	if count < 0 {
-		return 0, nil, syserror.EINVAL
-	}
-
 	// Get files.
-	outFile := t.FDMap().GetFile(outFD)
-	if outFile == nil {
-		return 0, nil, syserror.EBADF
-	}
-	defer outFile.DecRef()
-
-	inFile := t.FDMap().GetFile(inFD)
+	inFile := t.GetFile(inFD)
 	if inFile == nil {
 		return 0, nil, syserror.EBADF
 	}
 	defer inFile.DecRef()
 
-	// Verify that the outfile Append flag is not set. Note that fs.Splice
-	// itself validates that the output file is writable.
-	if outFile.Flags().Append {
+	if !inFile.Flags().Read {
 		return 0, nil, syserror.EBADF
+	}
+
+	outFile := t.GetFile(outFD)
+	if outFile == nil {
+		return 0, nil, syserror.EBADF
+	}
+	defer outFile.DecRef()
+
+	if !outFile.Flags().Write {
+		return 0, nil, syserror.EBADF
+	}
+
+	// Verify that the outfile Append flag is not set.
+	if outFile.Flags().Append {
+		return 0, nil, syserror.EINVAL
 	}
 
 	// Verify that we have a regular infile. This is a requirement; the
@@ -128,17 +141,12 @@ func Sendfile(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysc
 			return 0, nil, err
 		}
 
-		// The offset must be valid.
-		if offset < 0 {
-			return 0, nil, syserror.EINVAL
-		}
-
 		// Do the splice.
 		n, err = doSplice(t, outFile, inFile, fs.SpliceOpts{
 			Length:    count,
 			SrcOffset: true,
 			SrcStart:  offset,
-		}, false)
+		}, outFile.Flags().NonBlocking)
 
 		// Copy out the new offset.
 		if _, err := t.CopyOut(offsetAddr, n+offset); err != nil {
@@ -148,19 +156,24 @@ func Sendfile(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysc
 		// Send data using splice.
 		n, err = doSplice(t, outFile, inFile, fs.SpliceOpts{
 			Length: count,
-		}, false)
+		}, outFile.Flags().NonBlocking)
+	}
+
+	// Sendfile can't lose any data because inFD is always a regual file.
+	if n != 0 {
+		err = nil
 	}
 
 	// We can only pass a single file to handleIOError, so pick inFile
 	// arbitrarily. This is used only for debugging purposes.
-	return uintptr(n), nil, handleIOError(t, n != 0, err, kernel.ERESTARTSYS, "sendfile", inFile)
+	return uintptr(n), nil, handleIOError(t, false, err, kernel.ERESTARTSYS, "sendfile", inFile)
 }
 
 // Splice implements splice(2).
 func Splice(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
-	inFD := kdefs.FD(args[0].Int())
+	inFD := args[0].Int()
 	inOffset := args[1].Pointer()
-	outFD := kdefs.FD(args[2].Int())
+	outFD := args[2].Int()
 	outOffset := args[3].Pointer()
 	count := int64(args[4].SizeT())
 	flags := args[5].Int()
@@ -170,24 +183,25 @@ func Splice(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 		return 0, nil, syserror.EINVAL
 	}
 
-	// Only non-blocking is meaningful. Note that unlike in Linux, this
-	// flag is applied consistently. We will have either fully blocking or
-	// non-blocking behavior below, regardless of the underlying files
-	// being spliced to. It's unclear if this is a bug or not yet.
-	nonBlocking := (flags & linux.SPLICE_F_NONBLOCK) != 0
-
 	// Get files.
-	outFile := t.FDMap().GetFile(outFD)
+	outFile := t.GetFile(outFD)
 	if outFile == nil {
 		return 0, nil, syserror.EBADF
 	}
 	defer outFile.DecRef()
 
-	inFile := t.FDMap().GetFile(inFD)
+	inFile := t.GetFile(inFD)
 	if inFile == nil {
 		return 0, nil, syserror.EBADF
 	}
 	defer inFile.DecRef()
+
+	// The operation is non-blocking if anything is non-blocking.
+	//
+	// N.B. This is a rather simplistic heuristic that avoids some
+	// poor edge case behavior since the exact semantics here are
+	// underspecified and vary between versions of Linux itself.
+	nonBlock := inFile.Flags().NonBlocking || outFile.Flags().NonBlocking || (flags&linux.SPLICE_F_NONBLOCK != 0)
 
 	// Construct our options.
 	//
@@ -197,48 +211,69 @@ func Splice(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 	opts := fs.SpliceOpts{
 		Length: count,
 	}
+	inFileAttr := inFile.Dirent.Inode.StableAttr
+	outFileAttr := outFile.Dirent.Inode.StableAttr
 	switch {
-	case fs.IsPipe(inFile.Dirent.Inode.StableAttr) && !fs.IsPipe(outFile.Dirent.Inode.StableAttr):
+	case fs.IsPipe(inFileAttr) && !fs.IsPipe(outFileAttr):
 		if inOffset != 0 {
 			return 0, nil, syserror.ESPIPE
 		}
 		if outOffset != 0 {
+			if !outFile.Flags().Pwrite {
+				return 0, nil, syserror.EINVAL
+			}
+
 			var offset int64
 			if _, err := t.CopyIn(outOffset, &offset); err != nil {
 				return 0, nil, err
 			}
+
 			// Use the destination offset.
 			opts.DstOffset = true
 			opts.DstStart = offset
 		}
-	case !fs.IsPipe(inFile.Dirent.Inode.StableAttr) && fs.IsPipe(outFile.Dirent.Inode.StableAttr):
+	case !fs.IsPipe(inFileAttr) && fs.IsPipe(outFileAttr):
 		if outOffset != 0 {
 			return 0, nil, syserror.ESPIPE
 		}
 		if inOffset != 0 {
+			if !inFile.Flags().Pread {
+				return 0, nil, syserror.EINVAL
+			}
+
 			var offset int64
 			if _, err := t.CopyIn(inOffset, &offset); err != nil {
 				return 0, nil, err
 			}
+
 			// Use the source offset.
 			opts.SrcOffset = true
 			opts.SrcStart = offset
 		}
-	case fs.IsPipe(inFile.Dirent.Inode.StableAttr) && fs.IsPipe(outFile.Dirent.Inode.StableAttr):
+	case fs.IsPipe(inFileAttr) && fs.IsPipe(outFileAttr):
 		if inOffset != 0 || outOffset != 0 {
 			return 0, nil, syserror.ESPIPE
+		}
+
+		// We may not refer to the same pipe; otherwise it's a continuous loop.
+		if inFileAttr.InodeID == outFileAttr.InodeID {
+			return 0, nil, syserror.EINVAL
 		}
 	default:
 		return 0, nil, syserror.EINVAL
 	}
 
-	// We may not refer to the same pipe; otherwise it's a continuous loop.
-	if inFile.Dirent.Inode.StableAttr.InodeID == outFile.Dirent.Inode.StableAttr.InodeID {
-		return 0, nil, syserror.EINVAL
-	}
-
 	// Splice data.
-	n, err := doSplice(t, outFile, inFile, opts, nonBlocking)
+	n, err := doSplice(t, outFile, inFile, opts, nonBlock)
+
+	// Special files can have additional requirements for granularity.  For
+	// example, read from eventfd returns EINVAL if a size is less 8 bytes.
+	// Inotify is another example. read will return EINVAL is a buffer is
+	// too small to return the next event, but a size of an event isn't
+	// fixed, it is sizeof(struct inotify_event) + {NAME_LEN} + 1.
+	if n != 0 && err != nil && (fs.IsAnonymous(inFileAttr) || fs.IsAnonymous(outFileAttr)) {
+		err = nil
+	}
 
 	// See above; inFile is chosen arbitrarily here.
 	return uintptr(n), nil, handleIOError(t, n != 0, err, kernel.ERESTARTSYS, "splice", inFile)
@@ -246,8 +281,8 @@ func Splice(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 
 // Tee imlements tee(2).
 func Tee(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
-	inFD := kdefs.FD(args[0].Int())
-	outFD := kdefs.FD(args[1].Int())
+	inFD := args[0].Int()
+	outFD := args[1].Int()
 	count := int64(args[2].SizeT())
 	flags := args[3].Int()
 
@@ -256,17 +291,14 @@ func Tee(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallCo
 		return 0, nil, syserror.EINVAL
 	}
 
-	// Only non-blocking is meaningful.
-	nonBlocking := (flags & linux.SPLICE_F_NONBLOCK) != 0
-
 	// Get files.
-	outFile := t.FDMap().GetFile(outFD)
+	outFile := t.GetFile(outFD)
 	if outFile == nil {
 		return 0, nil, syserror.EBADF
 	}
 	defer outFile.DecRef()
 
-	inFile := t.FDMap().GetFile(inFD)
+	inFile := t.GetFile(inFD)
 	if inFile == nil {
 		return 0, nil, syserror.EBADF
 	}
@@ -282,12 +314,20 @@ func Tee(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallCo
 		return 0, nil, syserror.EINVAL
 	}
 
+	// The operation is non-blocking if anything is non-blocking.
+	nonBlock := inFile.Flags().NonBlocking || outFile.Flags().NonBlocking || (flags&linux.SPLICE_F_NONBLOCK != 0)
+
 	// Splice data.
 	n, err := doSplice(t, outFile, inFile, fs.SpliceOpts{
 		Length: count,
 		Dup:    true,
-	}, nonBlocking)
+	}, nonBlock)
+
+	// Tee doesn't change a state of inFD, so it can't lose any data.
+	if n != 0 {
+		err = nil
+	}
 
 	// See above; inFile is chosen arbitrarily here.
-	return uintptr(n), nil, handleIOError(t, n != 0, err, kernel.ERESTARTSYS, "tee", inFile)
+	return uintptr(n), nil, handleIOError(t, false, err, kernel.ERESTARTSYS, "tee", inFile)
 }

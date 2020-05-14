@@ -17,20 +17,21 @@ package linux
 import (
 	"bytes"
 	"io"
-	"syscall"
 
+	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/binary"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
-	"gvisor.dev/gvisor/pkg/sentry/kernel/kdefs"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 )
+
+// LINT.IfChange
 
 // Getdents implements linux syscall getdents(2) for 64bit systems.
 func Getdents(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
-	fd := kdefs.FD(args[0].Int())
+	fd := args[0].Int()
 	addr := args[1].Pointer()
 	size := int(args[2].Uint())
 
@@ -46,7 +47,7 @@ func Getdents(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysc
 
 // Getdents64 implements linux syscall getdents64(2).
 func Getdents64(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
-	fd := kdefs.FD(args[0].Int())
+	fd := args[0].Int()
 	addr := args[1].Pointer()
 	size := int(args[2].Uint())
 
@@ -62,8 +63,8 @@ func Getdents64(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sy
 
 // getdents implements the core of getdents(2)/getdents64(2).
 // f is the syscall implementation dirent serialization function.
-func getdents(t *kernel.Task, fd kdefs.FD, addr usermem.Addr, size int, f func(*dirent, io.Writer) (int, error)) (uintptr, error) {
-	dir := t.FDMap().GetFile(fd)
+func getdents(t *kernel.Task, fd int32, addr usermem.Addr, size int, f func(*dirent, io.Writer) (int, error)) (uintptr, error) {
+	dir := t.GetFile(fd)
 	if dir == nil {
 		return 0, syserror.EBADF
 	}
@@ -83,7 +84,7 @@ func getdents(t *kernel.Task, fd kdefs.FD, addr usermem.Addr, size int, f func(*
 
 	switch err := handleIOError(t, ds.Written() > 0, rerr, kernel.ERESTARTSYS, "getdents", dir); err {
 	case nil:
-		dir.Dirent.InotifyEvent(syscall.IN_ACCESS, 0)
+		dir.Dirent.InotifyEvent(linux.IN_ACCESS, 0)
 		return uintptr(ds.Written()), nil
 	case io.EOF:
 		return 0, nil
@@ -121,7 +122,7 @@ func newDirent(width uint, name string, attr fs.DentAttr, offset uint64) *dirent
 				Ino: attr.InodeID,
 				Off: offset,
 			},
-			Typ: toType(attr.Type),
+			Typ: fs.ToDirentType(attr.Type),
 		},
 		Name: []byte(name),
 	}
@@ -141,28 +142,6 @@ func smallestDirent(a arch.Context) uint {
 func smallestDirent64(a arch.Context) uint {
 	d := dirent{}
 	return uint(binary.Size(d.Hdr)) + a.Width()
-}
-
-// toType converts an fs.InodeOperationsInfo to a linux dirent typ field.
-func toType(nodeType fs.InodeType) uint8 {
-	switch nodeType {
-	case fs.RegularFile, fs.SpecialFile:
-		return syscall.DT_REG
-	case fs.Symlink:
-		return syscall.DT_LNK
-	case fs.Directory, fs.SpecialDirectory:
-		return syscall.DT_DIR
-	case fs.Pipe:
-		return syscall.DT_FIFO
-	case fs.CharacterDevice:
-		return syscall.DT_CHR
-	case fs.BlockDevice:
-		return syscall.DT_BLK
-	case fs.Socket:
-		return syscall.DT_SOCK
-	default:
-		return syscall.DT_UNKNOWN
-	}
 }
 
 // padRec pads the name field until the rec length is a multiple of the width,
@@ -267,3 +246,5 @@ func (ds *direntSerializer) CopyOut(name string, attr fs.DentAttr) error {
 func (ds *direntSerializer) Written() int {
 	return ds.written
 }
+
+// LINT.ThenChange(vfs2/getdents.go)

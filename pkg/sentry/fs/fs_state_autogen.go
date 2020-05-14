@@ -172,7 +172,6 @@ func (x *Dirent) save(m state.Map) {
 	m.Save("name", &x.name)
 	m.Save("parent", &x.parent)
 	m.Save("deleted", &x.deleted)
-	m.Save("frozen", &x.frozen)
 	m.Save("mounted", &x.mounted)
 }
 
@@ -183,7 +182,6 @@ func (x *Dirent) load(m state.Map) {
 	m.Load("name", &x.name)
 	m.Load("parent", &x.parent)
 	m.Load("deleted", &x.deleted)
-	m.Load("frozen", &x.frozen)
 	m.Load("mounted", &x.mounted)
 	m.LoadValue("children", new(map[string]*Dirent), func(y interface{}) { x.loadChildren(y.(map[string]*Dirent)) })
 	m.AfterLoad(x.afterLoad)
@@ -192,8 +190,12 @@ func (x *Dirent) load(m state.Map) {
 func (x *DirentCache) beforeSave() {}
 func (x *DirentCache) save(m state.Map) {
 	x.beforeSave()
-	if !state.IsZeroValue(x.currentSize) { m.Failf("currentSize is %v, expected zero", x.currentSize) }
-	if !state.IsZeroValue(x.list) { m.Failf("list is %v, expected zero", x.list) }
+	if !state.IsZeroValue(&x.currentSize) {
+		m.Failf("currentSize is %#v, expected zero", &x.currentSize)
+	}
+	if !state.IsZeroValue(&x.list) {
+		m.Failf("list is %#v, expected zero", &x.list)
+	}
 	m.Save("maxSize", &x.maxSize)
 	m.Save("limit", &x.limit)
 }
@@ -207,7 +209,9 @@ func (x *DirentCache) load(m state.Map) {
 func (x *DirentCacheLimiter) beforeSave() {}
 func (x *DirentCacheLimiter) save(m state.Map) {
 	x.beforeSave()
-	if !state.IsZeroValue(x.count) { m.Failf("count is %v, expected zero", x.count) }
+	if !state.IsZeroValue(&x.count) {
+		m.Failf("count is %#v, expected zero", &x.count)
+	}
 	m.Save("max", &x.max)
 }
 
@@ -296,7 +300,6 @@ func (x *overlayFileOperations) save(m state.Map) {
 	m.Save("upper", &x.upper)
 	m.Save("lower", &x.lower)
 	m.Save("dirCursor", &x.dirCursor)
-	m.Save("dirCache", &x.dirCache)
 }
 
 func (x *overlayFileOperations) afterLoad() {}
@@ -304,7 +307,6 @@ func (x *overlayFileOperations) load(m state.Map) {
 	m.Load("upper", &x.upper)
 	m.Load("lower", &x.lower)
 	m.Load("dirCursor", &x.dirCursor)
-	m.Load("dirCache", &x.dirCache)
 }
 
 func (x *overlayMappingIdentity) beforeSave() {}
@@ -344,6 +346,7 @@ func (x *FileFlags) save(m state.Map) {
 	x.beforeSave()
 	m.Save("Direct", &x.Direct)
 	m.Save("NonBlocking", &x.NonBlocking)
+	m.Save("DSync", &x.DSync)
 	m.Save("Sync", &x.Sync)
 	m.Save("Append", &x.Append)
 	m.Save("Read", &x.Read)
@@ -353,12 +356,15 @@ func (x *FileFlags) save(m state.Map) {
 	m.Save("Directory", &x.Directory)
 	m.Save("Async", &x.Async)
 	m.Save("LargeFile", &x.LargeFile)
+	m.Save("NonSeekable", &x.NonSeekable)
+	m.Save("Truncate", &x.Truncate)
 }
 
 func (x *FileFlags) afterLoad() {}
 func (x *FileFlags) load(m state.Map) {
 	m.Load("Direct", &x.Direct)
 	m.Load("NonBlocking", &x.NonBlocking)
+	m.Load("DSync", &x.DSync)
 	m.Load("Sync", &x.Sync)
 	m.Load("Append", &x.Append)
 	m.Load("Read", &x.Read)
@@ -368,6 +374,8 @@ func (x *FileFlags) load(m state.Map) {
 	m.Load("Directory", &x.Directory)
 	m.Load("Async", &x.Async)
 	m.Load("LargeFile", &x.LargeFile)
+	m.Load("NonSeekable", &x.NonSeekable)
+	m.Load("Truncate", &x.Truncate)
 }
 
 func (x *Inode) beforeSave() {}
@@ -506,12 +514,14 @@ func (x *SimpleMountSourceOperations) save(m state.Map) {
 	x.beforeSave()
 	m.Save("keep", &x.keep)
 	m.Save("revalidate", &x.revalidate)
+	m.Save("cacheReaddir", &x.cacheReaddir)
 }
 
 func (x *SimpleMountSourceOperations) afterLoad() {}
 func (x *SimpleMountSourceOperations) load(m state.Map) {
 	m.Load("keep", &x.keep)
 	m.Load("revalidate", &x.revalidate)
+	m.Load("cacheReaddir", &x.cacheReaddir)
 }
 
 func (x *overlayMountSourceOperations) beforeSave() {}
@@ -579,6 +589,7 @@ func (x *overlayEntry) save(m state.Map) {
 	m.Save("lower", &x.lower)
 	m.Save("mappings", &x.mappings)
 	m.Save("upper", &x.upper)
+	m.Save("dirCache", &x.dirCache)
 }
 
 func (x *overlayEntry) afterLoad() {}
@@ -587,40 +598,41 @@ func (x *overlayEntry) load(m state.Map) {
 	m.Load("lower", &x.lower)
 	m.Load("mappings", &x.mappings)
 	m.Load("upper", &x.upper)
+	m.Load("dirCache", &x.dirCache)
 }
 
 func init() {
-	state.Register("fs.StableAttr", (*StableAttr)(nil), state.Fns{Save: (*StableAttr).save, Load: (*StableAttr).load})
-	state.Register("fs.UnstableAttr", (*UnstableAttr)(nil), state.Fns{Save: (*UnstableAttr).save, Load: (*UnstableAttr).load})
-	state.Register("fs.AttrMask", (*AttrMask)(nil), state.Fns{Save: (*AttrMask).save, Load: (*AttrMask).load})
-	state.Register("fs.PermMask", (*PermMask)(nil), state.Fns{Save: (*PermMask).save, Load: (*PermMask).load})
-	state.Register("fs.FilePermissions", (*FilePermissions)(nil), state.Fns{Save: (*FilePermissions).save, Load: (*FilePermissions).load})
-	state.Register("fs.FileOwner", (*FileOwner)(nil), state.Fns{Save: (*FileOwner).save, Load: (*FileOwner).load})
-	state.Register("fs.DentAttr", (*DentAttr)(nil), state.Fns{Save: (*DentAttr).save, Load: (*DentAttr).load})
-	state.Register("fs.SortedDentryMap", (*SortedDentryMap)(nil), state.Fns{Save: (*SortedDentryMap).save, Load: (*SortedDentryMap).load})
-	state.Register("fs.Dirent", (*Dirent)(nil), state.Fns{Save: (*Dirent).save, Load: (*Dirent).load})
-	state.Register("fs.DirentCache", (*DirentCache)(nil), state.Fns{Save: (*DirentCache).save, Load: (*DirentCache).load})
-	state.Register("fs.DirentCacheLimiter", (*DirentCacheLimiter)(nil), state.Fns{Save: (*DirentCacheLimiter).save, Load: (*DirentCacheLimiter).load})
-	state.Register("fs.direntList", (*direntList)(nil), state.Fns{Save: (*direntList).save, Load: (*direntList).load})
-	state.Register("fs.direntEntry", (*direntEntry)(nil), state.Fns{Save: (*direntEntry).save, Load: (*direntEntry).load})
-	state.Register("fs.eventList", (*eventList)(nil), state.Fns{Save: (*eventList).save, Load: (*eventList).load})
-	state.Register("fs.eventEntry", (*eventEntry)(nil), state.Fns{Save: (*eventEntry).save, Load: (*eventEntry).load})
-	state.Register("fs.File", (*File)(nil), state.Fns{Save: (*File).save, Load: (*File).load})
-	state.Register("fs.overlayFileOperations", (*overlayFileOperations)(nil), state.Fns{Save: (*overlayFileOperations).save, Load: (*overlayFileOperations).load})
-	state.Register("fs.overlayMappingIdentity", (*overlayMappingIdentity)(nil), state.Fns{Save: (*overlayMappingIdentity).save, Load: (*overlayMappingIdentity).load})
-	state.Register("fs.MountSourceFlags", (*MountSourceFlags)(nil), state.Fns{Save: (*MountSourceFlags).save, Load: (*MountSourceFlags).load})
-	state.Register("fs.FileFlags", (*FileFlags)(nil), state.Fns{Save: (*FileFlags).save, Load: (*FileFlags).load})
-	state.Register("fs.Inode", (*Inode)(nil), state.Fns{Save: (*Inode).save, Load: (*Inode).load})
-	state.Register("fs.LockCtx", (*LockCtx)(nil), state.Fns{Save: (*LockCtx).save, Load: (*LockCtx).load})
-	state.Register("fs.Watches", (*Watches)(nil), state.Fns{Save: (*Watches).save, Load: (*Watches).load})
-	state.Register("fs.Inotify", (*Inotify)(nil), state.Fns{Save: (*Inotify).save, Load: (*Inotify).load})
-	state.Register("fs.Event", (*Event)(nil), state.Fns{Save: (*Event).save, Load: (*Event).load})
-	state.Register("fs.Watch", (*Watch)(nil), state.Fns{Save: (*Watch).save, Load: (*Watch).load})
-	state.Register("fs.MountSource", (*MountSource)(nil), state.Fns{Save: (*MountSource).save, Load: (*MountSource).load})
-	state.Register("fs.SimpleMountSourceOperations", (*SimpleMountSourceOperations)(nil), state.Fns{Save: (*SimpleMountSourceOperations).save, Load: (*SimpleMountSourceOperations).load})
-	state.Register("fs.overlayMountSourceOperations", (*overlayMountSourceOperations)(nil), state.Fns{Save: (*overlayMountSourceOperations).save, Load: (*overlayMountSourceOperations).load})
-	state.Register("fs.overlayFilesystem", (*overlayFilesystem)(nil), state.Fns{Save: (*overlayFilesystem).save, Load: (*overlayFilesystem).load})
-	state.Register("fs.Mount", (*Mount)(nil), state.Fns{Save: (*Mount).save, Load: (*Mount).load})
-	state.Register("fs.MountNamespace", (*MountNamespace)(nil), state.Fns{Save: (*MountNamespace).save, Load: (*MountNamespace).load})
-	state.Register("fs.overlayEntry", (*overlayEntry)(nil), state.Fns{Save: (*overlayEntry).save, Load: (*overlayEntry).load})
+	state.Register("pkg/sentry/fs.StableAttr", (*StableAttr)(nil), state.Fns{Save: (*StableAttr).save, Load: (*StableAttr).load})
+	state.Register("pkg/sentry/fs.UnstableAttr", (*UnstableAttr)(nil), state.Fns{Save: (*UnstableAttr).save, Load: (*UnstableAttr).load})
+	state.Register("pkg/sentry/fs.AttrMask", (*AttrMask)(nil), state.Fns{Save: (*AttrMask).save, Load: (*AttrMask).load})
+	state.Register("pkg/sentry/fs.PermMask", (*PermMask)(nil), state.Fns{Save: (*PermMask).save, Load: (*PermMask).load})
+	state.Register("pkg/sentry/fs.FilePermissions", (*FilePermissions)(nil), state.Fns{Save: (*FilePermissions).save, Load: (*FilePermissions).load})
+	state.Register("pkg/sentry/fs.FileOwner", (*FileOwner)(nil), state.Fns{Save: (*FileOwner).save, Load: (*FileOwner).load})
+	state.Register("pkg/sentry/fs.DentAttr", (*DentAttr)(nil), state.Fns{Save: (*DentAttr).save, Load: (*DentAttr).load})
+	state.Register("pkg/sentry/fs.SortedDentryMap", (*SortedDentryMap)(nil), state.Fns{Save: (*SortedDentryMap).save, Load: (*SortedDentryMap).load})
+	state.Register("pkg/sentry/fs.Dirent", (*Dirent)(nil), state.Fns{Save: (*Dirent).save, Load: (*Dirent).load})
+	state.Register("pkg/sentry/fs.DirentCache", (*DirentCache)(nil), state.Fns{Save: (*DirentCache).save, Load: (*DirentCache).load})
+	state.Register("pkg/sentry/fs.DirentCacheLimiter", (*DirentCacheLimiter)(nil), state.Fns{Save: (*DirentCacheLimiter).save, Load: (*DirentCacheLimiter).load})
+	state.Register("pkg/sentry/fs.direntList", (*direntList)(nil), state.Fns{Save: (*direntList).save, Load: (*direntList).load})
+	state.Register("pkg/sentry/fs.direntEntry", (*direntEntry)(nil), state.Fns{Save: (*direntEntry).save, Load: (*direntEntry).load})
+	state.Register("pkg/sentry/fs.eventList", (*eventList)(nil), state.Fns{Save: (*eventList).save, Load: (*eventList).load})
+	state.Register("pkg/sentry/fs.eventEntry", (*eventEntry)(nil), state.Fns{Save: (*eventEntry).save, Load: (*eventEntry).load})
+	state.Register("pkg/sentry/fs.File", (*File)(nil), state.Fns{Save: (*File).save, Load: (*File).load})
+	state.Register("pkg/sentry/fs.overlayFileOperations", (*overlayFileOperations)(nil), state.Fns{Save: (*overlayFileOperations).save, Load: (*overlayFileOperations).load})
+	state.Register("pkg/sentry/fs.overlayMappingIdentity", (*overlayMappingIdentity)(nil), state.Fns{Save: (*overlayMappingIdentity).save, Load: (*overlayMappingIdentity).load})
+	state.Register("pkg/sentry/fs.MountSourceFlags", (*MountSourceFlags)(nil), state.Fns{Save: (*MountSourceFlags).save, Load: (*MountSourceFlags).load})
+	state.Register("pkg/sentry/fs.FileFlags", (*FileFlags)(nil), state.Fns{Save: (*FileFlags).save, Load: (*FileFlags).load})
+	state.Register("pkg/sentry/fs.Inode", (*Inode)(nil), state.Fns{Save: (*Inode).save, Load: (*Inode).load})
+	state.Register("pkg/sentry/fs.LockCtx", (*LockCtx)(nil), state.Fns{Save: (*LockCtx).save, Load: (*LockCtx).load})
+	state.Register("pkg/sentry/fs.Watches", (*Watches)(nil), state.Fns{Save: (*Watches).save, Load: (*Watches).load})
+	state.Register("pkg/sentry/fs.Inotify", (*Inotify)(nil), state.Fns{Save: (*Inotify).save, Load: (*Inotify).load})
+	state.Register("pkg/sentry/fs.Event", (*Event)(nil), state.Fns{Save: (*Event).save, Load: (*Event).load})
+	state.Register("pkg/sentry/fs.Watch", (*Watch)(nil), state.Fns{Save: (*Watch).save, Load: (*Watch).load})
+	state.Register("pkg/sentry/fs.MountSource", (*MountSource)(nil), state.Fns{Save: (*MountSource).save, Load: (*MountSource).load})
+	state.Register("pkg/sentry/fs.SimpleMountSourceOperations", (*SimpleMountSourceOperations)(nil), state.Fns{Save: (*SimpleMountSourceOperations).save, Load: (*SimpleMountSourceOperations).load})
+	state.Register("pkg/sentry/fs.overlayMountSourceOperations", (*overlayMountSourceOperations)(nil), state.Fns{Save: (*overlayMountSourceOperations).save, Load: (*overlayMountSourceOperations).load})
+	state.Register("pkg/sentry/fs.overlayFilesystem", (*overlayFilesystem)(nil), state.Fns{Save: (*overlayFilesystem).save, Load: (*overlayFilesystem).load})
+	state.Register("pkg/sentry/fs.Mount", (*Mount)(nil), state.Fns{Save: (*Mount).save, Load: (*Mount).load})
+	state.Register("pkg/sentry/fs.MountNamespace", (*MountNamespace)(nil), state.Fns{Save: (*MountNamespace).save, Load: (*MountNamespace).load})
+	state.Register("pkg/sentry/fs.overlayEntry", (*overlayEntry)(nil), state.Fns{Save: (*overlayEntry).save, Load: (*overlayEntry).load})
 }

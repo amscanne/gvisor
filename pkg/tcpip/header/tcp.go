@@ -81,7 +81,8 @@ type TCPFields struct {
 	// AckNum is the "acknowledgement number" field of a TCP packet.
 	AckNum uint32
 
-	// DataOffset is the "data offset" field of a TCP packet.
+	// DataOffset is the "data offset" field of a TCP packet. It is the length of
+	// the TCP header in bytes.
 	DataOffset uint8
 
 	// Flags is the "flags" field of a TCP packet.
@@ -176,6 +177,21 @@ const (
 
 	// TCPProtocolNumber is TCP's transport protocol number.
 	TCPProtocolNumber tcpip.TransportProtocolNumber = 6
+
+	// TCPMinimumMSS is the minimum acceptable value for MSS. This is the
+	// same as the value TCP_MIN_MSS defined net/tcp.h.
+	TCPMinimumMSS = IPv4MaximumHeaderSize + TCPHeaderMaximumSize + MinIPFragmentPayloadSize - IPv4MinimumSize - TCPMinimumSize
+
+	// TCPMaximumMSS is the maximum acceptable value for MSS.
+	TCPMaximumMSS = 0xffff
+
+	// TCPDefaultMSS is the MSS value that should be used if an MSS option
+	// is not received from the peer. It's also the value returned by
+	// TCP_MAXSEG option for a socket in an unconnected state.
+	//
+	// Per RFC 1122, page 85: "If an MSS option is not received at
+	// connection setup, TCP MUST assume a default send MSS of 536."
+	TCPDefaultMSS = 536
 )
 
 // SourcePort returns the "source port" field of the tcp header.
@@ -198,7 +214,8 @@ func (b TCP) AckNumber() uint32 {
 	return binary.BigEndian.Uint32(b[TCPAckNumOffset:])
 }
 
-// DataOffset returns the "data offset" field of the tcp header.
+// DataOffset returns the "data offset" field of the tcp header. The return
+// value is the length of the TCP header in bytes.
 func (b TCP) DataOffset() uint8 {
 	return (b[TCPDataOffset] >> 4) * 4
 }
@@ -223,6 +240,11 @@ func (b TCP) Checksum() uint16 {
 	return binary.BigEndian.Uint16(b[TCPChecksumOffset:])
 }
 
+// UrgentPointer returns the "urgent pointer" field of the tcp header.
+func (b TCP) UrgentPointer() uint16 {
+	return binary.BigEndian.Uint16(b[TCPUrgentPtrOffset:])
+}
+
 // SetSourcePort sets the "source port" field of the tcp header.
 func (b TCP) SetSourcePort(port uint16) {
 	binary.BigEndian.PutUint16(b[TCPSrcPortOffset:], port)
@@ -236,6 +258,37 @@ func (b TCP) SetDestinationPort(port uint16) {
 // SetChecksum sets the checksum field of the tcp header.
 func (b TCP) SetChecksum(checksum uint16) {
 	binary.BigEndian.PutUint16(b[TCPChecksumOffset:], checksum)
+}
+
+// SetDataOffset sets the data offset field of the tcp header. headerLen should
+// be the length of the TCP header in bytes.
+func (b TCP) SetDataOffset(headerLen uint8) {
+	b[TCPDataOffset] = (headerLen / 4) << 4
+}
+
+// SetSequenceNumber sets the sequence number field of the tcp header.
+func (b TCP) SetSequenceNumber(seqNum uint32) {
+	binary.BigEndian.PutUint32(b[TCPSeqNumOffset:], seqNum)
+}
+
+// SetAckNumber sets the ack number field of the tcp header.
+func (b TCP) SetAckNumber(ackNum uint32) {
+	binary.BigEndian.PutUint32(b[TCPAckNumOffset:], ackNum)
+}
+
+// SetFlags sets the flags field of the tcp header.
+func (b TCP) SetFlags(flags uint8) {
+	b[TCPFlagsOffset] = flags
+}
+
+// SetWindowSize sets the window size field of the tcp header.
+func (b TCP) SetWindowSize(rcvwnd uint16) {
+	binary.BigEndian.PutUint16(b[TCPWinSizeOffset:], rcvwnd)
+}
+
+// SetUrgentPoiner sets the window size field of the tcp header.
+func (b TCP) SetUrgentPoiner(urgentPointer uint16) {
+	binary.BigEndian.PutUint16(b[TCPUrgentPtrOffset:], urgentPointer)
 }
 
 // CalculateChecksum calculates the checksum of the tcp segment.
@@ -306,7 +359,7 @@ func ParseSynOptions(opts []byte, isAck bool) TCPSynOptions {
 	synOpts := TCPSynOptions{
 		// Per RFC 1122, page 85: "If an MSS option is not received at
 		// connection setup, TCP MUST assume a default send MSS of 536."
-		MSS: 536,
+		MSS: TCPDefaultMSS,
 		// If no window scale option is specified, WS in options is
 		// returned as -1; this is because the absence of the option
 		// indicates that the we cannot use window scaling on the
@@ -540,4 +593,24 @@ func AddTCPOptionPadding(options []byte, offset int) int {
 		options[i] = TCPOptionNOP
 	}
 	return paddingToAdd
+}
+
+// Acceptable checks if a segment that starts at segSeq and has length segLen is
+// "acceptable" for arriving in a receive window that starts at rcvNxt and ends
+// before rcvAcc, according to the table on page 26 and 69 of RFC 793.
+func Acceptable(segSeq seqnum.Value, segLen seqnum.Size, rcvNxt, rcvAcc seqnum.Value) bool {
+	if rcvNxt == rcvAcc {
+		return segLen == 0 && segSeq == rcvNxt
+	}
+	if segLen == 0 {
+		// rcvWnd is incremented by 1 because that is Linux's behavior despite the
+		// RFC.
+		return segSeq.InRange(rcvNxt, rcvAcc.Add(1))
+	}
+	// Page 70 of RFC 793 allows packets that can be made "acceptable" by trimming
+	// the payload, so we'll accept any payload that overlaps the receieve window.
+	// segSeq < rcvAcc is more correct according to RFC, however, Linux does it
+	// differently, it uses segSeq <= rcvAcc, we'd want to keep the same behavior
+	// as Linux.
+	return rcvNxt.LessThan(segSeq.Add(segLen)) && segSeq.LessThanEq(rcvAcc)
 }

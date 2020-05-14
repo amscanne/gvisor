@@ -15,26 +15,25 @@
 package linux
 
 import (
-	"syscall"
-
+	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/epoll"
-	"gvisor.dev/gvisor/pkg/sentry/kernel/kdefs"
 	"gvisor.dev/gvisor/pkg/sentry/syscalls"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
 	"gvisor.dev/gvisor/pkg/syserror"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
+// LINT.IfChange
+
 // EpollCreate1 implements the epoll_create1(2) linux syscall.
 func EpollCreate1(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	flags := args[0].Int()
-	if flags & ^syscall.EPOLL_CLOEXEC != 0 {
+	if flags & ^linux.EPOLL_CLOEXEC != 0 {
 		return 0, nil, syserror.EINVAL
 	}
 
-	closeOnExec := flags&syscall.EPOLL_CLOEXEC != 0
+	closeOnExec := flags&linux.EPOLL_CLOEXEC != 0
 	fd, err := syscalls.CreateEpoll(t, closeOnExec)
 	if err != nil {
 		return 0, nil, err
@@ -61,46 +60,42 @@ func EpollCreate(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.S
 
 // EpollCtl implements the epoll_ctl(2) linux syscall.
 func EpollCtl(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
-	epfd := kdefs.FD(args[0].Int())
+	epfd := args[0].Int()
 	op := args[1].Int()
-	fd := kdefs.FD(args[2].Int())
+	fd := args[2].Int()
 	eventAddr := args[3].Pointer()
 
 	// Capture the event state if needed.
 	flags := epoll.EntryFlags(0)
 	mask := waiter.EventMask(0)
 	var data [2]int32
-	if op != syscall.EPOLL_CTL_DEL {
-		var e syscall.EpollEvent
-		if _, err := t.CopyIn(eventAddr, &e); err != nil {
+	if op != linux.EPOLL_CTL_DEL {
+		var e linux.EpollEvent
+		if _, err := e.CopyIn(t, eventAddr); err != nil {
 			return 0, nil, err
 		}
 
-		if e.Events&syscall.EPOLLONESHOT != 0 {
+		if e.Events&linux.EPOLLONESHOT != 0 {
 			flags |= epoll.OneShot
 		}
 
-		// syscall.EPOLLET is incorrectly generated as a negative number
-		// in Go, see https://github.com/golang/go/issues/5328 for
-		// details.
-		if e.Events&-syscall.EPOLLET != 0 {
+		if e.Events&linux.EPOLLET != 0 {
 			flags |= epoll.EdgeTriggered
 		}
 
 		mask = waiter.EventMaskFromLinux(e.Events)
-		data[0] = e.Fd
-		data[1] = e.Pad
+		data = e.Data
 	}
 
 	// Perform the requested operations.
 	switch op {
-	case syscall.EPOLL_CTL_ADD:
+	case linux.EPOLL_CTL_ADD:
 		// See fs/eventpoll.c.
 		mask |= waiter.EventHUp | waiter.EventErr
 		return 0, nil, syscalls.AddEpoll(t, epfd, fd, flags, mask, data)
-	case syscall.EPOLL_CTL_DEL:
+	case linux.EPOLL_CTL_DEL:
 		return 0, nil, syscalls.RemoveEpoll(t, epfd, fd)
-	case syscall.EPOLL_CTL_MOD:
+	case linux.EPOLL_CTL_MOD:
 		// Same as EPOLL_CTL_ADD.
 		mask |= waiter.EventHUp | waiter.EventErr
 		return 0, nil, syscalls.UpdateEpoll(t, epfd, fd, flags, mask, data)
@@ -109,30 +104,9 @@ func EpollCtl(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysc
 	}
 }
 
-// copyOutEvents copies epoll events from the kernel to user memory.
-func copyOutEvents(t *kernel.Task, addr usermem.Addr, e []epoll.Event) error {
-	const itemLen = 12
-	if _, ok := addr.AddLength(uint64(len(e)) * itemLen); !ok {
-		return syserror.EFAULT
-	}
-
-	b := t.CopyScratchBuffer(itemLen)
-	for i := range e {
-		usermem.ByteOrder.PutUint32(b[0:], e[i].Events)
-		usermem.ByteOrder.PutUint32(b[4:], uint32(e[i].Data[0]))
-		usermem.ByteOrder.PutUint32(b[8:], uint32(e[i].Data[1]))
-		if _, err := t.CopyOutBytes(addr, b); err != nil {
-			return err
-		}
-		addr += itemLen
-	}
-
-	return nil
-}
-
 // EpollWait implements the epoll_wait(2) linux syscall.
 func EpollWait(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
-	epfd := kdefs.FD(args[0].Int())
+	epfd := args[0].Int()
 	eventsAddr := args[1].Pointer()
 	maxEvents := int(args[2].Int())
 	timeout := int(args[3].Int())
@@ -143,7 +117,7 @@ func EpollWait(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sys
 	}
 
 	if len(r) != 0 {
-		if err := copyOutEvents(t, eventsAddr, r); err != nil {
+		if _, err := linux.CopyEpollEventSliceOut(t, eventsAddr, r); err != nil {
 			return 0, nil, err
 		}
 	}
@@ -157,7 +131,7 @@ func EpollPwait(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sy
 	maskSize := uint(args[5].Uint())
 
 	if maskAddr != 0 {
-		mask, err := copyInSigSet(t, maskAddr, maskSize)
+		mask, err := CopyInSigSet(t, maskAddr, maskSize)
 		if err != nil {
 			return 0, nil, err
 		}
@@ -169,3 +143,5 @@ func EpollPwait(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sy
 
 	return EpollWait(t, args)
 }
+
+// LINT.ThenChange(vfs2/epoll.go)

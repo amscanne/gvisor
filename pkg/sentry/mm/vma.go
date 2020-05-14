@@ -18,13 +18,13 @@ import (
 	"fmt"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
-	"gvisor.dev/gvisor/pkg/sentry/context"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/limits"
 	"gvisor.dev/gvisor/pkg/sentry/memmap"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 )
 
 // Preconditions: mm.mappingMu must be locked for writing. opts must be valid
@@ -34,7 +34,7 @@ func (mm *MemoryManager) createVMALocked(ctx context.Context, opts memmap.MMapOp
 		panic(fmt.Sprintf("Non-effective MaxPerms %s cannot be enforced", opts.MaxPerms))
 	}
 
-	// Find a useable range.
+	// Find a usable range.
 	addr, err := mm.findAvailableLocked(opts.Length, findAvailableOpts{
 		Addr:     opts.Addr,
 		Fixed:    opts.Fixed,
@@ -439,6 +439,7 @@ func (vmaSetFunctions) Merge(ar1 usermem.AddrRange, vma1 vma, ar2 usermem.AddrRa
 		vma1.mlockMode != vma2.mlockMode ||
 		vma1.numaPolicy != vma2.numaPolicy ||
 		vma1.numaNodemask != vma2.numaNodemask ||
+		vma1.dontfork != vma2.dontfork ||
 		vma1.id != vma2.id ||
 		vma1.hint != vma2.hint {
 		return vma{}, false

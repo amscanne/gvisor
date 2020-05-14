@@ -15,7 +15,7 @@
 package fs
 
 import (
-	"gvisor.dev/gvisor/pkg/sentry/context"
+	"gvisor.dev/gvisor/pkg/context"
 )
 
 // overlayMountSourceOperations implements MountSourceOperations for an overlay
@@ -28,10 +28,10 @@ type overlayMountSourceOperations struct {
 	lower *MountSource
 }
 
-func newOverlayMountSource(upper, lower *MountSource, flags MountSourceFlags) *MountSource {
+func newOverlayMountSource(ctx context.Context, upper, lower *MountSource, flags MountSourceFlags) *MountSource {
 	upper.IncRef()
 	lower.IncRef()
-	msrc := NewMountSource(&overlayMountSourceOperations{
+	msrc := NewMountSource(ctx, &overlayMountSourceOperations{
 		upper: upper,
 		lower: lower,
 	}, &overlayFilesystem{}, flags)
@@ -66,19 +66,34 @@ func (o *overlayMountSourceOperations) Revalidate(ctx context.Context, name stri
 		panic("an overlay cannot revalidate file objects from the lower fs")
 	}
 
-	// Do we have anything to revalidate?
-	if child.overlay.upper == nil {
-		return false
+	var revalidate bool
+	child.overlay.copyMu.RLock()
+	if child.overlay.upper != nil {
+		// Does the upper require revalidation?
+		revalidate = o.upper.Revalidate(ctx, name, parent.overlay.upper, child.overlay.upper)
+	} else {
+		// Nothing to revalidate.
+		revalidate = false
 	}
-
-	// Does the upper require revalidation?
-	return o.upper.Revalidate(ctx, name, parent.overlay.upper, child.overlay.upper)
+	child.overlay.copyMu.RUnlock()
+	return revalidate
 }
 
 // Keep implements MountSourceOperations by delegating to the upper
 // filesystem's Keep method.
 func (o *overlayMountSourceOperations) Keep(dirent *Dirent) bool {
 	return o.upper.Keep(dirent)
+}
+
+// CacheReaddir implements MountSourceOperations.CacheReaddir for an overlay by
+// performing the logical AND of the upper and lower filesystems' CacheReaddir
+// methods.
+//
+// N.B. This is fs-global instead of inode-specific because it must always
+// return the same value. If it was inode-specific, we couldn't guarantee that
+// property across copy up.
+func (o *overlayMountSourceOperations) CacheReaddir() bool {
+	return o.lower.CacheReaddir() && o.upper.CacheReaddir()
 }
 
 // ResetInodeMappings propagates the call to both upper and lower MountSource.

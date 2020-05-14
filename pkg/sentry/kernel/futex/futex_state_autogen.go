@@ -9,7 +9,9 @@ import (
 func (x *bucket) beforeSave() {}
 func (x *bucket) save(m state.Map) {
 	x.beforeSave()
-	if !state.IsZeroValue(x.waiters) { m.Failf("waiters is %v, expected zero", x.waiters) }
+	if !state.IsZeroValue(&x.waiters) {
+		m.Failf("waiters is %#v, expected zero", &x.waiters)
+	}
 }
 
 func (x *bucket) afterLoad() {}
@@ -19,7 +21,9 @@ func (x *bucket) load(m state.Map) {
 func (x *Manager) beforeSave() {}
 func (x *Manager) save(m state.Map) {
 	x.beforeSave()
-	if !state.IsZeroValue(x.privateBuckets) { m.Failf("privateBuckets is %v, expected zero", x.privateBuckets) }
+	if !state.IsZeroValue(&x.privateBuckets) {
+		m.Failf("privateBuckets is %#v, expected zero", &x.privateBuckets)
+	}
 	m.Save("sharedBucket", &x.sharedBucket)
 }
 
@@ -55,8 +59,8 @@ func (x *waiterEntry) load(m state.Map) {
 }
 
 func init() {
-	state.Register("futex.bucket", (*bucket)(nil), state.Fns{Save: (*bucket).save, Load: (*bucket).load})
-	state.Register("futex.Manager", (*Manager)(nil), state.Fns{Save: (*Manager).save, Load: (*Manager).load})
-	state.Register("futex.waiterList", (*waiterList)(nil), state.Fns{Save: (*waiterList).save, Load: (*waiterList).load})
-	state.Register("futex.waiterEntry", (*waiterEntry)(nil), state.Fns{Save: (*waiterEntry).save, Load: (*waiterEntry).load})
+	state.Register("pkg/sentry/kernel/futex.bucket", (*bucket)(nil), state.Fns{Save: (*bucket).save, Load: (*bucket).load})
+	state.Register("pkg/sentry/kernel/futex.Manager", (*Manager)(nil), state.Fns{Save: (*Manager).save, Load: (*Manager).load})
+	state.Register("pkg/sentry/kernel/futex.waiterList", (*waiterList)(nil), state.Fns{Save: (*waiterList).save, Load: (*waiterList).load})
+	state.Register("pkg/sentry/kernel/futex.waiterEntry", (*waiterEntry)(nil), state.Fns{Save: (*waiterEntry).save, Load: (*waiterEntry).load})
 }

@@ -20,8 +20,8 @@ import (
 	"syscall"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/p9"
-	"gvisor.dev/gvisor/pkg/sentry/context"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	ktime "gvisor.dev/gvisor/pkg/sentry/kernel/time"
 )
@@ -89,6 +89,72 @@ func (n InodeType) String() string {
 	}
 }
 
+// LinuxType returns the linux file type for this inode type.
+func (n InodeType) LinuxType() uint32 {
+	switch n {
+	case RegularFile, SpecialFile:
+		return linux.ModeRegular
+	case Directory, SpecialDirectory:
+		return linux.ModeDirectory
+	case Symlink:
+		return linux.ModeSymlink
+	case Pipe:
+		return linux.ModeNamedPipe
+	case CharacterDevice:
+		return linux.ModeCharacterDevice
+	case BlockDevice:
+		return linux.ModeBlockDevice
+	case Socket:
+		return linux.ModeSocket
+	default:
+		return 0
+	}
+}
+
+// ToDirentType converts an InodeType to a linux dirent type field.
+func ToDirentType(nodeType InodeType) uint8 {
+	switch nodeType {
+	case RegularFile, SpecialFile:
+		return linux.DT_REG
+	case Symlink:
+		return linux.DT_LNK
+	case Directory, SpecialDirectory:
+		return linux.DT_DIR
+	case Pipe:
+		return linux.DT_FIFO
+	case CharacterDevice:
+		return linux.DT_CHR
+	case BlockDevice:
+		return linux.DT_BLK
+	case Socket:
+		return linux.DT_SOCK
+	default:
+		return linux.DT_UNKNOWN
+	}
+}
+
+// ToInodeType coverts a linux file type to InodeType.
+func ToInodeType(linuxFileType linux.FileMode) InodeType {
+	switch linuxFileType {
+	case linux.ModeRegular:
+		return RegularFile
+	case linux.ModeDirectory:
+		return Directory
+	case linux.ModeSymlink:
+		return Symlink
+	case linux.ModeNamedPipe:
+		return Pipe
+	case linux.ModeCharacterDevice:
+		return CharacterDevice
+	case linux.ModeBlockDevice:
+		return BlockDevice
+	case linux.ModeSocket:
+		return Socket
+	default:
+		panic(fmt.Sprintf("unknown file mode: %d", linuxFileType))
+	}
+}
+
 // StableAttr contains Inode attributes that will be stable throughout the
 // lifetime of the Inode.
 //
@@ -138,6 +204,11 @@ func IsSymlink(s StableAttr) bool {
 // IsPipe returns true if StableAttr.Type matches any type of pipe.
 func IsPipe(s StableAttr) bool {
 	return s.Type == Pipe
+}
+
+// IsAnonymous returns true if StableAttr.Type matches any type of anonymous.
+func IsAnonymous(s StableAttr) bool {
+	return s.Type == Anonymous
 }
 
 // IsSocket returns true if StableAttr.Type matches any type of socket.

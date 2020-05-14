@@ -52,11 +52,21 @@ func (l *direntList) Back() *Dirent {
 	return l.tail
 }
 
+// Len returns the number of elements in the list.
+//
+// NOTE: This is an O(n) operation.
+func (l *direntList) Len() (count int) {
+	for e := l.Front(); e != nil; e = e.Next() {
+		count++
+	}
+	return count
+}
+
 // PushFront inserts the element e at the front of list l.
 func (l *direntList) PushFront(e *Dirent) {
-	direntElementMapper{}.linkerFor(e).SetNext(l.head)
-	direntElementMapper{}.linkerFor(e).SetPrev(nil)
-
+	linker := direntElementMapper{}.linkerFor(e)
+	linker.SetNext(l.head)
+	linker.SetPrev(nil)
 	if l.head != nil {
 		direntElementMapper{}.linkerFor(l.head).SetPrev(e)
 	} else {
@@ -68,9 +78,9 @@ func (l *direntList) PushFront(e *Dirent) {
 
 // PushBack inserts the element e at the back of list l.
 func (l *direntList) PushBack(e *Dirent) {
-	direntElementMapper{}.linkerFor(e).SetNext(nil)
-	direntElementMapper{}.linkerFor(e).SetPrev(l.tail)
-
+	linker := direntElementMapper{}.linkerFor(e)
+	linker.SetNext(nil)
+	linker.SetPrev(l.tail)
 	if l.tail != nil {
 		direntElementMapper{}.linkerFor(l.tail).SetNext(e)
 	} else {
@@ -91,17 +101,20 @@ func (l *direntList) PushBackList(m *direntList) {
 
 		l.tail = m.tail
 	}
-
 	m.head = nil
 	m.tail = nil
 }
 
 // InsertAfter inserts e after b.
 func (l *direntList) InsertAfter(b, e *Dirent) {
-	a := direntElementMapper{}.linkerFor(b).Next()
-	direntElementMapper{}.linkerFor(e).SetNext(a)
-	direntElementMapper{}.linkerFor(e).SetPrev(b)
-	direntElementMapper{}.linkerFor(b).SetNext(e)
+	bLinker := direntElementMapper{}.linkerFor(b)
+	eLinker := direntElementMapper{}.linkerFor(e)
+
+	a := bLinker.Next()
+
+	eLinker.SetNext(a)
+	eLinker.SetPrev(b)
+	bLinker.SetNext(e)
 
 	if a != nil {
 		direntElementMapper{}.linkerFor(a).SetPrev(e)
@@ -112,10 +125,13 @@ func (l *direntList) InsertAfter(b, e *Dirent) {
 
 // InsertBefore inserts e before a.
 func (l *direntList) InsertBefore(a, e *Dirent) {
-	b := direntElementMapper{}.linkerFor(a).Prev()
-	direntElementMapper{}.linkerFor(e).SetNext(a)
-	direntElementMapper{}.linkerFor(e).SetPrev(b)
-	direntElementMapper{}.linkerFor(a).SetPrev(e)
+	aLinker := direntElementMapper{}.linkerFor(a)
+	eLinker := direntElementMapper{}.linkerFor(e)
+
+	b := aLinker.Prev()
+	eLinker.SetNext(a)
+	eLinker.SetPrev(b)
+	aLinker.SetPrev(e)
 
 	if b != nil {
 		direntElementMapper{}.linkerFor(b).SetNext(e)
@@ -126,8 +142,9 @@ func (l *direntList) InsertBefore(a, e *Dirent) {
 
 // Remove removes e from l.
 func (l *direntList) Remove(e *Dirent) {
-	prev := direntElementMapper{}.linkerFor(e).Prev()
-	next := direntElementMapper{}.linkerFor(e).Next()
+	linker := direntElementMapper{}.linkerFor(e)
+	prev := linker.Prev()
+	next := linker.Next()
 
 	if prev != nil {
 		direntElementMapper{}.linkerFor(prev).SetNext(next)
@@ -140,6 +157,9 @@ func (l *direntList) Remove(e *Dirent) {
 	} else {
 		l.tail = prev
 	}
+
+	linker.SetNext(nil)
+	linker.SetPrev(nil)
 }
 
 // Entry is a default implementation of Linker. Users can add anonymous fields

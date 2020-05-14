@@ -22,9 +22,10 @@ package fdnotifier
 
 import (
 	"fmt"
-	"sync"
 	"syscall"
 
+	"golang.org/x/sys/unix"
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
@@ -72,7 +73,7 @@ func (n *notifier) waitFD(fd int32, fi *fdInfo, mask waiter.EventMask) error {
 	}
 
 	e := syscall.EpollEvent{
-		Events: mask.ToLinux() | -syscall.EPOLLET,
+		Events: mask.ToLinux() | unix.EPOLLET,
 		Fd:     fd,
 	}
 

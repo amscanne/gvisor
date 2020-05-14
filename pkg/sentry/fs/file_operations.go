@@ -15,10 +15,12 @@
 package fs
 
 import (
+	"io"
+
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
-	"gvisor.dev/gvisor/pkg/sentry/context"
 	"gvisor.dev/gvisor/pkg/sentry/memmap"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
+	"gvisor.dev/gvisor/pkg/usermem"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
@@ -105,8 +107,11 @@ type FileOperations interface {
 	// on the destination, following by a buffered copy with standard Read
 	// and Write operations.
 	//
+	// If dup is set, the data should be duplicated into the destination
+	// and retained.
+	//
 	// The same preconditions as Read apply.
-	WriteTo(ctx context.Context, file *File, dst *File, opts SpliceOpts) (int64, error)
+	WriteTo(ctx context.Context, file *File, dst io.Writer, count int64, dup bool) (int64, error)
 
 	// Write writes src to file at offset and returns the number of bytes
 	// written which must be greater than or equal to 0. Like Read, file
@@ -126,7 +131,7 @@ type FileOperations interface {
 	// source. See WriteTo for details regarding how this is called.
 	//
 	// The same preconditions as Write apply; FileFlags.Write must be set.
-	ReadFrom(ctx context.Context, file *File, src *File, opts SpliceOpts) (int64, error)
+	ReadFrom(ctx context.Context, file *File, src io.Reader, count int64) (int64, error)
 
 	// Fsync writes buffered modifications of file and/or flushes in-flight
 	// operations to backing storage based on syncType. The range to sync is
@@ -155,5 +160,16 @@ type FileOperations interface {
 	// refer.
 	//
 	// Preconditions: The AddressSpace (if any) that io refers to is activated.
-	Ioctl(ctx context.Context, io usermem.IO, args arch.SyscallArguments) (uintptr, error)
+	Ioctl(ctx context.Context, file *File, io usermem.IO, args arch.SyscallArguments) (uintptr, error)
+}
+
+// FifoSizer is an interface for setting and getting the size of a pipe.
+type FifoSizer interface {
+	// FifoSize returns the pipe capacity in bytes.
+	FifoSize(ctx context.Context, file *File) (int64, error)
+
+	// SetFifoSize sets the new pipe capacity in bytes.
+	//
+	// The new size is returned (which may be capped).
+	SetFifoSize(size int64) (int64, error)
 }

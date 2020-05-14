@@ -24,24 +24,23 @@ import (
 
 // Constants for open(2).
 const (
-	O_ACCMODE   = 00000003
-	O_RDONLY    = 00000000
-	O_WRONLY    = 00000001
-	O_RDWR      = 00000002
-	O_CREAT     = 00000100
-	O_EXCL      = 00000200
-	O_NOCTTY    = 00000400
-	O_TRUNC     = 00001000
-	O_APPEND    = 00002000
-	O_NONBLOCK  = 00004000
-	O_ASYNC     = 00020000
-	O_DIRECT    = 00040000
-	O_LARGEFILE = 00100000
-	O_DIRECTORY = 00200000
-	O_NOFOLLOW  = 00400000
-	O_CLOEXEC   = 02000000
-	O_SYNC      = 04010000
-	O_PATH      = 010000000
+	O_ACCMODE  = 000000003
+	O_RDONLY   = 000000000
+	O_WRONLY   = 000000001
+	O_RDWR     = 000000002
+	O_CREAT    = 000000100
+	O_EXCL     = 000000200
+	O_NOCTTY   = 000000400
+	O_TRUNC    = 000001000
+	O_APPEND   = 000002000
+	O_NONBLOCK = 000004000
+	O_DSYNC    = 000010000
+	O_ASYNC    = 000020000
+	O_NOATIME  = 001000000
+	O_CLOEXEC  = 002000000
+	O_SYNC     = 004000000 // __O_SYNC in Linux
+	O_PATH     = 010000000
+	O_TMPFILE  = 020000000 // __O_TMPFILE in Linux
 )
 
 // Constants for fstatat(2).
@@ -123,18 +122,31 @@ const (
 
 // Values for mode_t.
 const (
-	FileTypeMask        = 0170000
-	ModeSocket          = 0140000
-	ModeSymlink         = 0120000
-	ModeRegular         = 0100000
-	ModeBlockDevice     = 060000
-	ModeDirectory       = 040000
-	ModeCharacterDevice = 020000
-	ModeNamedPipe       = 010000
+	S_IFMT   = 0170000
+	S_IFSOCK = 0140000
+	S_IFLNK  = 0120000
+	S_IFREG  = 0100000
+	S_IFBLK  = 060000
+	S_IFDIR  = 040000
+	S_IFCHR  = 020000
+	S_IFIFO  = 010000
 
-	ModeSetUID = 04000
-	ModeSetGID = 02000
-	ModeSticky = 01000
+	FileTypeMask        = S_IFMT
+	ModeSocket          = S_IFSOCK
+	ModeSymlink         = S_IFLNK
+	ModeRegular         = S_IFREG
+	ModeBlockDevice     = S_IFBLK
+	ModeDirectory       = S_IFDIR
+	ModeCharacterDevice = S_IFCHR
+	ModeNamedPipe       = S_IFIFO
+
+	S_ISUID = 04000
+	S_ISGID = 02000
+	S_ISVTX = 01000
+
+	ModeSetUID = S_ISUID
+	ModeSetGID = S_ISGID
+	ModeSticky = S_ISVTX
 
 	ModeUserAll     = 0700
 	ModeUserRead    = 0400
@@ -151,38 +163,114 @@ const (
 	PermissionsMask = 0777
 )
 
+// Values for linux_dirent64.d_type.
+const (
+	DT_UNKNOWN = 0
+	DT_FIFO    = 1
+	DT_CHR     = 2
+	DT_DIR     = 4
+	DT_BLK     = 6
+	DT_REG     = 8
+	DT_LNK     = 10
+	DT_SOCK    = 12
+	DT_WHT     = 14
+)
+
+// DirentType are the friendly strings for linux_dirent64.d_type.
+var DirentType = abi.ValueSet{
+	DT_UNKNOWN: "DT_UNKNOWN",
+	DT_FIFO:    "DT_FIFO",
+	DT_CHR:     "DT_CHR",
+	DT_DIR:     "DT_DIR",
+	DT_BLK:     "DT_BLK",
+	DT_REG:     "DT_REG",
+	DT_LNK:     "DT_LNK",
+	DT_SOCK:    "DT_SOCK",
+	DT_WHT:     "DT_WHT",
+}
+
 // Values for preadv2/pwritev2.
 const (
+	// Note: gVisor does not implement the RWF_HIPRI feature, but the flag is
+	// accepted as a valid flag argument for preadv2/pwritev2.
 	RWF_HIPRI = 0x00000001
 	RWF_DSYNC = 0x00000002
 	RWF_SYNC  = 0x00000004
 	RWF_VALID = RWF_HIPRI | RWF_DSYNC | RWF_SYNC
 )
 
-// Stat represents struct stat.
-type Stat struct {
-	Dev      uint64
-	Ino      uint64
-	Nlink    uint64
-	Mode     uint32
-	UID      uint32
-	GID      uint32
-	X_pad0   int32
-	Rdev     uint64
-	Size     int64
-	Blksize  int64
-	Blocks   int64
-	ATime    Timespec
-	MTime    Timespec
-	CTime    Timespec
-	X_unused [3]int64
-}
-
 // SizeOfStat is the size of a Stat struct.
 var SizeOfStat = binary.Size(Stat{})
 
+// Flags for statx.
+const (
+	AT_STATX_SYNC_TYPE    = 0x6000
+	AT_STATX_SYNC_AS_STAT = 0x0000
+	AT_STATX_FORCE_SYNC   = 0x2000
+	AT_STATX_DONT_SYNC    = 0x4000
+)
+
+// Mask values for statx.
+const (
+	STATX_TYPE        = 0x00000001
+	STATX_MODE        = 0x00000002
+	STATX_NLINK       = 0x00000004
+	STATX_UID         = 0x00000008
+	STATX_GID         = 0x00000010
+	STATX_ATIME       = 0x00000020
+	STATX_MTIME       = 0x00000040
+	STATX_CTIME       = 0x00000080
+	STATX_INO         = 0x00000100
+	STATX_SIZE        = 0x00000200
+	STATX_BLOCKS      = 0x00000400
+	STATX_BASIC_STATS = 0x000007ff
+	STATX_BTIME       = 0x00000800
+	STATX_ALL         = 0x00000fff
+	STATX__RESERVED   = 0x80000000
+)
+
+// Bitmasks for Statx.Attributes and Statx.AttributesMask, from
+// include/uapi/linux/stat.h.
+const (
+	STATX_ATTR_COMPRESSED = 0x00000004
+	STATX_ATTR_IMMUTABLE  = 0x00000010
+	STATX_ATTR_APPEND     = 0x00000020
+	STATX_ATTR_NODUMP     = 0x00000040
+	STATX_ATTR_ENCRYPTED  = 0x00000800
+	STATX_ATTR_AUTOMOUNT  = 0x00001000
+)
+
+// Statx represents struct statx.
+//
+// +marshal
+type Statx struct {
+	Mask           uint32
+	Blksize        uint32
+	Attributes     uint64
+	Nlink          uint32
+	UID            uint32
+	GID            uint32
+	Mode           uint16
+	_              uint16
+	Ino            uint64
+	Size           uint64
+	Blocks         uint64
+	AttributesMask uint64
+	Atime          StatxTimestamp
+	Btime          StatxTimestamp
+	Ctime          StatxTimestamp
+	Mtime          StatxTimestamp
+	RdevMajor      uint32
+	RdevMinor      uint32
+	DevMajor       uint32
+	DevMinor       uint32
+}
+
+// SizeOfStatx is the size of a Statx struct.
+var SizeOfStatx = binary.Size(Statx{})
+
 // FileMode represents a mode_t.
-type FileMode uint
+type FileMode uint16
 
 // Permissions returns just the permission bits.
 func (m FileMode) Permissions() FileMode {
@@ -199,6 +287,11 @@ func (m FileMode) ExtraBits() FileMode {
 	return m &^ (PermissionsMask | FileTypeMask)
 }
 
+// IsDir returns true if file type represents a directory.
+func (m FileMode) IsDir() bool {
+	return m.FileType() == S_IFDIR
+}
+
 // String returns a string representation of m.
 func (m FileMode) String() string {
 	var s []string
@@ -210,6 +303,29 @@ func (m FileMode) String() string {
 	}
 	s = append(s, fmt.Sprintf("0o%o", m.Permissions()))
 	return strings.Join(s, "|")
+}
+
+// DirentType maps file types to dirent types appropriate for (struct
+// dirent)::d_type.
+func (m FileMode) DirentType() uint8 {
+	switch m.FileType() {
+	case ModeSocket:
+		return DT_SOCK
+	case ModeSymlink:
+		return DT_LNK
+	case ModeRegular:
+		return DT_REG
+	case ModeBlockDevice:
+		return DT_BLK
+	case ModeDirectory:
+		return DT_DIR
+	case ModeCharacterDevice:
+		return DT_CHR
+	case ModeNamedPipe:
+		return DT_FIFO
+	default:
+		return DT_UNKNOWN
+	}
 }
 
 var modeExtraBits = abi.FlagSet{

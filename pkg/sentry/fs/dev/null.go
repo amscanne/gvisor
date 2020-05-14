@@ -16,7 +16,7 @@ package dev
 
 import (
 	"gvisor.dev/gvisor/pkg/abi/linux"
-	"gvisor.dev/gvisor/pkg/sentry/context"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/fs/fsutil"
 	"gvisor.dev/gvisor/pkg/sentry/memmap"
@@ -97,6 +97,7 @@ func newZeroDevice(ctx context.Context, owner fs.FileOwner, mode linux.FileMode)
 func (zd *zeroDevice) GetFile(ctx context.Context, dirent *fs.Dirent, flags fs.FileFlags) (*fs.File, error) {
 	flags.Pread = true
 	flags.Pwrite = true
+	flags.NonSeekable = true
 
 	return fs.NewFile(ctx, dirent, flags, &zeroFileOperations{}), nil
 }

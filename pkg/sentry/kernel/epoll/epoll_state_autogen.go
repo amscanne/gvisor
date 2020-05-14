@@ -43,13 +43,27 @@ func (x *pollEntry) load(m state.Map) {
 func (x *EventPoll) beforeSave() {}
 func (x *EventPoll) save(m state.Map) {
 	x.beforeSave()
-	if !state.IsZeroValue(x.FilePipeSeek) { m.Failf("FilePipeSeek is %v, expected zero", x.FilePipeSeek) }
-	if !state.IsZeroValue(x.FileNotDirReaddir) { m.Failf("FileNotDirReaddir is %v, expected zero", x.FileNotDirReaddir) }
-	if !state.IsZeroValue(x.FileNoFsync) { m.Failf("FileNoFsync is %v, expected zero", x.FileNoFsync) }
-	if !state.IsZeroValue(x.FileNoopFlush) { m.Failf("FileNoopFlush is %v, expected zero", x.FileNoopFlush) }
-	if !state.IsZeroValue(x.FileNoIoctl) { m.Failf("FileNoIoctl is %v, expected zero", x.FileNoIoctl) }
-	if !state.IsZeroValue(x.FileNoMMap) { m.Failf("FileNoMMap is %v, expected zero", x.FileNoMMap) }
-	if !state.IsZeroValue(x.Queue) { m.Failf("Queue is %v, expected zero", x.Queue) }
+	if !state.IsZeroValue(&x.FilePipeSeek) {
+		m.Failf("FilePipeSeek is %#v, expected zero", &x.FilePipeSeek)
+	}
+	if !state.IsZeroValue(&x.FileNotDirReaddir) {
+		m.Failf("FileNotDirReaddir is %#v, expected zero", &x.FileNotDirReaddir)
+	}
+	if !state.IsZeroValue(&x.FileNoFsync) {
+		m.Failf("FileNoFsync is %#v, expected zero", &x.FileNoFsync)
+	}
+	if !state.IsZeroValue(&x.FileNoopFlush) {
+		m.Failf("FileNoopFlush is %#v, expected zero", &x.FileNoopFlush)
+	}
+	if !state.IsZeroValue(&x.FileNoIoctl) {
+		m.Failf("FileNoIoctl is %#v, expected zero", &x.FileNoIoctl)
+	}
+	if !state.IsZeroValue(&x.FileNoMMap) {
+		m.Failf("FileNoMMap is %#v, expected zero", &x.FileNoMMap)
+	}
+	if !state.IsZeroValue(&x.Queue) {
+		m.Failf("Queue is %#v, expected zero", &x.Queue)
+	}
 	m.Save("files", &x.files)
 	m.Save("readyList", &x.readyList)
 	m.Save("waitingList", &x.waitingList)
@@ -91,9 +105,9 @@ func (x *pollEntryEntry) load(m state.Map) {
 }
 
 func init() {
-	state.Register("epoll.FileIdentifier", (*FileIdentifier)(nil), state.Fns{Save: (*FileIdentifier).save, Load: (*FileIdentifier).load})
-	state.Register("epoll.pollEntry", (*pollEntry)(nil), state.Fns{Save: (*pollEntry).save, Load: (*pollEntry).load})
-	state.Register("epoll.EventPoll", (*EventPoll)(nil), state.Fns{Save: (*EventPoll).save, Load: (*EventPoll).load})
-	state.Register("epoll.pollEntryList", (*pollEntryList)(nil), state.Fns{Save: (*pollEntryList).save, Load: (*pollEntryList).load})
-	state.Register("epoll.pollEntryEntry", (*pollEntryEntry)(nil), state.Fns{Save: (*pollEntryEntry).save, Load: (*pollEntryEntry).load})
+	state.Register("pkg/sentry/kernel/epoll.FileIdentifier", (*FileIdentifier)(nil), state.Fns{Save: (*FileIdentifier).save, Load: (*FileIdentifier).load})
+	state.Register("pkg/sentry/kernel/epoll.pollEntry", (*pollEntry)(nil), state.Fns{Save: (*pollEntry).save, Load: (*pollEntry).load})
+	state.Register("pkg/sentry/kernel/epoll.EventPoll", (*EventPoll)(nil), state.Fns{Save: (*EventPoll).save, Load: (*EventPoll).load})
+	state.Register("pkg/sentry/kernel/epoll.pollEntryList", (*pollEntryList)(nil), state.Fns{Save: (*pollEntryList).save, Load: (*pollEntryList).load})
+	state.Register("pkg/sentry/kernel/epoll.pollEntryEntry", (*pollEntryEntry)(nil), state.Fns{Save: (*pollEntryEntry).save, Load: (*pollEntryEntry).load})
 }

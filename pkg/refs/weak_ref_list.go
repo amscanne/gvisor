@@ -52,11 +52,21 @@ func (l *weakRefList) Back() *WeakRef {
 	return l.tail
 }
 
+// Len returns the number of elements in the list.
+//
+// NOTE: This is an O(n) operation.
+func (l *weakRefList) Len() (count int) {
+	for e := l.Front(); e != nil; e = e.Next() {
+		count++
+	}
+	return count
+}
+
 // PushFront inserts the element e at the front of list l.
 func (l *weakRefList) PushFront(e *WeakRef) {
-	weakRefElementMapper{}.linkerFor(e).SetNext(l.head)
-	weakRefElementMapper{}.linkerFor(e).SetPrev(nil)
-
+	linker := weakRefElementMapper{}.linkerFor(e)
+	linker.SetNext(l.head)
+	linker.SetPrev(nil)
 	if l.head != nil {
 		weakRefElementMapper{}.linkerFor(l.head).SetPrev(e)
 	} else {
@@ -68,9 +78,9 @@ func (l *weakRefList) PushFront(e *WeakRef) {
 
 // PushBack inserts the element e at the back of list l.
 func (l *weakRefList) PushBack(e *WeakRef) {
-	weakRefElementMapper{}.linkerFor(e).SetNext(nil)
-	weakRefElementMapper{}.linkerFor(e).SetPrev(l.tail)
-
+	linker := weakRefElementMapper{}.linkerFor(e)
+	linker.SetNext(nil)
+	linker.SetPrev(l.tail)
 	if l.tail != nil {
 		weakRefElementMapper{}.linkerFor(l.tail).SetNext(e)
 	} else {
@@ -91,17 +101,20 @@ func (l *weakRefList) PushBackList(m *weakRefList) {
 
 		l.tail = m.tail
 	}
-
 	m.head = nil
 	m.tail = nil
 }
 
 // InsertAfter inserts e after b.
 func (l *weakRefList) InsertAfter(b, e *WeakRef) {
-	a := weakRefElementMapper{}.linkerFor(b).Next()
-	weakRefElementMapper{}.linkerFor(e).SetNext(a)
-	weakRefElementMapper{}.linkerFor(e).SetPrev(b)
-	weakRefElementMapper{}.linkerFor(b).SetNext(e)
+	bLinker := weakRefElementMapper{}.linkerFor(b)
+	eLinker := weakRefElementMapper{}.linkerFor(e)
+
+	a := bLinker.Next()
+
+	eLinker.SetNext(a)
+	eLinker.SetPrev(b)
+	bLinker.SetNext(e)
 
 	if a != nil {
 		weakRefElementMapper{}.linkerFor(a).SetPrev(e)
@@ -112,10 +125,13 @@ func (l *weakRefList) InsertAfter(b, e *WeakRef) {
 
 // InsertBefore inserts e before a.
 func (l *weakRefList) InsertBefore(a, e *WeakRef) {
-	b := weakRefElementMapper{}.linkerFor(a).Prev()
-	weakRefElementMapper{}.linkerFor(e).SetNext(a)
-	weakRefElementMapper{}.linkerFor(e).SetPrev(b)
-	weakRefElementMapper{}.linkerFor(a).SetPrev(e)
+	aLinker := weakRefElementMapper{}.linkerFor(a)
+	eLinker := weakRefElementMapper{}.linkerFor(e)
+
+	b := aLinker.Prev()
+	eLinker.SetNext(a)
+	eLinker.SetPrev(b)
+	aLinker.SetPrev(e)
 
 	if b != nil {
 		weakRefElementMapper{}.linkerFor(b).SetNext(e)
@@ -126,8 +142,9 @@ func (l *weakRefList) InsertBefore(a, e *WeakRef) {
 
 // Remove removes e from l.
 func (l *weakRefList) Remove(e *WeakRef) {
-	prev := weakRefElementMapper{}.linkerFor(e).Prev()
-	next := weakRefElementMapper{}.linkerFor(e).Next()
+	linker := weakRefElementMapper{}.linkerFor(e)
+	prev := linker.Prev()
+	next := linker.Next()
 
 	if prev != nil {
 		weakRefElementMapper{}.linkerFor(prev).SetNext(next)
@@ -140,6 +157,9 @@ func (l *weakRefList) Remove(e *WeakRef) {
 	} else {
 		l.tail = prev
 	}
+
+	linker.SetNext(nil)
+	linker.SetPrev(nil)
 }
 
 // Entry is a default implementation of Linker. Users can add anonymous fields

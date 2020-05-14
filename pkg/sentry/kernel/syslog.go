@@ -17,7 +17,8 @@ package kernel
 import (
 	"fmt"
 	"math/rand"
-	"sync"
+
+	"gvisor.dev/gvisor/pkg/sync"
 )
 
 // syslog represents a sentry-global kernel log.
@@ -67,6 +68,7 @@ func (s *syslog) Log() []byte {
 		"Creating process schedule...",
 		"Generating random numbers by fair dice roll...",
 		"Rewriting operating system in Javascript...",
+		"Reticulating splines...",
 		"Consulting tar man page...",
 		"Forking spaghetti code...",
 		"Checking naughty and nice process list...",

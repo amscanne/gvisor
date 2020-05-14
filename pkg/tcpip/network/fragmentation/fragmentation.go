@@ -17,10 +17,11 @@
 package fragmentation
 
 import (
+	"fmt"
 	"log"
-	"sync"
 	"time"
 
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 )
 
@@ -60,7 +61,7 @@ type Fragmentation struct {
 // lowMemoryLimit specifies the limit on which we will reach by dropping
 // fragments after reaching highMemoryLimit.
 //
-// reassemblingTimeout specifes the maximum time allowed to reassemble a packet.
+// reassemblingTimeout specifies the maximum time allowed to reassemble a packet.
 // Fragments are lazily evicted only when a new a packet with an
 // already existing fragmentation-id arrives after the timeout.
 func NewFragmentation(highMemoryLimit, lowMemoryLimit int, reassemblingTimeout time.Duration) *Fragmentation {
@@ -80,9 +81,9 @@ func NewFragmentation(highMemoryLimit, lowMemoryLimit int, reassemblingTimeout t
 	}
 }
 
-// Process processes an incoming fragment beloning to an ID
+// Process processes an incoming fragment belonging to an ID
 // and returns a complete packet when all the packets belonging to that ID have been received.
-func (f *Fragmentation) Process(id uint32, first, last uint16, more bool, vv buffer.VectorisedView) (buffer.VectorisedView, bool) {
+func (f *Fragmentation) Process(id uint32, first, last uint16, more bool, vv buffer.VectorisedView) (buffer.VectorisedView, bool, error) {
 	f.mu.Lock()
 	r, ok := f.reassemblers[id]
 	if ok && r.tooOld(f.timeout) {
@@ -97,8 +98,15 @@ func (f *Fragmentation) Process(id uint32, first, last uint16, more bool, vv buf
 	}
 	f.mu.Unlock()
 
-	res, done, consumed := r.process(first, last, more, vv)
-
+	res, done, consumed, err := r.process(first, last, more, vv)
+	if err != nil {
+		// We probably got an invalid sequence of fragments. Just
+		// discard the reassembler and move on.
+		f.mu.Lock()
+		f.release(r)
+		f.mu.Unlock()
+		return buffer.VectorisedView{}, false, fmt.Errorf("fragmentation processing error: %v", err)
+	}
 	f.mu.Lock()
 	f.size += consumed
 	if done {
@@ -107,14 +115,16 @@ func (f *Fragmentation) Process(id uint32, first, last uint16, more bool, vv buf
 	// Evict reassemblers if we are consuming more memory than highLimit until
 	// we reach lowLimit.
 	if f.size > f.highLimit {
-		tail := f.rList.Back()
-		for f.size > f.lowLimit && tail != nil {
+		for f.size > f.lowLimit {
+			tail := f.rList.Back()
+			if tail == nil {
+				break
+			}
 			f.release(tail)
-			tail = tail.Prev()
 		}
 	}
 	f.mu.Unlock()
-	return res, done
+	return res, done, nil
 }
 
 func (f *Fragmentation) release(r *reassembler) {

@@ -20,15 +20,17 @@ import (
 	"io"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
-	"gvisor.dev/gvisor/pkg/sentry/context"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/fs/fsutil"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
+
+// LINT.IfChange
 
 // idMapInodeOperations implements fs.InodeOperations for
 // /proc/[pid]/{uid,gid}_map.
@@ -66,7 +68,7 @@ func newGIDMap(t *kernel.Task, msrc *fs.MountSource) *fs.Inode {
 }
 
 func newIDMap(t *kernel.Task, msrc *fs.MountSource, gids bool) *fs.Inode {
-	return newProcInode(&idMapInodeOperations{
+	return newProcInode(t, &idMapInodeOperations{
 		InodeSimpleAttributes: fsutil.NewInodeSimpleAttributes(t, fs.RootOwner, fs.FilePermsFromMode(0644), linux.PROC_SUPER_MAGIC),
 		t:                     t,
 		gids:                  gids,
@@ -177,3 +179,5 @@ func (imfo *idMapFileOperations) Write(ctx context.Context, file *fs.File, src u
 	// count, even if fewer bytes were used.
 	return int64(srclen), nil
 }
+
+// LINT.ThenChange(../../fsimpl/proc/task_files.go)

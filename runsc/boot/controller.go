@@ -18,7 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path"
 	"syscall"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -27,12 +26,14 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/control"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
-	"gvisor.dev/gvisor/pkg/sentry/socket/epsocket"
+	"gvisor.dev/gvisor/pkg/sentry/socket/netstack"
 	"gvisor.dev/gvisor/pkg/sentry/state"
 	"gvisor.dev/gvisor/pkg/sentry/time"
 	"gvisor.dev/gvisor/pkg/sentry/watchdog"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/urpc"
+	"gvisor.dev/gvisor/runsc/boot/pprof"
+	"gvisor.dev/gvisor/runsc/specutils"
 )
 
 const (
@@ -51,7 +52,7 @@ const (
 	ContainerEvent = "containerManager.Event"
 
 	// ContainerExecuteAsync is the URPC endpoint for executing a command in a
-	// container..
+	// container.
 	ContainerExecuteAsync = "containerManager.ExecuteAsync"
 
 	// ContainerPause pauses the container.
@@ -96,13 +97,23 @@ const (
 
 	// SandboxStacks collects sandbox stacks for debugging.
 	SandboxStacks = "debug.Stacks"
+)
 
-	// Profiling related commands (see pprof.go for more details).
-	StartCPUProfile = "Profile.StartCPUProfile"
-	StopCPUProfile  = "Profile.StopCPUProfile"
-	HeapProfile     = "Profile.HeapProfile"
-	StartTrace      = "Profile.StartTrace"
-	StopTrace       = "Profile.StopTrace"
+// Profiling related commands (see pprof.go for more details).
+const (
+	StartCPUProfile  = "Profile.StartCPUProfile"
+	StopCPUProfile   = "Profile.StopCPUProfile"
+	HeapProfile      = "Profile.HeapProfile"
+	GoroutineProfile = "Profile.GoroutineProfile"
+	BlockProfile     = "Profile.BlockProfile"
+	MutexProfile     = "Profile.MutexProfile"
+	StartTrace       = "Profile.StartTrace"
+	StopTrace        = "Profile.StopTrace"
+)
+
+// Logging related commands (see logging.go for more details).
+const (
+	ChangeLogging = "Logging.Change"
 )
 
 // ControlSocketAddr generates an abstract unix socket name for the given ID.
@@ -135,7 +146,7 @@ func newController(fd int, l *Loader) (*controller, error) {
 	}
 	srv.Register(manager)
 
-	if eps, ok := l.k.NetworkStack().(*epsocket.Stack); ok {
+	if eps, ok := l.k.RootNetworkNamespace().Stack().(*netstack.Stack); ok {
 		net := &Network{
 			Stack: eps.Stack,
 		}
@@ -143,8 +154,11 @@ func newController(fd int, l *Loader) (*controller, error) {
 	}
 
 	srv.Register(&debug{})
+	srv.Register(&control.Logging{})
 	if l.conf.ProfileEnable {
-		srv.Register(&control.Profile{})
+		srv.Register(&control.Profile{
+			Kernel: l.k,
+		})
 	}
 
 	return &controller{
@@ -153,7 +167,7 @@ func newController(fd int, l *Loader) (*controller, error) {
 	}, nil
 }
 
-// containerManager manages sandboes containers.
+// containerManager manages sandbox containers.
 type containerManager struct {
 	// startChan is used to signal when the root container process should
 	// be started.
@@ -226,16 +240,12 @@ func (cm *containerManager) Start(args *StartArgs, _ *struct{}) error {
 	if args.CID == "" {
 		return errors.New("start argument missing container ID")
 	}
-	// Prevent CIDs containing ".." from confusing the sentry when creating
-	// /containers/<cid> directory.
-	// TODO(b/129293409): Once we have multiple independent roots, this
-	// check won't be necessary.
-	if path.Clean(args.CID) != args.CID {
-		return fmt.Errorf("container ID shouldn't contain directory traversals such as \"..\": %q", args.CID)
-	}
 	if len(args.FilePayload.Files) < 4 {
 		return fmt.Errorf("start arguments must contain stdin, stderr, and stdout followed by at least one file for the container root gofer")
 	}
+
+	// All validation passed, logs the spec for debugging.
+	specutils.LogSpec(args.Spec)
 
 	err := cm.l.startContainer(args.Spec, args.Conf, args.CID, args.FilePayload.Files)
 	if err != nil {
@@ -320,10 +330,8 @@ func (cm *containerManager) Restore(o *RestoreOpts, _ *struct{}) error {
 		return fmt.Errorf("at most two files may be passed to Restore")
 	}
 
-	networkStack := cm.l.k.NetworkStack()
-	// Destroy the old kernel and create a new kernel.
+	// Pause the kernel while we build a new one.
 	cm.l.k.Pause()
-	cm.l.k.Destroy()
 
 	p, err := createPlatform(cm.l.conf, deviceFile)
 	if err != nil {
@@ -337,10 +345,11 @@ func (cm *containerManager) Restore(o *RestoreOpts, _ *struct{}) error {
 		return fmt.Errorf("creating memory file: %v", err)
 	}
 	k.SetMemoryFile(mf)
+	networkStack := cm.l.k.RootNetworkNamespace().Stack()
 	cm.l.k = k
 
 	// Set up the restore environment.
-	mntr := newContainerMounter(cm.l.spec, "", cm.l.goferFDs, cm.l.k, cm.l.mountHints)
+	mntr := newContainerMounter(cm.l.spec, cm.l.goferFDs, cm.l.k, cm.l.mountHints)
 	renv, err := mntr.createRestoreEnvironment(cm.l.conf)
 	if err != nil {
 		return fmt.Errorf("creating RestoreEnvironment: %v", err)
@@ -348,7 +357,7 @@ func (cm *containerManager) Restore(o *RestoreOpts, _ *struct{}) error {
 	fs.SetRestoreEnvironment(*renv)
 
 	// Prepare to load from the state file.
-	if eps, ok := networkStack.(*epsocket.Stack); ok {
+	if eps, ok := networkStack.(*netstack.Stack); ok {
 		stack.StackFromEnv = eps.Stack // FIXME(b/36201077)
 	}
 	info, err := specFile.Stat()
@@ -359,17 +368,27 @@ func (cm *containerManager) Restore(o *RestoreOpts, _ *struct{}) error {
 		return fmt.Errorf("file cannot be empty")
 	}
 
-	// Load the state.
-	loadOpts := state.LoadOpts{Source: specFile}
-	if err := loadOpts.Load(k, networkStack); err != nil {
+	if cm.l.conf.ProfileEnable {
+		// pprof.Initialize opens /proc/self/maps, so has to be called before
+		// installing seccomp filters.
+		pprof.Initialize()
+	}
+
+	// Seccomp filters have to be applied before parsing the state file.
+	if err := cm.l.installSeccompFilters(); err != nil {
 		return err
 	}
 
-	// Set timekeeper.
-	k.Timekeeper().SetClocks(time.NewCalibratedClocks())
+	// Load the state.
+	loadOpts := state.LoadOpts{Source: specFile}
+	if err := loadOpts.Load(k, networkStack, time.NewCalibratedClocks()); err != nil {
+		return err
+	}
 
 	// Since we have a new kernel we also must make a new watchdog.
-	dog := watchdog.New(k, watchdog.DefaultTimeout, cm.l.conf.WatchdogAction)
+	dogOpts := watchdog.DefaultOpts
+	dogOpts.TaskTimeoutAction = cm.l.conf.WatchdogAction
+	dog := watchdog.New(k, dogOpts)
 
 	// Change the loader fields to reflect the changes made when restoring.
 	cm.l.k = k

@@ -52,11 +52,21 @@ func (l *icmpPacketList) Back() *icmpPacket {
 	return l.tail
 }
 
+// Len returns the number of elements in the list.
+//
+// NOTE: This is an O(n) operation.
+func (l *icmpPacketList) Len() (count int) {
+	for e := l.Front(); e != nil; e = e.Next() {
+		count++
+	}
+	return count
+}
+
 // PushFront inserts the element e at the front of list l.
 func (l *icmpPacketList) PushFront(e *icmpPacket) {
-	icmpPacketElementMapper{}.linkerFor(e).SetNext(l.head)
-	icmpPacketElementMapper{}.linkerFor(e).SetPrev(nil)
-
+	linker := icmpPacketElementMapper{}.linkerFor(e)
+	linker.SetNext(l.head)
+	linker.SetPrev(nil)
 	if l.head != nil {
 		icmpPacketElementMapper{}.linkerFor(l.head).SetPrev(e)
 	} else {
@@ -68,9 +78,9 @@ func (l *icmpPacketList) PushFront(e *icmpPacket) {
 
 // PushBack inserts the element e at the back of list l.
 func (l *icmpPacketList) PushBack(e *icmpPacket) {
-	icmpPacketElementMapper{}.linkerFor(e).SetNext(nil)
-	icmpPacketElementMapper{}.linkerFor(e).SetPrev(l.tail)
-
+	linker := icmpPacketElementMapper{}.linkerFor(e)
+	linker.SetNext(nil)
+	linker.SetPrev(l.tail)
 	if l.tail != nil {
 		icmpPacketElementMapper{}.linkerFor(l.tail).SetNext(e)
 	} else {
@@ -91,17 +101,20 @@ func (l *icmpPacketList) PushBackList(m *icmpPacketList) {
 
 		l.tail = m.tail
 	}
-
 	m.head = nil
 	m.tail = nil
 }
 
 // InsertAfter inserts e after b.
 func (l *icmpPacketList) InsertAfter(b, e *icmpPacket) {
-	a := icmpPacketElementMapper{}.linkerFor(b).Next()
-	icmpPacketElementMapper{}.linkerFor(e).SetNext(a)
-	icmpPacketElementMapper{}.linkerFor(e).SetPrev(b)
-	icmpPacketElementMapper{}.linkerFor(b).SetNext(e)
+	bLinker := icmpPacketElementMapper{}.linkerFor(b)
+	eLinker := icmpPacketElementMapper{}.linkerFor(e)
+
+	a := bLinker.Next()
+
+	eLinker.SetNext(a)
+	eLinker.SetPrev(b)
+	bLinker.SetNext(e)
 
 	if a != nil {
 		icmpPacketElementMapper{}.linkerFor(a).SetPrev(e)
@@ -112,10 +125,13 @@ func (l *icmpPacketList) InsertAfter(b, e *icmpPacket) {
 
 // InsertBefore inserts e before a.
 func (l *icmpPacketList) InsertBefore(a, e *icmpPacket) {
-	b := icmpPacketElementMapper{}.linkerFor(a).Prev()
-	icmpPacketElementMapper{}.linkerFor(e).SetNext(a)
-	icmpPacketElementMapper{}.linkerFor(e).SetPrev(b)
-	icmpPacketElementMapper{}.linkerFor(a).SetPrev(e)
+	aLinker := icmpPacketElementMapper{}.linkerFor(a)
+	eLinker := icmpPacketElementMapper{}.linkerFor(e)
+
+	b := aLinker.Prev()
+	eLinker.SetNext(a)
+	eLinker.SetPrev(b)
+	aLinker.SetPrev(e)
 
 	if b != nil {
 		icmpPacketElementMapper{}.linkerFor(b).SetNext(e)
@@ -126,8 +142,9 @@ func (l *icmpPacketList) InsertBefore(a, e *icmpPacket) {
 
 // Remove removes e from l.
 func (l *icmpPacketList) Remove(e *icmpPacket) {
-	prev := icmpPacketElementMapper{}.linkerFor(e).Prev()
-	next := icmpPacketElementMapper{}.linkerFor(e).Next()
+	linker := icmpPacketElementMapper{}.linkerFor(e)
+	prev := linker.Prev()
+	next := linker.Next()
 
 	if prev != nil {
 		icmpPacketElementMapper{}.linkerFor(prev).SetNext(next)
@@ -140,6 +157,9 @@ func (l *icmpPacketList) Remove(e *icmpPacket) {
 	} else {
 		l.tail = prev
 	}
+
+	linker.SetNext(nil)
+	linker.SetPrev(nil)
 }
 
 // Entry is a default implementation of Linker. Users can add anonymous fields

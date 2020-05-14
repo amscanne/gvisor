@@ -15,14 +15,15 @@
 package fs
 
 import (
-	"sync"
+	"io"
 
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/refs"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
-	"gvisor.dev/gvisor/pkg/sentry/context"
 	"gvisor.dev/gvisor/pkg/sentry/memmap"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
@@ -85,12 +86,6 @@ type overlayFileOperations struct {
 	// protected by File.mu of the owning file, which is held during
 	// Readdir and Seek calls.
 	dirCursor string
-
-	// dirCacheMu protects dirCache.
-	dirCacheMu sync.RWMutex `state:"nosave"`
-
-	// dirCache is cache of DentAttrs from upper and lower Inodes.
-	dirCache *SortedDentryMap
 }
 
 // Release implements FileOperations.Release.
@@ -171,53 +166,68 @@ func (f *overlayFileOperations) Readdir(ctx context.Context, file *File, seriali
 	if root != nil {
 		defer root.DecRef()
 	}
+
 	dirCtx := &DirCtx{
 		Serializer: serializer,
 		DirCursor:  &f.dirCursor,
 	}
-
-	// If the directory dirent is frozen, then DirentReaddir will calculate
-	// the children based off the frozen dirent tree. There is no need to
-	// call readdir on the upper/lower layers.
-	if file.Dirent.frozen {
-		return DirentReaddir(ctx, file.Dirent, f, root, dirCtx, file.Offset())
-	}
-
-	// Otherwise proceed with usual overlay readdir.
-	o := file.Dirent.Inode.overlay
-
-	// readdirEntries holds o.copyUpMu to ensure that copy-up does not
-	// occur while calculating the readir results.
-	//
-	// However, it is possible for a copy-up to occur after the call to
-	// readdirEntries, but before setting f.dirCache. This is OK, since
-	// copy-up only does not change the children in a way that would affect
-	// the children returned in dirCache. Copy-up only moves
-	// files/directories between layers in the overlay.
-	//
-	// It is also possible for Readdir to race with a Create operation
-	// (which may trigger a copy-up during it's execution). Depending on
-	// whether the Create happens before or after the readdirEntries call,
-	// the newly created file may or may not appear in the readdir results.
-	// But this can only be caused by a real race between readdir and
-	// create syscalls, so it's also OK.
-	dirCache, err := readdirEntries(ctx, o)
-	if err != nil {
-		return file.Offset(), err
-	}
-
-	f.dirCacheMu.Lock()
-	f.dirCache = dirCache
-	f.dirCacheMu.Unlock()
-
 	return DirentReaddir(ctx, file.Dirent, f, root, dirCtx, file.Offset())
 }
 
 // IterateDir implements DirIterator.IterateDir.
-func (f *overlayFileOperations) IterateDir(ctx context.Context, dirCtx *DirCtx, offset int) (int, error) {
-	f.dirCacheMu.RLock()
-	n, err := GenericReaddir(dirCtx, f.dirCache)
-	f.dirCacheMu.RUnlock()
+func (f *overlayFileOperations) IterateDir(ctx context.Context, d *Dirent, dirCtx *DirCtx, offset int) (int, error) {
+	o := d.Inode.overlay
+
+	if !d.Inode.MountSource.CacheReaddir() {
+		// Can't use the dirCache. Simply read the entries.
+		entries, err := readdirEntries(ctx, o)
+		if err != nil {
+			return offset, err
+		}
+		n, err := GenericReaddir(dirCtx, entries)
+		return offset + n, err
+	}
+
+	// Otherwise, use or create cached entries.
+
+	o.dirCacheMu.RLock()
+	if o.dirCache != nil {
+		n, err := GenericReaddir(dirCtx, o.dirCache)
+		o.dirCacheMu.RUnlock()
+		return offset + n, err
+	}
+	o.dirCacheMu.RUnlock()
+
+	// readdirEntries holds o.copyUpMu to ensure that copy-up does not
+	// occur while calculating the readdir results.
+	//
+	// However, it is possible for a copy-up to occur after the call to
+	// readdirEntries, but before setting o.dirCache. This is OK, since
+	// copy-up does not change the children in a way that would affect the
+	// children returned in dirCache. Copy-up only moves files/directories
+	// between layers in the overlay.
+	//
+	// We must hold dirCacheMu around both readdirEntries and setting
+	// o.dirCache to synchronize with dirCache invalidations done by
+	// Create, Remove, Rename.
+	o.dirCacheMu.Lock()
+
+	// We expect dirCache to be nil (we just checked above), but there is a
+	// chance that a racing call managed to just set it, in which case we
+	// can use that new value.
+	if o.dirCache == nil {
+		dirCache, err := readdirEntries(ctx, o)
+		if err != nil {
+			o.dirCacheMu.Unlock()
+			return offset, err
+		}
+		o.dirCache = dirCache
+	}
+
+	o.dirCacheMu.DowngradeLock()
+	n, err := GenericReaddir(dirCtx, o.dirCache)
+	o.dirCacheMu.RUnlock()
+
 	return offset + n, err
 }
 
@@ -259,9 +269,9 @@ func (f *overlayFileOperations) Read(ctx context.Context, file *File, dst userme
 }
 
 // WriteTo implements FileOperations.WriteTo.
-func (f *overlayFileOperations) WriteTo(ctx context.Context, file *File, dst *File, opts SpliceOpts) (n int64, err error) {
+func (f *overlayFileOperations) WriteTo(ctx context.Context, file *File, dst io.Writer, count int64, dup bool) (n int64, err error) {
 	err = f.onTop(ctx, file, func(file *File, ops FileOperations) error {
-		n, err = ops.WriteTo(ctx, file, dst, opts)
+		n, err = ops.WriteTo(ctx, file, dst, count, dup)
 		return err // Will overwrite itself.
 	})
 	return
@@ -276,9 +286,9 @@ func (f *overlayFileOperations) Write(ctx context.Context, file *File, src userm
 }
 
 // ReadFrom implements FileOperations.ReadFrom.
-func (f *overlayFileOperations) ReadFrom(ctx context.Context, file *File, src *File, opts SpliceOpts) (n int64, err error) {
+func (f *overlayFileOperations) ReadFrom(ctx context.Context, file *File, src io.Reader, count int64) (n int64, err error) {
 	// See above; f.upper must be non-nil.
-	return f.upper.FileOperations.ReadFrom(ctx, f.upper, src, opts)
+	return f.upper.FileOperations.ReadFrom(ctx, f.upper, src, count)
 }
 
 // Fsync implements FileOperations.Fsync.
@@ -338,13 +348,14 @@ func (*overlayFileOperations) ConfigureMMap(ctx context.Context, file *File, opt
 		// preventing us from saving a proper inode mapping for the
 		// file.
 		file.IncRef()
-		id := &overlayMappingIdentity{
+		id := overlayMappingIdentity{
 			id:          opts.MappingIdentity,
 			overlayFile: file,
 		}
+		id.EnableLeakCheck("fs.overlayMappingIdentity")
 
 		// Swap out the old MappingIdentity for the wrapped one.
-		opts.MappingIdentity = id
+		opts.MappingIdentity = &id
 		return nil
 	}
 
@@ -388,9 +399,49 @@ func (f *overlayFileOperations) UnstableAttr(ctx context.Context, file *File) (U
 	return f.lower.UnstableAttr(ctx)
 }
 
-// Ioctl implements fs.FileOperations.Ioctl and always returns ENOTTY.
-func (*overlayFileOperations) Ioctl(ctx context.Context, io usermem.IO, args arch.SyscallArguments) (uintptr, error) {
-	return 0, syserror.ENOTTY
+// Ioctl implements fs.FileOperations.Ioctl.
+func (f *overlayFileOperations) Ioctl(ctx context.Context, overlayFile *File, io usermem.IO, args arch.SyscallArguments) (uintptr, error) {
+	f.upperMu.Lock()
+	defer f.upperMu.Unlock()
+
+	if f.upper == nil {
+		// It's possible that ioctl changes the file. Since we don't know all
+		// possible ioctls, only allow them to propagate to the upper. Triggering a
+		// copy up on any ioctl would be too drastic. In the future, it can have a
+		// list of ioctls that are safe to send to lower and a list that triggers a
+		// copy up.
+		return 0, syserror.ENOTTY
+	}
+	return f.upper.FileOperations.Ioctl(ctx, f.upper, io, args)
+}
+
+// FifoSize implements FifoSizer.FifoSize.
+func (f *overlayFileOperations) FifoSize(ctx context.Context, overlayFile *File) (rv int64, err error) {
+	err = f.onTop(ctx, overlayFile, func(file *File, ops FileOperations) error {
+		sz, ok := ops.(FifoSizer)
+		if !ok {
+			return syserror.EINVAL
+		}
+		rv, err = sz.FifoSize(ctx, file)
+		return err
+	})
+	return
+}
+
+// SetFifoSize implements FifoSizer.SetFifoSize.
+func (f *overlayFileOperations) SetFifoSize(size int64) (rv int64, err error) {
+	f.upperMu.Lock()
+	defer f.upperMu.Unlock()
+
+	if f.upper == nil {
+		// Named pipes cannot be copied up and changes to the lower are prohibited.
+		return 0, syserror.EINVAL
+	}
+	sz, ok := f.upper.FileOperations.(FifoSizer)
+	if !ok {
+		return 0, syserror.EINVAL
+	}
+	return sz.SetFifoSize(size)
 }
 
 // readdirEntries returns a sorted map of directory entries from the
@@ -424,7 +475,7 @@ func readdirEntries(ctx context.Context, o *overlayEntry) (*SortedDentryMap, err
 			// Skip this name if it is a negative entry in the
 			// upper or there exists a whiteout for it.
 			if o.upper != nil {
-				if overlayHasWhiteout(o.upper, name) {
+				if overlayHasWhiteout(ctx, o.upper, name) {
 					continue
 				}
 			}

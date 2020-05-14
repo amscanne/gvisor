@@ -18,13 +18,12 @@ package dev
 import (
 	"math"
 
-	"gvisor.dev/gvisor/pkg/sentry/context"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
-	"gvisor.dev/gvisor/pkg/sentry/fs/ashmem"
-	"gvisor.dev/gvisor/pkg/sentry/fs/binder"
 	"gvisor.dev/gvisor/pkg/sentry/fs/ramfs"
 	"gvisor.dev/gvisor/pkg/sentry/fs/tmpfs"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
+	"gvisor.dev/gvisor/pkg/sentry/inet"
+	"gvisor.dev/gvisor/pkg/usermem"
 )
 
 // Memory device numbers are from Linux's drivers/char/mem.c
@@ -40,17 +39,25 @@ const (
 	urandomDevMinor uint32 = 9
 )
 
-func newCharacterDevice(iops fs.InodeOperations, msrc *fs.MountSource) *fs.Inode {
-	return fs.NewInode(iops, msrc, fs.StableAttr{
-		DeviceID:  devDevice.DeviceID(),
-		InodeID:   devDevice.NextIno(),
-		BlockSize: usermem.PageSize,
-		Type:      fs.CharacterDevice,
+// TTY major device number comes from include/uapi/linux/major.h.
+const (
+	ttyDevMinor = 0
+	ttyDevMajor = 5
+)
+
+func newCharacterDevice(ctx context.Context, iops fs.InodeOperations, msrc *fs.MountSource, major uint16, minor uint32) *fs.Inode {
+	return fs.NewInode(ctx, iops, msrc, fs.StableAttr{
+		DeviceID:        devDevice.DeviceID(),
+		InodeID:         devDevice.NextIno(),
+		BlockSize:       usermem.PageSize,
+		Type:            fs.CharacterDevice,
+		DeviceFileMajor: major,
+		DeviceFileMinor: minor,
 	})
 }
 
-func newMemDevice(iops fs.InodeOperations, msrc *fs.MountSource, minor uint32) *fs.Inode {
-	return fs.NewInode(iops, msrc, fs.StableAttr{
+func newMemDevice(ctx context.Context, iops fs.InodeOperations, msrc *fs.MountSource, minor uint32) *fs.Inode {
+	return fs.NewInode(ctx, iops, msrc, fs.StableAttr{
 		DeviceID:        devDevice.DeviceID(),
 		InodeID:         devDevice.NextIno(),
 		BlockSize:       usermem.PageSize,
@@ -60,9 +67,9 @@ func newMemDevice(iops fs.InodeOperations, msrc *fs.MountSource, minor uint32) *
 	})
 }
 
-func newDirectory(ctx context.Context, msrc *fs.MountSource) *fs.Inode {
-	iops := ramfs.NewDir(ctx, nil, fs.RootOwner, fs.FilePermsFromMode(0555))
-	return fs.NewInode(iops, msrc, fs.StableAttr{
+func newDirectory(ctx context.Context, contents map[string]*fs.Inode, msrc *fs.MountSource) *fs.Inode {
+	iops := ramfs.NewDir(ctx, contents, fs.RootOwner, fs.FilePermsFromMode(0555))
+	return fs.NewInode(ctx, iops, msrc, fs.StableAttr{
 		DeviceID:  devDevice.DeviceID(),
 		InodeID:   devDevice.NextIno(),
 		BlockSize: usermem.PageSize,
@@ -72,7 +79,7 @@ func newDirectory(ctx context.Context, msrc *fs.MountSource) *fs.Inode {
 
 func newSymlink(ctx context.Context, target string, msrc *fs.MountSource) *fs.Inode {
 	iops := ramfs.NewSymlink(ctx, fs.RootOwner, target)
-	return fs.NewInode(iops, msrc, fs.StableAttr{
+	return fs.NewInode(ctx, iops, msrc, fs.StableAttr{
 		DeviceID:  devDevice.DeviceID(),
 		InodeID:   devDevice.NextIno(),
 		BlockSize: usermem.PageSize,
@@ -81,31 +88,31 @@ func newSymlink(ctx context.Context, target string, msrc *fs.MountSource) *fs.In
 }
 
 // New returns the root node of a device filesystem.
-func New(ctx context.Context, msrc *fs.MountSource, binderEnabled bool, ashmemEnabled bool) *fs.Inode {
+func New(ctx context.Context, msrc *fs.MountSource) *fs.Inode {
 	contents := map[string]*fs.Inode{
 		"fd":     newSymlink(ctx, "/proc/self/fd", msrc),
 		"stdin":  newSymlink(ctx, "/proc/self/fd/0", msrc),
 		"stdout": newSymlink(ctx, "/proc/self/fd/1", msrc),
 		"stderr": newSymlink(ctx, "/proc/self/fd/2", msrc),
 
-		"null": newMemDevice(newNullDevice(ctx, fs.RootOwner, 0666), msrc, nullDevMinor),
-		"zero": newMemDevice(newZeroDevice(ctx, fs.RootOwner, 0666), msrc, zeroDevMinor),
-		"full": newMemDevice(newFullDevice(ctx, fs.RootOwner, 0666), msrc, fullDevMinor),
+		"null": newMemDevice(ctx, newNullDevice(ctx, fs.RootOwner, 0666), msrc, nullDevMinor),
+		"zero": newMemDevice(ctx, newZeroDevice(ctx, fs.RootOwner, 0666), msrc, zeroDevMinor),
+		"full": newMemDevice(ctx, newFullDevice(ctx, fs.RootOwner, 0666), msrc, fullDevMinor),
 
 		// This is not as good as /dev/random in linux because go
 		// runtime uses sys_random and /dev/urandom internally.
 		// According to 'man 4 random', this will be sufficient unless
 		// application uses this to generate long-lived GPG/SSL/SSH
 		// keys.
-		"random":  newMemDevice(newRandomDevice(ctx, fs.RootOwner, 0444), msrc, randomDevMinor),
-		"urandom": newMemDevice(newRandomDevice(ctx, fs.RootOwner, 0444), msrc, urandomDevMinor),
+		"random":  newMemDevice(ctx, newRandomDevice(ctx, fs.RootOwner, 0444), msrc, randomDevMinor),
+		"urandom": newMemDevice(ctx, newRandomDevice(ctx, fs.RootOwner, 0444), msrc, urandomDevMinor),
 
 		"shm": tmpfs.NewDir(ctx, nil, fs.RootOwner, fs.FilePermsFromMode(0777), msrc),
 
 		// A devpts is typically mounted at /dev/pts to provide
 		// pseudoterminal support. Place an empty directory there for
 		// the devpts to be mounted over.
-		"pts": newDirectory(ctx, msrc),
+		"pts": newDirectory(ctx, nil, msrc),
 		// Similarly, applications expect a ptmx device at /dev/ptmx
 		// connected to the terminals provided by /dev/pts/. Rather
 		// than creating a device directly (which requires a hairy
@@ -116,20 +123,18 @@ func New(ctx context.Context, msrc *fs.MountSource, binderEnabled bool, ashmemEn
 		// If no devpts is mounted, this will simply be a dangling
 		// symlink, which is fine.
 		"ptmx": newSymlink(ctx, "pts/ptmx", msrc),
+
+		"tty": newCharacterDevice(ctx, newTTYDevice(ctx, fs.RootOwner, 0666), msrc, ttyDevMajor, ttyDevMinor),
 	}
 
-	if binderEnabled {
-		binder := binder.NewDevice(ctx, fs.RootOwner, fs.FilePermsFromMode(0666))
-		contents["binder"] = newCharacterDevice(binder, msrc)
-	}
-
-	if ashmemEnabled {
-		ashmem := ashmem.NewDevice(ctx, fs.RootOwner, fs.FilePermsFromMode(0666))
-		contents["ashmem"] = newCharacterDevice(ashmem, msrc)
+	if isNetTunSupported(inet.StackFromContext(ctx)) {
+		contents["net"] = newDirectory(ctx, map[string]*fs.Inode{
+			"tun": newCharacterDevice(ctx, newNetTunDevice(ctx, fs.RootOwner, 0666), msrc, netTunDevMajor, netTunDevMinor),
+		}, msrc)
 	}
 
 	iops := ramfs.NewDir(ctx, contents, fs.RootOwner, fs.FilePermsFromMode(0555))
-	return fs.NewInode(iops, msrc, fs.StableAttr{
+	return fs.NewInode(ctx, iops, msrc, fs.StableAttr{
 		DeviceID:  devDevice.DeviceID(),
 		InodeID:   devDevice.NextIno(),
 		BlockSize: usermem.PageSize,

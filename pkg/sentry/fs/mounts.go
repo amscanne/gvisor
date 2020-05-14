@@ -19,14 +19,14 @@ import (
 	"math"
 	"path"
 	"strings"
-	"sync"
 	"syscall"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/refs"
-	"gvisor.dev/gvisor/pkg/sentry/context"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/syserror"
 )
 
@@ -100,10 +100,14 @@ func newUndoMount(d *Dirent) *Mount {
 	}
 }
 
-// Root returns the root dirent of this mount. Callers must call DecRef on the
-// returned dirent.
+// Root returns the root dirent of this mount.
+//
+// This may return nil if the mount has already been free. Callers must handle this
+// case appropriately. If non-nil, callers must call DecRef on the returned *Dirent.
 func (m *Mount) Root() *Dirent {
-	m.root.IncRef()
+	if !m.root.TryIncRef() {
+		return nil
+	}
 	return m.root
 }
 
@@ -124,7 +128,16 @@ func (m *Mount) IsUndo() bool {
 	return false
 }
 
-// MountNamespace defines a collection of mounts.
+// MountNamespace defines a VFS root. It contains collection of Mounts that are
+// mounted inside the Dirent tree rooted at the Root Dirent. It provides
+// methods for traversing the Dirent, and for mounting/unmounting in the tree.
+//
+// Note that this does not correspond to a "mount namespace" in the Linux. It
+// is more like a unique VFS instance.
+//
+// It's possible for different processes to have different MountNamespaces. In
+// this case, the file systems exposed to the processes are completely
+// distinct.
 //
 // +stateify savable
 type MountNamespace struct {
@@ -162,22 +175,23 @@ type MountNamespace struct {
 // NewMountNamespace returns a new MountNamespace, with the provided node at the
 // root, and the given cache size. A root must always be provided.
 func NewMountNamespace(ctx context.Context, root *Inode) (*MountNamespace, error) {
-	creds := auth.CredentialsFromContext(ctx)
-
 	// Set the root dirent and id on the root mount. The reference returned from
 	// NewDirent will be donated to the MountNamespace constructed below.
-	d := NewDirent(root, "/")
+	d := NewDirent(ctx, root, "/")
 
 	mnts := map[*Dirent]*Mount{
 		d: newRootMount(1, d),
 	}
 
-	return &MountNamespace{
+	creds := auth.CredentialsFromContext(ctx)
+	mns := MountNamespace{
 		userns:  creds.UserNamespace,
 		root:    d,
 		mounts:  mnts,
 		mountID: 2,
-	}, nil
+	}
+	mns.EnableLeakCheck("fs.MountNamespace")
+	return &mns, nil
 }
 
 // UserNamespace returns the user namespace associated with this mount manager.
@@ -206,6 +220,13 @@ func (mns *MountNamespace) flushMountSourceRefsLocked() {
 		for ; mp != nil; mp = mp.previous {
 			mp.root.Inode.MountSource.FlushDirentRefs()
 		}
+	}
+
+	if mns.root == nil {
+		// No root? This MountSource must have already been destroyed.
+		// This can happen when a Save is triggered while a process is
+		// exiting. There is nothing to flush.
+		return
 	}
 
 	// Flush root's MountSource references.
@@ -238,6 +259,10 @@ func (mns *MountNamespace) destroy() {
 	// Drop reference on the root.
 	mns.root.DecRef()
 
+	// Ensure that root cannot be accessed via this MountNamespace any
+	// more.
+	mns.root = nil
+
 	// Wait for asynchronous work (queued by dropping Dirent references
 	// above) to complete before destroying this MountNamespace.
 	AsyncBarrier()
@@ -246,19 +271,6 @@ func (mns *MountNamespace) destroy() {
 // DecRef implements RefCounter.DecRef with destructor mns.destroy.
 func (mns *MountNamespace) DecRef() {
 	mns.DecRefWithDestructor(mns.destroy)
-}
-
-// Freeze freezes the entire mount tree.
-func (mns *MountNamespace) Freeze() {
-	mns.mu.Lock()
-	defer mns.mu.Unlock()
-
-	// We only want to freeze Dirents with active references, not Dirents referenced
-	// by a mount's MountSource.
-	mns.flushMountSourceRefsLocked()
-
-	// Freeze the entire shebang.
-	mns.root.Freeze()
 }
 
 // withMountLocked prevents further walks to `node`, because `node` is about to
@@ -588,8 +600,11 @@ func (mns *MountNamespace) resolve(ctx context.Context, root, node *Dirent, rema
 		}
 
 		// Find the node; we resolve relative to the current symlink's parent.
+		renameMu.RLock()
+		parent := node.parent
+		renameMu.RUnlock()
 		*remainingTraversals--
-		d, err := mns.FindInode(ctx, root, node.parent, targetPath, remainingTraversals)
+		d, err := mns.FindInode(ctx, root, parent, targetPath, remainingTraversals)
 		if err != nil {
 			return nil, err
 		}
@@ -652,6 +667,11 @@ func (mns *MountNamespace) ResolveExecutablePath(ctx context.Context, wd, name s
 		}
 		defer d.DecRef()
 
+		// Check that it is a regular file.
+		if !IsRegular(d.Inode.StableAttr) {
+			continue
+		}
+
 		// Check whether we can read and execute the found file.
 		if err := d.Inode.CheckPermission(ctx, PermMask{Read: true, Execute: true}); err != nil {
 			log.Infof("Found executable at %q, but user cannot execute it: %v", binPath, err)
@@ -662,7 +682,7 @@ func (mns *MountNamespace) ResolveExecutablePath(ctx context.Context, wd, name s
 	return "", syserror.ENOENT
 }
 
-// GetPath returns the PATH as a slice of strings given the environemnt
+// GetPath returns the PATH as a slice of strings given the environment
 // variables.
 func GetPath(env []string) []string {
 	const prefix = "PATH="

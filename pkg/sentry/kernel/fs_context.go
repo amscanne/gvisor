@@ -16,10 +16,11 @@ package kernel
 
 import (
 	"fmt"
-	"sync"
 
 	"gvisor.dev/gvisor/pkg/refs"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
+	"gvisor.dev/gvisor/pkg/sentry/vfs"
+	"gvisor.dev/gvisor/pkg/sync"
 )
 
 // FSContext contains filesystem context.
@@ -37,9 +38,15 @@ type FSContext struct {
 	// destroyed.
 	root *fs.Dirent
 
+	// rootVFS2 is the filesystem root.
+	rootVFS2 vfs.VirtualDentry
+
 	// cwd is the current working directory. Will be nil iff the FSContext
 	// has been destroyed.
 	cwd *fs.Dirent
+
+	// cwdVFS2 is the current working directory.
+	cwdVFS2 vfs.VirtualDentry
 
 	// umask is the current file mode creation mask. When a thread using this
 	// context invokes a syscall that creates a file, bits set in umask are
@@ -51,18 +58,33 @@ type FSContext struct {
 func newFSContext(root, cwd *fs.Dirent, umask uint) *FSContext {
 	root.IncRef()
 	cwd.IncRef()
-	return &FSContext{
+	f := FSContext{
 		root:  root,
 		cwd:   cwd,
 		umask: umask,
 	}
+	f.EnableLeakCheck("kernel.FSContext")
+	return &f
+}
+
+// NewFSContextVFS2 returns a new filesystem context.
+func NewFSContextVFS2(root, cwd vfs.VirtualDentry, umask uint) *FSContext {
+	root.IncRef()
+	cwd.IncRef()
+	f := FSContext{
+		rootVFS2: root,
+		cwdVFS2:  cwd,
+		umask:    umask,
+	}
+	f.EnableLeakCheck("kernel.FSContext")
+	return &f
 }
 
 // destroy is the destructor for an FSContext.
 //
 // This will call DecRef on both root and cwd Dirents.  If either call to
-// DecRef returns an error, then it will be propigated.  If both calls to
-// DecRef return an error, then the one from root.DecRef will be propigated.
+// DecRef returns an error, then it will be propagated.  If both calls to
+// DecRef return an error, then the one from root.DecRef will be propagated.
 //
 // Note that there may still be calls to WorkingDirectory() or RootDirectory()
 // (that return nil).  This is because valid references may still be held via
@@ -73,11 +95,17 @@ func (f *FSContext) destroy() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	f.root.DecRef()
-	f.root = nil
-
-	f.cwd.DecRef()
-	f.cwd = nil
+	if VFS2Enabled {
+		f.rootVFS2.DecRef()
+		f.rootVFS2 = vfs.VirtualDentry{}
+		f.cwdVFS2.DecRef()
+		f.cwdVFS2 = vfs.VirtualDentry{}
+	} else {
+		f.root.DecRef()
+		f.root = nil
+		f.cwd.DecRef()
+		f.cwd = nil
+	}
 }
 
 // DecRef implements RefCounter.DecRef with destructor f.destroy.
@@ -91,12 +119,21 @@ func (f *FSContext) DecRef() {
 func (f *FSContext) Fork() *FSContext {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.cwd.IncRef()
-	f.root.IncRef()
+
+	if VFS2Enabled {
+		f.cwdVFS2.IncRef()
+		f.rootVFS2.IncRef()
+	} else {
+		f.cwd.IncRef()
+		f.root.IncRef()
+	}
+
 	return &FSContext{
-		cwd:   f.cwd,
-		root:  f.root,
-		umask: f.umask,
+		cwd:      f.cwd,
+		root:     f.root,
+		cwdVFS2:  f.cwdVFS2,
+		rootVFS2: f.rootVFS2,
+		umask:    f.umask,
 	}
 }
 
@@ -107,10 +144,21 @@ func (f *FSContext) Fork() *FSContext {
 func (f *FSContext) WorkingDirectory() *fs.Dirent {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.cwd != nil {
-		f.cwd.IncRef()
-	}
+
+	f.cwd.IncRef()
 	return f.cwd
+}
+
+// WorkingDirectoryVFS2 returns the current working directory.
+//
+// This will return nil if called after destroy(), otherwise it will return a
+// Dirent with a reference taken.
+func (f *FSContext) WorkingDirectoryVFS2() vfs.VirtualDentry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.cwdVFS2.IncRef()
+	return f.cwdVFS2
 }
 
 // SetWorkingDirectory sets the current working directory.
@@ -135,6 +183,20 @@ func (f *FSContext) SetWorkingDirectory(d *fs.Dirent) {
 	old.DecRef()
 }
 
+// SetWorkingDirectoryVFS2 sets the current working directory.
+// This will take an extra reference on the VirtualDentry.
+//
+// This is not a valid call after destroy.
+func (f *FSContext) SetWorkingDirectoryVFS2(d vfs.VirtualDentry) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	old := f.cwdVFS2
+	f.cwdVFS2 = d
+	d.IncRef()
+	old.DecRef()
+}
+
 // RootDirectory returns the current filesystem root.
 //
 // This will return nil if called after destroy(), otherwise it will return a
@@ -146,6 +208,18 @@ func (f *FSContext) RootDirectory() *fs.Dirent {
 		f.root.IncRef()
 	}
 	return f.root
+}
+
+// RootDirectoryVFS2 returns the current filesystem root.
+//
+// This will return nil if called after destroy(), otherwise it will return a
+// Dirent with a reference taken.
+func (f *FSContext) RootDirectoryVFS2() vfs.VirtualDentry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.rootVFS2.IncRef()
+	return f.rootVFS2
 }
 
 // SetRootDirectory sets the root directory.
@@ -167,6 +241,28 @@ func (f *FSContext) SetRootDirectory(d *fs.Dirent) {
 	old := f.root
 	f.root = d
 	d.IncRef()
+	old.DecRef()
+}
+
+// SetRootDirectoryVFS2 sets the root directory. It takes a reference on vd.
+//
+// This is not a valid call after free.
+func (f *FSContext) SetRootDirectoryVFS2(vd vfs.VirtualDentry) {
+	if !vd.Ok() {
+		panic("FSContext.SetRootDirectoryVFS2 called with zero-value VirtualDentry")
+	}
+
+	f.mu.Lock()
+
+	if !f.rootVFS2.Ok() {
+		f.mu.Unlock()
+		panic(fmt.Sprintf("FSContext.SetRootDirectoryVFS2(%v)) called after destroy", vd))
+	}
+
+	old := f.rootVFS2
+	vd.IncRef()
+	f.rootVFS2 = vd
+	f.mu.Unlock()
 	old.DecRef()
 }
 

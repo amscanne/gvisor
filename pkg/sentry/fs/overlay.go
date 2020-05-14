@@ -17,13 +17,13 @@ package fs
 import (
 	"fmt"
 	"strings"
-	"sync"
 
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/log"
-	"gvisor.dev/gvisor/pkg/sentry/context"
 	"gvisor.dev/gvisor/pkg/sentry/memmap"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 )
 
 // The virtual filesystem implements an overlay configuration. For a high-level
@@ -104,7 +104,7 @@ func NewOverlayRoot(ctx context.Context, upper *Inode, lower *Inode, flags Mount
 		return nil, fmt.Errorf("cannot nest overlay in upper file of another overlay")
 	}
 
-	msrc := newOverlayMountSource(upper.MountSource, lower.MountSource, flags)
+	msrc := newOverlayMountSource(ctx, upper.MountSource, lower.MountSource, flags)
 	overlay, err := newOverlayEntry(ctx, upper, lower, true)
 	if err != nil {
 		msrc.DecRef()
@@ -127,7 +127,7 @@ func NewOverlayRootFile(ctx context.Context, upperMS *MountSource, lower *Inode,
 	if !IsRegular(lower.StableAttr) {
 		return nil, fmt.Errorf("lower Inode is not a regular file")
 	}
-	msrc := newOverlayMountSource(upperMS, lower.MountSource, flags)
+	msrc := newOverlayMountSource(ctx, upperMS, lower.MountSource, flags)
 	overlay, err := newOverlayEntry(ctx, nil, lower, true)
 	if err != nil {
 		msrc.DecRef()
@@ -140,9 +140,9 @@ func NewOverlayRootFile(ctx context.Context, upperMS *MountSource, lower *Inode,
 func newOverlayInode(ctx context.Context, o *overlayEntry, msrc *MountSource) *Inode {
 	var inode *Inode
 	if o.upper != nil {
-		inode = NewInode(nil, msrc, o.upper.StableAttr)
+		inode = NewInode(ctx, nil, msrc, o.upper.StableAttr)
 	} else {
-		inode = NewInode(nil, msrc, o.lower.StableAttr)
+		inode = NewInode(ctx, nil, msrc, o.lower.StableAttr)
 	}
 	inode.overlay = o
 	return inode
@@ -196,6 +196,12 @@ type overlayEntry struct {
 	// these locks is sufficient to read upper; holding all three for writing
 	// is required to mutate it.
 	upper *Inode
+
+	// dirCacheMu protects dirCache.
+	dirCacheMu sync.RWMutex `state:"nosave"`
+
+	// dirCache is cache of DentAttrs from upper and lower Inodes.
+	dirCache *SortedDentryMap
 }
 
 // newOverlayEntry returns a new overlayEntry.
@@ -256,6 +262,17 @@ func (o *overlayEntry) inodeLocked() *Inode {
 // Preconditions: At least one of o.copyMu, o.mapsMu, or o.dataMu must be locked.
 func (o *overlayEntry) isMappableLocked() bool {
 	return o.inodeLocked().Mappable() != nil
+}
+
+// markDirectoryDirty marks any cached data dirty for this directory. This is
+// necessary in order to ensure that this node does not retain stale state
+// throughout its lifetime across multiple open directory handles.
+//
+// Currently this means invalidating any readdir caches.
+func (o *overlayEntry) markDirectoryDirty() {
+	o.dirCacheMu.Lock()
+	o.dirCache = nil
+	o.dirCacheMu.Unlock()
 }
 
 // AddMapping implements memmap.Mappable.AddMapping.

@@ -19,10 +19,10 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"flag"
 	"github.com/google/subcommands"
 	"gvisor.dev/gvisor/runsc/boot"
 	"gvisor.dev/gvisor/runsc/container"
+	"gvisor.dev/gvisor/runsc/flag"
 	"gvisor.dev/gvisor/runsc/specutils"
 )
 
@@ -100,7 +100,16 @@ func (r *Restore) Execute(_ context.Context, f *flag.FlagSet, args ...interface{
 
 	conf.RestoreFile = filepath.Join(r.imagePath, checkpointFileName)
 
-	ws, err := container.Run(id, spec, conf, bundleDir, r.consoleSocket, r.pidFile, r.userLog, r.detach)
+	runArgs := container.Args{
+		ID:            id,
+		Spec:          spec,
+		BundleDir:     bundleDir,
+		ConsoleSocket: r.consoleSocket,
+		PIDFile:       r.pidFile,
+		UserLog:       r.userLog,
+		Attached:      !r.detach,
+	}
+	ws, err := container.Run(conf, runArgs)
 	if err != nil {
 		return Errorf("running container: %v", err)
 	}

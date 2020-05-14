@@ -16,14 +16,14 @@ package linux
 
 import (
 	"gvisor.dev/gvisor/pkg/abi/linux"
-	"gvisor.dev/gvisor/pkg/binary"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
-	"gvisor.dev/gvisor/pkg/sentry/kernel/kdefs"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 )
+
+// LINT.IfChange
 
 // Stat implements linux syscall stat(2).
 func Stat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
@@ -35,14 +35,14 @@ func Stat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallC
 		return 0, nil, err
 	}
 
-	return 0, nil, fileOpOn(t, linux.AT_FDCWD, path, true /* resolve */, func(root *fs.Dirent, d *fs.Dirent) error {
+	return 0, nil, fileOpOn(t, linux.AT_FDCWD, path, true /* resolve */, func(root *fs.Dirent, d *fs.Dirent, _ uint) error {
 		return stat(t, d, dirPath, statAddr)
 	})
 }
 
 // Fstatat implements linux syscall newfstatat, i.e. fstatat(2).
 func Fstatat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
-	fd := kdefs.FD(args[0].Int())
+	fd := args[0].Int()
 	addr := args[1].Pointer()
 	statAddr := args[2].Pointer()
 	flags := args[3].Int()
@@ -54,7 +54,7 @@ func Fstatat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysca
 
 	if path == "" {
 		// Annoying. What's wrong with fstat?
-		file := t.FDMap().GetFile(fd)
+		file := t.GetFile(fd)
 		if file == nil {
 			return 0, nil, syserror.EBADF
 		}
@@ -67,7 +67,7 @@ func Fstatat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysca
 	// then we must resolve the final component.
 	resolve := dirPath || flags&linux.AT_SYMLINK_NOFOLLOW == 0
 
-	return 0, nil, fileOpOn(t, fd, path, resolve, func(root *fs.Dirent, d *fs.Dirent) error {
+	return 0, nil, fileOpOn(t, fd, path, resolve, func(root *fs.Dirent, d *fs.Dirent, _ uint) error {
 		return stat(t, d, dirPath, statAddr)
 	})
 }
@@ -86,17 +86,17 @@ func Lstat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 	// want to resolve the final component.
 	resolve := dirPath
 
-	return 0, nil, fileOpOn(t, linux.AT_FDCWD, path, resolve, func(root *fs.Dirent, d *fs.Dirent) error {
+	return 0, nil, fileOpOn(t, linux.AT_FDCWD, path, resolve, func(root *fs.Dirent, d *fs.Dirent, _ uint) error {
 		return stat(t, d, dirPath, statAddr)
 	})
 }
 
 // Fstat implements linux syscall fstat(2).
 func Fstat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
-	fd := kdefs.FD(args[0].Int())
+	fd := args[0].Int()
 	statAddr := args[1].Pointer()
 
-	file := t.FDMap().GetFile(fd)
+	file := t.GetFile(fd)
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
@@ -114,7 +114,9 @@ func stat(t *kernel.Task, d *fs.Dirent, dirPath bool, statAddr usermem.Addr) err
 	if err != nil {
 		return err
 	}
-	return copyOutStat(t, statAddr, d.Inode.StableAttr, uattr)
+	s := statFromAttrs(t, d.Inode.StableAttr, uattr)
+	_, err = s.CopyOut(t, statAddr)
+	return err
 }
 
 // fstat implements fstat for the given *fs.File.
@@ -123,74 +125,103 @@ func fstat(t *kernel.Task, f *fs.File, statAddr usermem.Addr) error {
 	if err != nil {
 		return err
 	}
-	return copyOutStat(t, statAddr, f.Dirent.Inode.StableAttr, uattr)
+	s := statFromAttrs(t, f.Dirent.Inode.StableAttr, uattr)
+	_, err = s.CopyOut(t, statAddr)
+	return err
 }
 
-// copyOutStat copies the attributes (sattr, uattr) to the struct stat at
-// address dst in t's address space. It encodes the stat struct to bytes
-// manually, as stat() is a very common syscall for many applications, and
-// t.CopyObjectOut has noticeable performance impact due to its many slice
-// allocations and use of reflection.
-func copyOutStat(t *kernel.Task, dst usermem.Addr, sattr fs.StableAttr, uattr fs.UnstableAttr) error {
-	var mode uint32
-	switch sattr.Type {
-	case fs.RegularFile, fs.SpecialFile:
-		mode |= linux.ModeRegular
-	case fs.Symlink:
-		mode |= linux.ModeSymlink
-	case fs.Directory, fs.SpecialDirectory:
-		mode |= linux.ModeDirectory
-	case fs.Pipe:
-		mode |= linux.ModeNamedPipe
-	case fs.CharacterDevice:
-		mode |= linux.ModeCharacterDevice
-	case fs.BlockDevice:
-		mode |= linux.ModeBlockDevice
-	case fs.Socket:
-		mode |= linux.ModeSocket
+// Statx implements linux syscall statx(2).
+func Statx(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+	fd := args[0].Int()
+	pathAddr := args[1].Pointer()
+	flags := args[2].Int()
+	mask := args[3].Uint()
+	statxAddr := args[4].Pointer()
+
+	if mask&linux.STATX__RESERVED != 0 {
+		return 0, nil, syserror.EINVAL
+	}
+	if flags&^(linux.AT_SYMLINK_NOFOLLOW|linux.AT_EMPTY_PATH|linux.AT_STATX_SYNC_TYPE) != 0 {
+		return 0, nil, syserror.EINVAL
+	}
+	if flags&linux.AT_STATX_SYNC_TYPE == linux.AT_STATX_SYNC_TYPE {
+		return 0, nil, syserror.EINVAL
 	}
 
-	b := t.CopyScratchBuffer(int(linux.SizeOfStat))[:0]
+	path, dirPath, err := copyInPath(t, pathAddr, flags&linux.AT_EMPTY_PATH != 0)
+	if err != nil {
+		return 0, nil, err
+	}
 
-	// Dev (uint64)
-	b = binary.AppendUint64(b, usermem.ByteOrder, uint64(sattr.DeviceID))
-	// Ino (uint64)
-	b = binary.AppendUint64(b, usermem.ByteOrder, uint64(sattr.InodeID))
-	// Nlink (uint64)
-	b = binary.AppendUint64(b, usermem.ByteOrder, uattr.Links)
-	// Mode (uint32)
-	b = binary.AppendUint32(b, usermem.ByteOrder, mode|uint32(uattr.Perms.LinuxMode()))
-	// UID (uint32)
-	b = binary.AppendUint32(b, usermem.ByteOrder, uint32(uattr.Owner.UID.In(t.UserNamespace()).OrOverflow()))
-	// GID (uint32)
-	b = binary.AppendUint32(b, usermem.ByteOrder, uint32(uattr.Owner.GID.In(t.UserNamespace()).OrOverflow()))
-	// Padding (uint32)
-	b = binary.AppendUint32(b, usermem.ByteOrder, 0)
-	// Rdev (uint64)
-	b = binary.AppendUint64(b, usermem.ByteOrder, uint64(linux.MakeDeviceID(sattr.DeviceFileMajor, sattr.DeviceFileMinor)))
-	// Size (uint64)
-	b = binary.AppendUint64(b, usermem.ByteOrder, uint64(uattr.Size))
-	// Blksize (uint64)
-	b = binary.AppendUint64(b, usermem.ByteOrder, uint64(sattr.BlockSize))
-	// Blocks (uint64)
-	b = binary.AppendUint64(b, usermem.ByteOrder, uint64(uattr.Usage/512))
+	if path == "" {
+		file := t.GetFile(fd)
+		if file == nil {
+			return 0, nil, syserror.EBADF
+		}
+		defer file.DecRef()
+		uattr, err := file.UnstableAttr(t)
+		if err != nil {
+			return 0, nil, err
+		}
+		return 0, nil, statx(t, file.Dirent.Inode.StableAttr, uattr, statxAddr)
+	}
 
-	// ATime
-	atime := uattr.AccessTime.Timespec()
-	b = binary.AppendUint64(b, usermem.ByteOrder, uint64(atime.Sec))
-	b = binary.AppendUint64(b, usermem.ByteOrder, uint64(atime.Nsec))
+	resolve := dirPath || flags&linux.AT_SYMLINK_NOFOLLOW == 0
 
-	// MTime
-	mtime := uattr.ModificationTime.Timespec()
-	b = binary.AppendUint64(b, usermem.ByteOrder, uint64(mtime.Sec))
-	b = binary.AppendUint64(b, usermem.ByteOrder, uint64(mtime.Nsec))
+	return 0, nil, fileOpOn(t, fd, path, resolve, func(root *fs.Dirent, d *fs.Dirent, _ uint) error {
+		if dirPath && !fs.IsDir(d.Inode.StableAttr) {
+			return syserror.ENOTDIR
+		}
+		uattr, err := d.Inode.UnstableAttr(t)
+		if err != nil {
+			return err
+		}
+		return statx(t, d.Inode.StableAttr, uattr, statxAddr)
+	})
+}
 
-	// CTime
-	ctime := uattr.StatusChangeTime.Timespec()
-	b = binary.AppendUint64(b, usermem.ByteOrder, uint64(ctime.Sec))
-	b = binary.AppendUint64(b, usermem.ByteOrder, uint64(ctime.Nsec))
+func statx(t *kernel.Task, sattr fs.StableAttr, uattr fs.UnstableAttr, statxAddr usermem.Addr) error {
+	// "[T]he kernel may return fields that weren't requested and may fail to
+	// return fields that were requested, depending on what the backing
+	// filesystem supports.
+	// [...]
+	// A filesystem may also fill in fields that the caller didn't ask for
+	// if it has values for them available and the information is available
+	// at no extra cost. If this happens, the corresponding bits will be
+	// set in stx_mask." -- statx(2)
+	//
+	// We fill in all the values we have (which currently does not include
+	// btime, see b/135608823), regardless of what the user asked for. The
+	// STATX_BASIC_STATS mask indicates that all fields are present except
+	// for btime.
 
-	_, err := t.CopyOutBytes(dst, b)
+	devMajor, devMinor := linux.DecodeDeviceID(uint32(sattr.DeviceID))
+	s := linux.Statx{
+		// TODO(b/135608823): Support btime, and then change this to
+		// STATX_ALL to indicate presence of btime.
+		Mask: linux.STATX_BASIC_STATS,
+
+		// No attributes, and none supported.
+		Attributes:     0,
+		AttributesMask: 0,
+
+		Blksize:   uint32(sattr.BlockSize),
+		Nlink:     uint32(uattr.Links),
+		UID:       uint32(uattr.Owner.UID.In(t.UserNamespace()).OrOverflow()),
+		GID:       uint32(uattr.Owner.GID.In(t.UserNamespace()).OrOverflow()),
+		Mode:      uint16(sattr.Type.LinuxType()) | uint16(uattr.Perms.LinuxMode()),
+		Ino:       sattr.InodeID,
+		Size:      uint64(uattr.Size),
+		Blocks:    uint64(uattr.Usage) / 512,
+		Atime:     uattr.AccessTime.StatxTimestamp(),
+		Ctime:     uattr.StatusChangeTime.StatxTimestamp(),
+		Mtime:     uattr.ModificationTime.StatxTimestamp(),
+		RdevMajor: uint32(sattr.DeviceFileMajor),
+		RdevMinor: sattr.DeviceFileMinor,
+		DevMajor:  uint32(devMajor),
+		DevMinor:  devMinor,
+	}
+	_, err := t.CopyOut(statxAddr, &s)
 	return err
 }
 
@@ -204,17 +235,17 @@ func Statfs(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 		return 0, nil, err
 	}
 
-	return 0, nil, fileOpOn(t, linux.AT_FDCWD, path, true /* resolve */, func(root *fs.Dirent, d *fs.Dirent) error {
+	return 0, nil, fileOpOn(t, linux.AT_FDCWD, path, true /* resolve */, func(root *fs.Dirent, d *fs.Dirent, _ uint) error {
 		return statfsImpl(t, d, statfsAddr)
 	})
 }
 
 // Fstatfs implements linux syscall fstatfs(2).
 func Fstatfs(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
-	fd := kdefs.FD(args[0].Int())
+	fd := args[0].Int()
 	statfsAddr := args[1].Pointer()
 
-	file := t.FDMap().GetFile(fd)
+	file := t.GetFile(fd)
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
@@ -252,8 +283,8 @@ func statfsImpl(t *kernel.Task, d *fs.Dirent, addr usermem.Addr) error {
 		FragmentSize: d.Inode.StableAttr.BlockSize,
 		// Leave other fields 0 like simple_statfs does.
 	}
-	if _, err := t.CopyOut(addr, &statfs); err != nil {
-		return err
-	}
-	return nil
+	_, err = t.CopyOut(addr, &statfs)
+	return err
 }
+
+// LINT.ThenChange(vfs2/stat.go)

@@ -3,8 +3,8 @@
 package control
 
 import (
-	"gvisor.dev/gvisor/pkg/state"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
+	"gvisor.dev/gvisor/pkg/state"
 )
 
 func (x *RightsFiles) save(m state.Map) {
@@ -31,6 +31,6 @@ func (x *scmCredentials) load(m state.Map) {
 }
 
 func init() {
-	state.Register("control.RightsFiles", (*RightsFiles)(nil), state.Fns{Save: (*RightsFiles).save, Load: (*RightsFiles).load})
-	state.Register("control.scmCredentials", (*scmCredentials)(nil), state.Fns{Save: (*scmCredentials).save, Load: (*scmCredentials).load})
+	state.Register("pkg/sentry/socket/control.RightsFiles", (*RightsFiles)(nil), state.Fns{Save: (*RightsFiles).save, Load: (*RightsFiles).load})
+	state.Register("pkg/sentry/socket/control.scmCredentials", (*scmCredentials)(nil), state.Fns{Save: (*scmCredentials).save, Load: (*scmCredentials).load})
 }

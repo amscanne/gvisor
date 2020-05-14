@@ -17,11 +17,14 @@ package p9
 import (
 	"io"
 	"runtime/debug"
-	"sync"
 	"sync/atomic"
 	"syscall"
 
+	"gvisor.dev/gvisor/pkg/fd"
+	"gvisor.dev/gvisor/pkg/fdchannel"
+	"gvisor.dev/gvisor/pkg/flipcall"
 	"gvisor.dev/gvisor/pkg/log"
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/unet"
 )
 
@@ -35,7 +38,7 @@ type Server struct {
 	// These may be across different connections, but rename operations
 	// must be serialized globally for safely. There is a single pathTree
 	// for the entire server, and not per connection.
-	pathTree pathNode
+	pathTree *pathNode
 
 	// renameMu is a global lock protecting rename operations. With this
 	// lock, we can be certain that any given rename operation can safely
@@ -45,10 +48,10 @@ type Server struct {
 }
 
 // NewServer returns a new server.
-//
 func NewServer(attacher Attacher) *Server {
 	return &Server{
 		attacher: attacher,
+		pathTree: newPathNode(),
 	}
 }
 
@@ -84,6 +87,8 @@ type connState struct {
 	// version 0 implies 9P2000.L.
 	version uint32
 
+	// -- below relates to the legacy handler --
+
 	// recvOkay indicates that a receive may start.
 	recvOkay chan bool
 
@@ -92,6 +97,20 @@ type connState struct {
 
 	// sendDone is signalled when a send is finished.
 	sendDone chan error
+
+	// -- below relates to the flipcall handler --
+
+	// channelMu protects below.
+	channelMu sync.Mutex
+
+	// channelWg represents active workers.
+	channelWg sync.WaitGroup
+
+	// channelAlloc allocates channel memory.
+	channelAlloc *flipcall.PacketWindowAllocator
+
+	// channels are the set of initialized channels.
+	channels []*channel
 }
 
 // fidRef wraps a node and tracks references.
@@ -201,19 +220,16 @@ func (f *fidRef) maybeParent() *fidRef {
 
 // notifyDelete marks all fidRefs as deleted.
 //
-// Precondition: the write lock must be held on the given pathNode.
+// Precondition: this must be called via safelyWrite or safelyGlobal.
 func notifyDelete(pn *pathNode) {
 	// Call on all local references.
-	pn.fidRefs.Range(func(key, _ interface{}) bool {
-		ref := key.(*fidRef)
+	pn.forEachChildRef(func(ref *fidRef, _ string) {
 		atomic.StoreUint32(&ref.deleted, 1)
-		return true
 	})
 
 	// Call on all subtrees.
-	pn.children.Range(func(_, value interface{}) bool {
-		notifyDelete(value.(*pathNode))
-		return true
+	pn.forEachChildNode(func(pn *pathNode) {
+		notifyDelete(pn)
 	})
 }
 
@@ -225,28 +241,26 @@ func (f *fidRef) markChildDeleted(name string) {
 		atomic.StoreUint32(&ref.deleted, 1)
 	})
 
-	// Mark everything below as deleted.
-	notifyDelete(origPathNode)
+	if origPathNode != nil {
+		// Mark all children as deleted.
+		notifyDelete(origPathNode)
+	}
 }
 
 // notifyNameChange calls the relevant Renamed method on all nodes in the path,
 // recursively. Note that this applies only for subtrees, as these
 // notifications do not apply to the actual file whose name has changed.
 //
-// Precondition: the write lock must be held on the given pathNode.
+// Precondition: this must be called via safelyGlobal.
 func notifyNameChange(pn *pathNode) {
 	// Call on all local references.
-	pn.fidRefs.Range(func(key, value interface{}) bool {
-		ref := key.(*fidRef)
-		name := value.(string)
+	pn.forEachChildRef(func(ref *fidRef, name string) {
 		ref.file.Renamed(ref.parent.file, name)
-		return true
 	})
 
 	// Call on all subtrees.
-	pn.children.Range(func(_, value interface{}) bool {
-		notifyNameChange(value.(*pathNode))
-		return true
+	pn.forEachChildNode(func(pn *pathNode) {
+		notifyNameChange(pn)
 	})
 }
 
@@ -256,18 +270,25 @@ func notifyNameChange(pn *pathNode) {
 func (f *fidRef) renameChildTo(oldName string, target *fidRef, newName string) {
 	target.markChildDeleted(newName)
 	origPathNode := f.pathNode.removeWithName(oldName, func(ref *fidRef) {
+		// N.B. DecRef can take f.pathNode's parent's childMu. This is
+		// allowed because renameMu is held for write via safelyGlobal.
 		ref.parent.DecRef() // Drop original reference.
 		ref.parent = target // Change parent.
 		ref.parent.IncRef() // Acquire new one.
-		target.pathNode.addChild(ref, newName)
+		if f.pathNode == target.pathNode {
+			target.pathNode.addChildLocked(ref, newName)
+		} else {
+			target.pathNode.addChild(ref, newName)
+		}
 		ref.file.Renamed(target.file, newName)
 	})
 
-	// Replace the previous (now deleted) path node.
-	f.pathNode.children.Store(newName, origPathNode)
-
-	// Call Renamed on everything above.
-	notifyNameChange(origPathNode)
+	if origPathNode != nil {
+		// Replace the previous (now deleted) path node.
+		target.pathNode.addPathNodeFor(newName, origPathNode)
+		// Call Renamed on all children.
+		notifyNameChange(origPathNode)
+	}
 }
 
 // safelyRead executes the given operation with the local path node locked.
@@ -275,8 +296,8 @@ func (f *fidRef) renameChildTo(oldName string, target *fidRef, newName string) {
 func (f *fidRef) safelyRead(fn func() error) (err error) {
 	f.server.renameMu.RLock()
 	defer f.server.renameMu.RUnlock()
-	f.pathNode.mu.RLock()
-	defer f.pathNode.mu.RUnlock()
+	f.pathNode.opMu.RLock()
+	defer f.pathNode.opMu.RUnlock()
 	return fn()
 }
 
@@ -285,8 +306,8 @@ func (f *fidRef) safelyRead(fn func() error) (err error) {
 func (f *fidRef) safelyWrite(fn func() error) (err error) {
 	f.server.renameMu.RLock()
 	defer f.server.renameMu.RUnlock()
-	f.pathNode.mu.Lock()
-	defer f.pathNode.mu.Unlock()
+	f.pathNode.opMu.Lock()
+	defer f.pathNode.opMu.Unlock()
 	return fn()
 }
 
@@ -383,6 +404,105 @@ func (cs *connState) WaitTag(t Tag) {
 	<-ch
 }
 
+// initializeChannels initializes all channels.
+//
+// This is a no-op if channels are already initialized.
+func (cs *connState) initializeChannels() (err error) {
+	cs.channelMu.Lock()
+	defer cs.channelMu.Unlock()
+
+	// Initialize our channel allocator.
+	if cs.channelAlloc == nil {
+		alloc, err := flipcall.NewPacketWindowAllocator()
+		if err != nil {
+			return err
+		}
+		cs.channelAlloc = alloc
+	}
+
+	// Create all the channels.
+	for len(cs.channels) < channelsPerClient {
+		res := &channel{
+			done: make(chan struct{}),
+		}
+
+		res.desc, err = cs.channelAlloc.Allocate(channelSize)
+		if err != nil {
+			return err
+		}
+		if err := res.data.Init(flipcall.ServerSide, res.desc); err != nil {
+			return err
+		}
+
+		socks, err := fdchannel.NewConnectedSockets()
+		if err != nil {
+			res.data.Destroy() // Cleanup.
+			return err
+		}
+		res.fds.Init(socks[0])
+		res.client = fd.New(socks[1])
+
+		cs.channels = append(cs.channels, res)
+
+		// Start servicing the channel.
+		//
+		// When we call stop, we will close all the channels and these
+		// routines should finish. We need the wait group to ensure
+		// that active handlers are actually finished before cleanup.
+		cs.channelWg.Add(1)
+		go func() { // S/R-SAFE: Server side.
+			defer cs.channelWg.Done()
+			if err := res.service(cs); err != nil {
+				// Don't log flipcall.ShutdownErrors, which we expect to be
+				// returned during server shutdown.
+				if _, ok := err.(flipcall.ShutdownError); !ok {
+					log.Warningf("p9.channel.service: %v", err)
+				}
+			}
+		}()
+	}
+
+	return nil
+}
+
+// lookupChannel looks up the channel with given id.
+//
+// The function returns nil if no such channel is available.
+func (cs *connState) lookupChannel(id uint32) *channel {
+	cs.channelMu.Lock()
+	defer cs.channelMu.Unlock()
+	if id >= uint32(len(cs.channels)) {
+		return nil
+	}
+	return cs.channels[id]
+}
+
+// handle handles a single message.
+func (cs *connState) handle(m message) (r message) {
+	defer func() {
+		if r == nil {
+			// Don't allow a panic to propagate.
+			recover()
+
+			// Include a useful log message.
+			log.Warningf("panic in handler: %s", debug.Stack())
+
+			// Wrap in an EFAULT error; we don't really have a
+			// better way to describe this kind of error. It will
+			// usually manifest as a result of the test framework.
+			r = newErr(syscall.EFAULT)
+		}
+	}()
+	if handler, ok := m.(handler); ok {
+		// Call the message handler.
+		r = handler.handle(cs)
+	} else {
+		// Produce an ENOSYS error.
+		r = newErr(syscall.ENOSYS)
+	}
+	return
+}
+
 // handleRequest handles a single request.
 //
 // The recvDone channel is signaled when recv is done (with a error if
@@ -425,41 +545,20 @@ func (cs *connState) handleRequest() {
 	}
 
 	// Handle the message.
-	var r message // r is the response.
-	defer func() {
-		if r == nil {
-			// Don't allow a panic to propagate.
-			recover()
+	r := cs.handle(m)
 
-			// Include a useful log message.
-			log.Warningf("panic in handler: %s", debug.Stack())
+	// Clear the tag before sending. That's because as soon as this hits
+	// the wire, the client can legally send the same tag.
+	cs.ClearTag(tag)
 
-			// Wrap in an EFAULT error; we don't really have a
-			// better way to describe this kind of error. It will
-			// usually manifest as a result of the test framework.
-			r = newErr(syscall.EFAULT)
-		}
+	// Send back the result.
+	cs.sendMu.Lock()
+	err = send(cs.conn, tag, r)
+	cs.sendMu.Unlock()
+	cs.sendDone <- err
 
-		// Clear the tag before sending. That's because as soon as this
-		// hits the wire, the client can legally send another message
-		// with the same tag.
-		cs.ClearTag(tag)
-
-		// Send back the result.
-		cs.sendMu.Lock()
-		err = send(cs.conn, tag, r)
-		cs.sendMu.Unlock()
-		cs.sendDone <- err
-	}()
-	if handler, ok := m.(handler); ok {
-		// Call the message handler.
-		r = handler.handle(cs)
-	} else {
-		// Produce an ENOSYS error.
-		r = newErr(syscall.ENOSYS)
-	}
+	// Return the message to the cache.
 	msgRegistry.put(m)
-	m = nil // 'm' should not be touched after this point.
 }
 
 func (cs *connState) handleRequests() {
@@ -474,7 +573,27 @@ func (cs *connState) stop() {
 	close(cs.recvDone)
 	close(cs.sendDone)
 
-	for _, fidRef := range cs.fids {
+	// Free the channels.
+	cs.channelMu.Lock()
+	for _, ch := range cs.channels {
+		ch.Shutdown()
+	}
+	cs.channelWg.Wait()
+	for _, ch := range cs.channels {
+		ch.Close()
+	}
+	cs.channels = nil // Clear.
+	cs.channelMu.Unlock()
+
+	// Free the channel memory.
+	if cs.channelAlloc != nil {
+		cs.channelAlloc.Destroy()
+	}
+
+	// Close all remaining fids.
+	for fid, fidRef := range cs.fids {
+		delete(cs.fids, fid)
+
 		// Drop final reference in the FID table. Note this should
 		// always close the file, since we've ensured that there are no
 		// handlers running via the wait for Pending => 0 below.
@@ -507,7 +626,7 @@ func (cs *connState) service() error {
 				for i := 0; i < pending; i++ {
 					<-cs.sendDone
 				}
-				return err
+				return nil
 			}
 
 			// This handler is now pending.

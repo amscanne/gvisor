@@ -18,12 +18,11 @@
 package futex
 
 import (
-	"sync"
-
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/sentry/memmap"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 )
 
 // KeyKind indicates the type of a Key.
@@ -729,14 +728,14 @@ func (m *Manager) UnlockPI(t Target, addr usermem.Addr, tid uint32, private bool
 	}
 	b := m.lockBucket(&k)
 
-	err = m.unlockPILocked(t, addr, tid, b)
+	err = m.unlockPILocked(t, addr, tid, b, &k)
 
 	k.release()
 	b.mu.Unlock()
 	return err
 }
 
-func (m *Manager) unlockPILocked(t Target, addr usermem.Addr, tid uint32, b *bucket) error {
+func (m *Manager) unlockPILocked(t Target, addr usermem.Addr, tid uint32, b *bucket, key *Key) error {
 	cur, err := t.LoadUint32(addr)
 	if err != nil {
 		return err
@@ -746,7 +745,22 @@ func (m *Manager) unlockPILocked(t Target, addr usermem.Addr, tid uint32, b *buc
 		return syserror.EPERM
 	}
 
-	if b.waiters.Empty() {
+	var next *Waiter  // Who's the next owner?
+	var next2 *Waiter // Who's the one after that?
+	for w := b.waiters.Front(); w != nil; w = w.Next() {
+		if !w.key.matches(key) {
+			continue
+		}
+
+		if next == nil {
+			next = w
+		} else {
+			next2 = w
+			break
+		}
+	}
+
+	if next == nil {
 		// It's safe to set 0 because there are no waiters, no new owner, and the
 		// executing task is the current owner (no owner died bit).
 		prev, err := t.CompareAndSwapUint32(addr, cur, 0)
@@ -761,12 +775,10 @@ func (m *Manager) unlockPILocked(t Target, addr usermem.Addr, tid uint32, b *buc
 		return nil
 	}
 
-	next := b.waiters.Front()
-
 	// Set next owner's TID, waiters if there are any. Resets owner died bit, if
 	// set, because the executing task takes over as the owner.
 	val := next.tid
-	if next.Next() != nil {
+	if next2 != nil {
 		val |= linux.FUTEX_WAITERS
 	}
 

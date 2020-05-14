@@ -15,20 +15,21 @@
 package linux
 
 import (
-	"syscall"
-
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
+	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
-	"gvisor.dev/gvisor/pkg/sentry/kernel/kdefs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/pipe"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
+	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 )
+
+// LINT.IfChange
 
 // pipe2 implements the actual system call with flags.
 func pipe2(t *kernel.Task, addr usermem.Addr, flags uint) (uintptr, error) {
 	if flags&^(linux.O_NONBLOCK|linux.O_CLOEXEC) != 0 {
-		return 0, syscall.EINVAL
+		return 0, syserror.EINVAL
 	}
 	r, w := pipe.NewConnectedPipe(t, pipe.DefaultPipeSize, usermem.PageSize)
 
@@ -38,25 +39,20 @@ func pipe2(t *kernel.Task, addr usermem.Addr, flags uint) (uintptr, error) {
 	w.SetFlags(linuxToFlags(flags).Settable())
 	defer w.DecRef()
 
-	rfd, err := t.FDMap().NewFDFrom(0, r, kernel.FDFlags{
-		CloseOnExec: flags&linux.O_CLOEXEC != 0},
-		t.ThreadGroup().Limits())
+	fds, err := t.NewFDs(0, []*fs.File{r, w}, kernel.FDFlags{
+		CloseOnExec: flags&linux.O_CLOEXEC != 0,
+	})
 	if err != nil {
 		return 0, err
 	}
 
-	wfd, err := t.FDMap().NewFDFrom(0, w, kernel.FDFlags{
-		CloseOnExec: flags&linux.O_CLOEXEC != 0},
-		t.ThreadGroup().Limits())
-	if err != nil {
-		t.FDMap().Remove(rfd)
+	if _, err := t.CopyOut(addr, fds); err != nil {
+		for _, fd := range fds {
+			if file, _ := t.FDTable().Remove(fd); file != nil {
+				file.DecRef()
+			}
+		}
 		return 0, err
-	}
-
-	if _, err := t.CopyOut(addr, []kdefs.FD{rfd, wfd}); err != nil {
-		t.FDMap().Remove(rfd)
-		t.FDMap().Remove(wfd)
-		return 0, syscall.EFAULT
 	}
 	return 0, nil
 }
@@ -77,3 +73,5 @@ func Pipe2(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 	n, err := pipe2(t, addr, flags)
 	return n, nil, err
 }
+
+// LINT.ThenChange(vfs2/pipe.go)

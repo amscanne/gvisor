@@ -48,6 +48,8 @@ func ExtractErrno(err error) syscall.Errno {
 		return ExtractErrno(e.Err)
 	case *os.SyscallError:
 		return ExtractErrno(e.Err)
+	case *os.LinkError:
+		return ExtractErrno(e.Err)
 	}
 
 	// Default case.
@@ -224,7 +226,7 @@ func (t *Tattach) handle(cs *connState) message {
 		file:     sf,
 		refs:     1,
 		mode:     attr.Mode.FileType(),
-		pathNode: &cs.server.pathTree,
+		pathNode: cs.server.pathTree,
 	}
 	defer root.DecRef()
 
@@ -257,7 +259,6 @@ func CanOpen(mode FileMode) bool {
 
 // handle implements handler.handle.
 func (t *Tlopen) handle(cs *connState) message {
-	// Lookup the FID.
 	ref, ok := cs.LookupFID(t.FID)
 	if !ok {
 		return newErr(syscall.EBADF)
@@ -272,15 +273,15 @@ func (t *Tlopen) handle(cs *connState) message {
 		return newErr(syscall.EINVAL)
 	}
 
-	// Are flags valid?
-	flags := t.Flags &^ OpenFlagsIgnoreMask
-	if flags&^OpenFlagsModeMask != 0 {
-		return newErr(syscall.EINVAL)
-	}
-
-	// Is this an attempt to open a directory as writable? Don't accept.
-	if ref.mode.IsDir() && flags != ReadOnly {
-		return newErr(syscall.EINVAL)
+	if ref.mode.IsDir() {
+		// Directory must be opened ReadOnly.
+		if t.Flags&OpenFlagsModeMask != ReadOnly {
+			return newErr(syscall.EISDIR)
+		}
+		// Directory not truncatable.
+		if t.Flags&OpenTruncate != 0 {
+			return newErr(syscall.EISDIR)
+		}
 	}
 
 	var (
@@ -294,7 +295,6 @@ func (t *Tlopen) handle(cs *connState) message {
 			return syscall.EINVAL
 		}
 
-		// Do the open.
 		osFile, qid, ioUnit, err = ref.file.Open(t.Flags)
 		return err
 	}); err != nil {
@@ -305,16 +305,16 @@ func (t *Tlopen) handle(cs *connState) message {
 	ref.opened = true
 	ref.openFlags = t.Flags
 
-	return &Rlopen{QID: qid, IoUnit: ioUnit, File: osFile}
+	rlopen := &Rlopen{QID: qid, IoUnit: ioUnit}
+	rlopen.SetFilePayload(osFile)
+	return rlopen
 }
 
 func (t *Tlcreate) do(cs *connState, uid UID) (*Rlcreate, error) {
-	// Don't allow complex names.
 	if err := checkSafeName(t.Name); err != nil {
 		return nil, err
 	}
 
-	// Lookup the FID.
 	ref, ok := cs.LookupFID(t.FID)
 	if !ok {
 		return nil, syscall.EBADF
@@ -364,7 +364,9 @@ func (t *Tlcreate) do(cs *connState, uid UID) (*Rlcreate, error) {
 	// Replace the FID reference.
 	cs.InsertFID(t.FID, newRef)
 
-	return &Rlcreate{Rlopen: Rlopen{QID: qid, IoUnit: ioUnit, File: osFile}}, nil
+	rlcreate := &Rlcreate{Rlopen: Rlopen{QID: qid, IoUnit: ioUnit}}
+	rlcreate.SetFilePayload(osFile)
+	return rlcreate, nil
 }
 
 // handle implements handler.handle.
@@ -386,12 +388,10 @@ func (t *Tsymlink) handle(cs *connState) message {
 }
 
 func (t *Tsymlink) do(cs *connState, uid UID) (*Rsymlink, error) {
-	// Don't allow complex names.
 	if err := checkSafeName(t.Name); err != nil {
 		return nil, err
 	}
 
-	// Lookup the FID.
 	ref, ok := cs.LookupFID(t.Directory)
 	if !ok {
 		return nil, syscall.EBADF
@@ -422,19 +422,16 @@ func (t *Tsymlink) do(cs *connState, uid UID) (*Rsymlink, error) {
 
 // handle implements handler.handle.
 func (t *Tlink) handle(cs *connState) message {
-	// Don't allow complex names.
 	if err := checkSafeName(t.Name); err != nil {
 		return newErr(err)
 	}
 
-	// Lookup the FID.
 	ref, ok := cs.LookupFID(t.Directory)
 	if !ok {
 		return newErr(syscall.EBADF)
 	}
 	defer ref.DecRef()
 
-	// Lookup the other FID.
 	refTarget, ok := cs.LookupFID(t.Target)
 	if !ok {
 		return newErr(syscall.EBADF)
@@ -463,7 +460,6 @@ func (t *Tlink) handle(cs *connState) message {
 
 // handle implements handler.handle.
 func (t *Trenameat) handle(cs *connState) message {
-	// Don't allow complex names.
 	if err := checkSafeName(t.OldName); err != nil {
 		return newErr(err)
 	}
@@ -471,14 +467,12 @@ func (t *Trenameat) handle(cs *connState) message {
 		return newErr(err)
 	}
 
-	// Lookup the FID.
 	ref, ok := cs.LookupFID(t.OldDirectory)
 	if !ok {
 		return newErr(syscall.EBADF)
 	}
 	defer ref.DecRef()
 
-	// Lookup the other FID.
 	refTarget, ok := cs.LookupFID(t.NewDirectory)
 	if !ok {
 		return newErr(syscall.EBADF)
@@ -519,12 +513,10 @@ func (t *Trenameat) handle(cs *connState) message {
 
 // handle implements handler.handle.
 func (t *Tunlinkat) handle(cs *connState) message {
-	// Don't allow complex names.
 	if err := checkSafeName(t.Name); err != nil {
 		return newErr(err)
 	}
 
-	// Lookup the FID.
 	ref, ok := cs.LookupFID(t.Directory)
 	if !ok {
 		return newErr(syscall.EBADF)
@@ -545,15 +537,15 @@ func (t *Tunlinkat) handle(cs *connState) message {
 		// Before we do the unlink itself, we need to ensure that there
 		// are no operations in flight on associated path node. The
 		// child's path node lock must be held to ensure that the
-		// unlink at marking the child deleted below is atomic with
+		// unlinkat marking the child deleted below is atomic with
 		// respect to any other read or write operations.
 		//
 		// This is one case where we have a lock ordering issue, but
 		// since we always acquire deeper in the hierarchy, we know
 		// that we are free of lock cycles.
 		childPathNode := ref.pathNode.pathNodeFor(t.Name)
-		childPathNode.mu.Lock()
-		defer childPathNode.mu.Unlock()
+		childPathNode.opMu.Lock()
+		defer childPathNode.opMu.Unlock()
 
 		// Do the unlink.
 		err = ref.file.UnlinkAt(t.Name, t.Flags)
@@ -573,19 +565,16 @@ func (t *Tunlinkat) handle(cs *connState) message {
 
 // handle implements handler.handle.
 func (t *Trename) handle(cs *connState) message {
-	// Don't allow complex names.
 	if err := checkSafeName(t.Name); err != nil {
 		return newErr(err)
 	}
 
-	// Lookup the FID.
 	ref, ok := cs.LookupFID(t.FID)
 	if !ok {
 		return newErr(syscall.EBADF)
 	}
 	defer ref.DecRef()
 
-	// Lookup the target.
 	refTarget, ok := cs.LookupFID(t.Directory)
 	if !ok {
 		return newErr(syscall.EBADF)
@@ -637,7 +626,6 @@ func (t *Trename) handle(cs *connState) message {
 
 // handle implements handler.handle.
 func (t *Treadlink) handle(cs *connState) message {
-	// Lookup the FID.
 	ref, ok := cs.LookupFID(t.FID)
 	if !ok {
 		return newErr(syscall.EBADF)
@@ -665,7 +653,6 @@ func (t *Treadlink) handle(cs *connState) message {
 
 // handle implements handler.handle.
 func (t *Tread) handle(cs *connState) message {
-	// Lookup the FID.
 	ref, ok := cs.LookupFID(t.FID)
 	if !ok {
 		return newErr(syscall.EBADF)
@@ -704,7 +691,6 @@ func (t *Tread) handle(cs *connState) message {
 
 // handle implements handler.handle.
 func (t *Twrite) handle(cs *connState) message {
-	// Lookup the FID.
 	ref, ok := cs.LookupFID(t.FID)
 	if !ok {
 		return newErr(syscall.EBADF)
@@ -743,12 +729,10 @@ func (t *Tmknod) handle(cs *connState) message {
 }
 
 func (t *Tmknod) do(cs *connState, uid UID) (*Rmknod, error) {
-	// Don't allow complex names.
 	if err := checkSafeName(t.Name); err != nil {
 		return nil, err
 	}
 
-	// Lookup the FID.
 	ref, ok := cs.LookupFID(t.Directory)
 	if !ok {
 		return nil, syscall.EBADF
@@ -787,12 +771,10 @@ func (t *Tmkdir) handle(cs *connState) message {
 }
 
 func (t *Tmkdir) do(cs *connState, uid UID) (*Rmkdir, error) {
-	// Don't allow complex names.
 	if err := checkSafeName(t.Name); err != nil {
 		return nil, err
 	}
 
-	// Lookup the FID.
 	ref, ok := cs.LookupFID(t.Directory)
 	if !ok {
 		return nil, syscall.EBADF
@@ -823,7 +805,6 @@ func (t *Tmkdir) do(cs *connState, uid UID) (*Rmkdir, error) {
 
 // handle implements handler.handle.
 func (t *Tgetattr) handle(cs *connState) message {
-	// Lookup the FID.
 	ref, ok := cs.LookupFID(t.FID)
 	if !ok {
 		return newErr(syscall.EBADF)
@@ -852,7 +833,6 @@ func (t *Tgetattr) handle(cs *connState) message {
 
 // handle implements handler.handle.
 func (t *Tsetattr) handle(cs *connState) message {
-	// Lookup the FID.
 	ref, ok := cs.LookupFID(t.FID)
 	if !ok {
 		return newErr(syscall.EBADF)
@@ -879,7 +859,6 @@ func (t *Tsetattr) handle(cs *connState) message {
 
 // handle implements handler.handle.
 func (t *Tallocate) handle(cs *connState) message {
-	// Lookup the FID.
 	ref, ok := cs.LookupFID(t.FID)
 	if !ok {
 		return newErr(syscall.EBADF)
@@ -913,7 +892,6 @@ func (t *Tallocate) handle(cs *connState) message {
 
 // handle implements handler.handle.
 func (t *Txattrwalk) handle(cs *connState) message {
-	// Lookup the FID.
 	ref, ok := cs.LookupFID(t.FID)
 	if !ok {
 		return newErr(syscall.EBADF)
@@ -926,7 +904,6 @@ func (t *Txattrwalk) handle(cs *connState) message {
 
 // handle implements handler.handle.
 func (t *Txattrcreate) handle(cs *connState) message {
-	// Lookup the FID.
 	ref, ok := cs.LookupFID(t.FID)
 	if !ok {
 		return newErr(syscall.EBADF)
@@ -938,8 +915,96 @@ func (t *Txattrcreate) handle(cs *connState) message {
 }
 
 // handle implements handler.handle.
+func (t *Tgetxattr) handle(cs *connState) message {
+	ref, ok := cs.LookupFID(t.FID)
+	if !ok {
+		return newErr(syscall.EBADF)
+	}
+	defer ref.DecRef()
+
+	var val string
+	if err := ref.safelyRead(func() (err error) {
+		// Don't allow getxattr on files that have been deleted.
+		if ref.isDeleted() {
+			return syscall.EINVAL
+		}
+		val, err = ref.file.GetXattr(t.Name, t.Size)
+		return err
+	}); err != nil {
+		return newErr(err)
+	}
+	return &Rgetxattr{Value: val}
+}
+
+// handle implements handler.handle.
+func (t *Tsetxattr) handle(cs *connState) message {
+	ref, ok := cs.LookupFID(t.FID)
+	if !ok {
+		return newErr(syscall.EBADF)
+	}
+	defer ref.DecRef()
+
+	if err := ref.safelyWrite(func() error {
+		// Don't allow setxattr on files that have been deleted.
+		if ref.isDeleted() {
+			return syscall.EINVAL
+		}
+		return ref.file.SetXattr(t.Name, t.Value, t.Flags)
+	}); err != nil {
+		return newErr(err)
+	}
+	return &Rsetxattr{}
+}
+
+// handle implements handler.handle.
+func (t *Tlistxattr) handle(cs *connState) message {
+	ref, ok := cs.LookupFID(t.FID)
+	if !ok {
+		return newErr(syscall.EBADF)
+	}
+	defer ref.DecRef()
+
+	var xattrs map[string]struct{}
+	if err := ref.safelyRead(func() (err error) {
+		// Don't allow listxattr on files that have been deleted.
+		if ref.isDeleted() {
+			return syscall.EINVAL
+		}
+		xattrs, err = ref.file.ListXattr(t.Size)
+		return err
+	}); err != nil {
+		return newErr(err)
+	}
+
+	xattrList := make([]string, 0, len(xattrs))
+	for x := range xattrs {
+		xattrList = append(xattrList, x)
+	}
+	return &Rlistxattr{Xattrs: xattrList}
+}
+
+// handle implements handler.handle.
+func (t *Tremovexattr) handle(cs *connState) message {
+	ref, ok := cs.LookupFID(t.FID)
+	if !ok {
+		return newErr(syscall.EBADF)
+	}
+	defer ref.DecRef()
+
+	if err := ref.safelyWrite(func() error {
+		// Don't allow removexattr on files that have been deleted.
+		if ref.isDeleted() {
+			return syscall.EINVAL
+		}
+		return ref.file.RemoveXattr(t.Name)
+	}); err != nil {
+		return newErr(err)
+	}
+	return &Rremovexattr{}
+}
+
+// handle implements handler.handle.
 func (t *Treaddir) handle(cs *connState) message {
-	// Lookup the FID.
 	ref, ok := cs.LookupFID(t.Directory)
 	if !ok {
 		return newErr(syscall.EBADF)
@@ -973,7 +1038,6 @@ func (t *Treaddir) handle(cs *connState) message {
 
 // handle implements handler.handle.
 func (t *Tfsync) handle(cs *connState) message {
-	// Lookup the FID.
 	ref, ok := cs.LookupFID(t.FID)
 	if !ok {
 		return newErr(syscall.EBADF)
@@ -997,7 +1061,6 @@ func (t *Tfsync) handle(cs *connState) message {
 
 // handle implements handler.handle.
 func (t *Tstatfs) handle(cs *connState) message {
-	// Lookup the FID.
 	ref, ok := cs.LookupFID(t.FID)
 	if !ok {
 		return newErr(syscall.EBADF)
@@ -1188,7 +1251,6 @@ func doWalk(cs *connState, ref *fidRef, names []string, getattr bool) (qids []QI
 
 // handle implements handler.handle.
 func (t *Twalk) handle(cs *connState) message {
-	// Lookup the FID.
 	ref, ok := cs.LookupFID(t.FID)
 	if !ok {
 		return newErr(syscall.EBADF)
@@ -1209,7 +1271,6 @@ func (t *Twalk) handle(cs *connState) message {
 
 // handle implements handler.handle.
 func (t *Twalkgetattr) handle(cs *connState) message {
-	// Lookup the FID.
 	ref, ok := cs.LookupFID(t.FID)
 	if !ok {
 		return newErr(syscall.EBADF)
@@ -1266,7 +1327,6 @@ func (t *Tumknod) handle(cs *connState) message {
 
 // handle implements handler.handle.
 func (t *Tlconnect) handle(cs *connState) message {
-	// Lookup the FID.
 	ref, ok := cs.LookupFID(t.FID)
 	if !ok {
 		return newErr(syscall.EBADF)
@@ -1287,5 +1347,47 @@ func (t *Tlconnect) handle(cs *connState) message {
 		return newErr(err)
 	}
 
-	return &Rlconnect{File: osFile}
+	rlconnect := &Rlconnect{}
+	rlconnect.SetFilePayload(osFile)
+	return rlconnect
+}
+
+// handle implements handler.handle.
+func (t *Tchannel) handle(cs *connState) message {
+	// Ensure that channels are enabled.
+	if err := cs.initializeChannels(); err != nil {
+		return newErr(err)
+	}
+
+	ch := cs.lookupChannel(t.ID)
+	if ch == nil {
+		return newErr(syscall.ENOSYS)
+	}
+
+	// Return the payload. Note that we need to duplicate the file
+	// descriptor for the channel allocator, because sending is a
+	// destructive operation between sendRecvLegacy (and now the newer
+	// channel send operations). Same goes for the client FD.
+	rchannel := &Rchannel{
+		Offset: uint64(ch.desc.Offset),
+		Length: uint64(ch.desc.Length),
+	}
+	switch t.Control {
+	case 0:
+		// Open the main data channel.
+		mfd, err := syscall.Dup(int(cs.channelAlloc.FD()))
+		if err != nil {
+			return newErr(err)
+		}
+		rchannel.SetFilePayload(fd.New(mfd))
+	case 1:
+		cfd, err := syscall.Dup(ch.client.FD())
+		if err != nil {
+			return newErr(err)
+		}
+		rchannel.SetFilePayload(fd.New(cfd))
+	default:
+		return newErr(syscall.EINVAL)
+	}
+	return rchannel
 }

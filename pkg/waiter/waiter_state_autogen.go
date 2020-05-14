@@ -26,7 +26,9 @@ func (x *Entry) load(m state.Map) {
 func (x *Queue) beforeSave() {}
 func (x *Queue) save(m state.Map) {
 	x.beforeSave()
-	if !state.IsZeroValue(x.list) { m.Failf("list is %v, expected zero", x.list) }
+	if !state.IsZeroValue(&x.list) {
+		m.Failf("list is %#v, expected zero", &x.list)
+	}
 }
 
 func (x *Queue) afterLoad() {}
@@ -60,8 +62,8 @@ func (x *waiterEntry) load(m state.Map) {
 }
 
 func init() {
-	state.Register("waiter.Entry", (*Entry)(nil), state.Fns{Save: (*Entry).save, Load: (*Entry).load})
-	state.Register("waiter.Queue", (*Queue)(nil), state.Fns{Save: (*Queue).save, Load: (*Queue).load})
-	state.Register("waiter.waiterList", (*waiterList)(nil), state.Fns{Save: (*waiterList).save, Load: (*waiterList).load})
-	state.Register("waiter.waiterEntry", (*waiterEntry)(nil), state.Fns{Save: (*waiterEntry).save, Load: (*waiterEntry).load})
+	state.Register("pkg/waiter.Entry", (*Entry)(nil), state.Fns{Save: (*Entry).save, Load: (*Entry).load})
+	state.Register("pkg/waiter.Queue", (*Queue)(nil), state.Fns{Save: (*Queue).save, Load: (*Queue).load})
+	state.Register("pkg/waiter.waiterList", (*waiterList)(nil), state.Fns{Save: (*waiterList).save, Load: (*waiterList).load})
+	state.Register("pkg/waiter.waiterEntry", (*waiterEntry)(nil), state.Fns{Save: (*waiterEntry).save, Load: (*waiterEntry).load})
 }

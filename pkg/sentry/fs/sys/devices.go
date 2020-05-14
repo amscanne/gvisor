@@ -18,7 +18,7 @@ import (
 	"fmt"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
-	"gvisor.dev/gvisor/pkg/sentry/context"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/fs/fsutil"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
@@ -58,7 +58,7 @@ func newPossible(ctx context.Context, msrc *fs.MountSource) *fs.Inode {
 			Contents: contents,
 		},
 	}
-	return newFile(c, msrc)
+	return newFile(ctx, c, msrc)
 }
 
 func newCPU(ctx context.Context, msrc *fs.MountSource) *fs.Inode {

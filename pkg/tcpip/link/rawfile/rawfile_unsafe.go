@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/tcpip"
 )
 
@@ -101,6 +102,16 @@ func NonBlockingWrite3(fd int, b1, b2, b3 []byte) *tcpip.Error {
 	return nil
 }
 
+// NonBlockingSendMMsg sends multiple messages on a socket.
+func NonBlockingSendMMsg(fd int, msgHdrs []MMsgHdr) (int, *tcpip.Error) {
+	n, _, e := syscall.RawSyscall6(unix.SYS_SENDMMSG, uintptr(fd), uintptr(unsafe.Pointer(&msgHdrs[0])), uintptr(len(msgHdrs)), syscall.MSG_DONTWAIT, 0, 0)
+	if e != 0 {
+		return 0, TranslateErrno(e)
+	}
+
+	return int(n), nil
+}
+
 // PollEvent represents the pollfd structure passed to a poll() system call.
 type PollEvent struct {
 	FD      int32
@@ -110,7 +121,7 @@ type PollEvent struct {
 
 // BlockingRead reads from a file descriptor that is set up as non-blocking. If
 // no data is available, it will block in a poll() syscall until the file
-// descirptor becomes readable.
+// descriptor becomes readable.
 func BlockingRead(fd int, b []byte) (int, *tcpip.Error) {
 	for {
 		n, _, e := syscall.RawSyscall(syscall.SYS_READ, uintptr(fd), uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)))
@@ -123,7 +134,7 @@ func BlockingRead(fd int, b []byte) (int, *tcpip.Error) {
 			Events: 1, // POLLIN
 		}
 
-		_, e = BlockingPoll(&event, 1, -1)
+		_, e = BlockingPoll(&event, 1, nil)
 		if e != 0 && e != syscall.EINTR {
 			return 0, TranslateErrno(e)
 		}
@@ -145,7 +156,7 @@ func BlockingReadv(fd int, iovecs []syscall.Iovec) (int, *tcpip.Error) {
 			Events: 1, // POLLIN
 		}
 
-		_, e = BlockingPoll(&event, 1, -1)
+		_, e = BlockingPoll(&event, 1, nil)
 		if e != 0 && e != syscall.EINTR {
 			return 0, TranslateErrno(e)
 		}
@@ -175,7 +186,7 @@ func BlockingRecvMMsg(fd int, msgHdrs []MMsgHdr) (int, *tcpip.Error) {
 			Events: 1, // POLLIN
 		}
 
-		if _, e := BlockingPoll(&event, 1, -1); e != 0 && e != syscall.EINTR {
+		if _, e := BlockingPoll(&event, 1, nil); e != 0 && e != syscall.EINTR {
 			return 0, TranslateErrno(e)
 		}
 	}

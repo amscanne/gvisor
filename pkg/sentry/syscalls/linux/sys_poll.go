@@ -21,11 +21,10 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
-	"gvisor.dev/gvisor/pkg/sentry/kernel/kdefs"
 	ktime "gvisor.dev/gvisor/pkg/sentry/kernel/time"
 	"gvisor.dev/gvisor/pkg/sentry/limits"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
@@ -64,7 +63,7 @@ func initReadiness(t *kernel.Task, pfd *linux.PollFD, state *pollState, ch chan 
 		return
 	}
 
-	file := t.FDMap().GetFile(kdefs.FD(pfd.FD))
+	file := t.GetFile(pfd.FD)
 	if file == nil {
 		pfd.REvents = linux.POLLNVAL
 		return
@@ -198,53 +197,51 @@ func doPoll(t *kernel.Task, addr usermem.Addr, nfds uint, timeout time.Duration)
 	return remainingTimeout, n, err
 }
 
+// CopyInFDSet copies an fd set from select(2)/pselect(2).
+func CopyInFDSet(t *kernel.Task, addr usermem.Addr, nBytes, nBitsInLastPartialByte int) ([]byte, error) {
+	set := make([]byte, nBytes)
+
+	if addr != 0 {
+		if _, err := t.CopyIn(addr, &set); err != nil {
+			return nil, err
+		}
+		// If we only use part of the last byte, mask out the extraneous bits.
+		//
+		// N.B. This only works on little-endian architectures.
+		if nBitsInLastPartialByte != 0 {
+			set[nBytes-1] &^= byte(0xff) << nBitsInLastPartialByte
+		}
+	}
+	return set, nil
+}
+
 func doSelect(t *kernel.Task, nfds int, readFDs, writeFDs, exceptFDs usermem.Addr, timeout time.Duration) (uintptr, error) {
 	if nfds < 0 || nfds > fileCap {
 		return 0, syserror.EINVAL
 	}
 
+	// Calculate the size of the fd sets (one bit per fd).
+	nBytes := (nfds + 7) / 8
+	nBitsInLastPartialByte := nfds % 8
+
 	// Capture all the provided input vectors.
-	//
-	// N.B. This only works on little-endian architectures.
-	byteCount := (nfds + 7) / 8
-
-	bitsInLastPartialByte := uint(nfds % 8)
-	r := make([]byte, byteCount)
-	w := make([]byte, byteCount)
-	e := make([]byte, byteCount)
-
-	if readFDs != 0 {
-		if _, err := t.CopyIn(readFDs, &r); err != nil {
-			return 0, err
-		}
-		// Mask out bits above nfds.
-		if bitsInLastPartialByte != 0 {
-			r[byteCount-1] &^= byte(0xff) << bitsInLastPartialByte
-		}
+	r, err := CopyInFDSet(t, readFDs, nBytes, nBitsInLastPartialByte)
+	if err != nil {
+		return 0, err
 	}
-
-	if writeFDs != 0 {
-		if _, err := t.CopyIn(writeFDs, &w); err != nil {
-			return 0, err
-		}
-		if bitsInLastPartialByte != 0 {
-			w[byteCount-1] &^= byte(0xff) << bitsInLastPartialByte
-		}
+	w, err := CopyInFDSet(t, writeFDs, nBytes, nBitsInLastPartialByte)
+	if err != nil {
+		return 0, err
 	}
-
-	if exceptFDs != 0 {
-		if _, err := t.CopyIn(exceptFDs, &e); err != nil {
-			return 0, err
-		}
-		if bitsInLastPartialByte != 0 {
-			e[byteCount-1] &^= byte(0xff) << bitsInLastPartialByte
-		}
+	e, err := CopyInFDSet(t, exceptFDs, nBytes, nBitsInLastPartialByte)
+	if err != nil {
+		return 0, err
 	}
 
 	// Count how many FDs are actually being requested so that we can build
 	// a PollFD array.
 	fdCount := 0
-	for i := 0; i < byteCount; i++ {
+	for i := 0; i < nBytes; i++ {
 		v := r[i] | w[i] | e[i]
 		for v != 0 {
 			v &= (v - 1)
@@ -255,7 +252,7 @@ func doSelect(t *kernel.Task, nfds int, readFDs, writeFDs, exceptFDs usermem.Add
 	// Build the PollFD array.
 	pfd := make([]linux.PollFD, 0, fdCount)
 	var fd int32
-	for i := 0; i < byteCount; i++ {
+	for i := 0; i < nBytes; i++ {
 		rV, wV, eV := r[i], w[i], e[i]
 		v := rV | wV | eV
 		m := byte(1)
@@ -265,7 +262,7 @@ func doSelect(t *kernel.Task, nfds int, readFDs, writeFDs, exceptFDs usermem.Add
 				// immediately to ensure we don't leak. Note, another thread
 				// might be about to close fd. This is racy, but that's
 				// OK. Linux is racy in the same way.
-				file := t.FDMap().GetFile(kdefs.FD(fd))
+				file := t.GetFile(fd)
 				if file == nil {
 					return 0, syserror.EBADF
 				}
@@ -296,8 +293,7 @@ func doSelect(t *kernel.Task, nfds int, readFDs, writeFDs, exceptFDs usermem.Add
 	}
 
 	// Do the syscall, then count the number of bits set.
-	_, _, err := pollBlock(t, pfd, timeout)
-	if err != nil {
+	if _, _, err = pollBlock(t, pfd, timeout); err != nil {
 		return 0, syserror.ConvertIntr(err, syserror.EINTR)
 	}
 
@@ -447,7 +443,7 @@ func Ppoll(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 	}
 
 	if maskAddr != 0 {
-		mask, err := copyInSigSet(t, maskAddr, maskSize)
+		mask, err := CopyInSigSet(t, maskAddr, maskSize)
 		if err != nil {
 			return 0, nil, err
 		}
@@ -529,7 +525,7 @@ func Pselect(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysca
 		}
 
 		if maskAddr != 0 {
-			mask, err := copyInSigSet(t, maskAddr, size)
+			mask, err := CopyInSigSet(t, maskAddr, size)
 			if err != nil {
 				return 0, nil, err
 			}

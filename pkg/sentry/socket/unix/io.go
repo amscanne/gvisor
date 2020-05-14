@@ -15,7 +15,8 @@
 package unix
 
 import (
-	"gvisor.dev/gvisor/pkg/sentry/safemem"
+	"gvisor.dev/gvisor/pkg/context"
+	"gvisor.dev/gvisor/pkg/safemem"
 	"gvisor.dev/gvisor/pkg/sentry/socket/unix/transport"
 	"gvisor.dev/gvisor/pkg/tcpip"
 )
@@ -24,6 +25,8 @@ import (
 //
 // EndpointWriter is not thread-safe.
 type EndpointWriter struct {
+	Ctx context.Context
+
 	// Endpoint is the transport.Endpoint to write to.
 	Endpoint transport.Endpoint
 
@@ -37,7 +40,7 @@ type EndpointWriter struct {
 // WriteFromBlocks implements safemem.Writer.WriteFromBlocks.
 func (w *EndpointWriter) WriteFromBlocks(srcs safemem.BlockSeq) (uint64, error) {
 	return safemem.FromVecWriterFunc{func(bufs [][]byte) (int64, error) {
-		n, err := w.Endpoint.SendMsg(bufs, w.Control, w.To)
+		n, err := w.Endpoint.SendMsg(w.Ctx, bufs, w.Control, w.To)
 		if err != nil {
 			return int64(n), err.ToError()
 		}
@@ -50,6 +53,8 @@ func (w *EndpointWriter) WriteFromBlocks(srcs safemem.BlockSeq) (uint64, error) 
 //
 // EndpointReader is not thread-safe.
 type EndpointReader struct {
+	Ctx context.Context
+
 	// Endpoint is the transport.Endpoint to read from.
 	Endpoint transport.Endpoint
 
@@ -57,7 +62,7 @@ type EndpointReader struct {
 	Creds bool
 
 	// NumRights is the number of SCM_RIGHTS FDs requested.
-	NumRights uintptr
+	NumRights int
 
 	// Peek indicates that the data should not be consumed from the
 	// endpoint.
@@ -65,7 +70,7 @@ type EndpointReader struct {
 
 	// MsgSize is the size of the message that was read from. For stream
 	// sockets, it is the amount read.
-	MsgSize uintptr
+	MsgSize int64
 
 	// From, if not nil, will be set with the address read from.
 	From *tcpip.FullAddress
@@ -78,10 +83,23 @@ type EndpointReader struct {
 	ControlTrunc bool
 }
 
+// Truncate calls RecvMsg on the endpoint without writing to a destination.
+func (r *EndpointReader) Truncate() error {
+	// Ignore bytes read since it will always be zero.
+	_, ms, c, ct, err := r.Endpoint.RecvMsg(r.Ctx, [][]byte{}, r.Creds, r.NumRights, r.Peek, r.From)
+	r.Control = c
+	r.ControlTrunc = ct
+	r.MsgSize = ms
+	if err != nil {
+		return err.ToError()
+	}
+	return nil
+}
+
 // ReadToBlocks implements safemem.Reader.ReadToBlocks.
 func (r *EndpointReader) ReadToBlocks(dsts safemem.BlockSeq) (uint64, error) {
 	return safemem.FromVecReaderFunc{func(bufs [][]byte) (int64, error) {
-		n, ms, c, ct, err := r.Endpoint.RecvMsg(bufs, r.Creds, r.NumRights, r.Peek, r.From)
+		n, ms, c, ct, err := r.Endpoint.RecvMsg(r.Ctx, bufs, r.Creds, r.NumRights, r.Peek, r.From)
 		r.Control = c
 		r.ControlTrunc = ct
 		r.MsgSize = ms

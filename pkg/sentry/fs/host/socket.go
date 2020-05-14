@@ -16,26 +16,28 @@ package host
 
 import (
 	"fmt"
-	"sync"
 	"syscall"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/fd"
 	"gvisor.dev/gvisor/pkg/fdnotifier"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/refs"
-	"gvisor.dev/gvisor/pkg/sentry/context"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/socket/control"
 	unixsocket "gvisor.dev/gvisor/pkg/sentry/socket/unix"
 	"gvisor.dev/gvisor/pkg/sentry/socket/unix/transport"
 	"gvisor.dev/gvisor/pkg/sentry/uniqueid"
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/syserr"
 	"gvisor.dev/gvisor/pkg/syserror"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/unet"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
+
+// LINT.IfChange
 
 // maxSendBufferSize is the maximum host send buffer size allowed for endpoint.
 //
@@ -47,11 +49,11 @@ const maxSendBufferSize = 8 << 20
 //
 // +stateify savable
 type ConnectedEndpoint struct {
-	queue *waiter.Queue
-	path  string
-
 	// ref keeps track of references to a connectedEndpoint.
 	ref refs.AtomicRefCount
+
+	queue *waiter.Queue
+	path  string
 
 	// If srfd >= 0, it is the host FD that file was imported from.
 	srfd int `state:"wait"`
@@ -65,7 +67,7 @@ type ConnectedEndpoint struct {
 	// GetSockOpt and message splitting/rejection in SendMsg, but do not
 	// prevent lots of small messages from filling the real send buffer
 	// size on the host.
-	sndbuf int `state:"nosave"`
+	sndbuf int64 `state:"nosave"`
 
 	// mu protects the fields below.
 	mu sync.RWMutex `state:"nosave"`
@@ -107,7 +109,7 @@ func (c *ConnectedEndpoint) init() *syserr.Error {
 	}
 
 	c.stype = linux.SockType(stype)
-	c.sndbuf = sndbuf
+	c.sndbuf = int64(sndbuf)
 
 	return nil
 }
@@ -118,7 +120,7 @@ func (c *ConnectedEndpoint) init() *syserr.Error {
 // The caller is responsible for calling Init(). Additionaly, Release needs to
 // be called twice because ConnectedEndpoint is both a transport.Receiver and
 // transport.ConnectedEndpoint.
-func NewConnectedEndpoint(file *fd.FD, queue *waiter.Queue, path string) (*ConnectedEndpoint, *syserr.Error) {
+func NewConnectedEndpoint(ctx context.Context, file *fd.FD, queue *waiter.Queue, path string) (*ConnectedEndpoint, *syserr.Error) {
 	e := ConnectedEndpoint{
 		path:  path,
 		queue: queue,
@@ -132,6 +134,8 @@ func NewConnectedEndpoint(file *fd.FD, queue *waiter.Queue, path string) (*Conne
 
 	// AtomicRefCounters start off with a single reference. We need two.
 	e.ref.IncRef()
+
+	e.ref.EnableLeakCheck("host.ConnectedEndpoint")
 
 	return &e, nil
 }
@@ -151,7 +155,7 @@ func (c *ConnectedEndpoint) Init() {
 func NewSocketWithDirent(ctx context.Context, d *fs.Dirent, f *fd.FD, flags fs.FileFlags) (*fs.File, error) {
 	f2 := fd.New(f.FD())
 	var q waiter.Queue
-	e, err := NewConnectedEndpoint(f2, &q, "" /* path */)
+	e, err := NewConnectedEndpoint(ctx, f2, &q, "" /* path */)
 	if err != nil {
 		f2.Release()
 		return nil, err.ToError()
@@ -162,7 +166,7 @@ func NewSocketWithDirent(ctx context.Context, d *fs.Dirent, f *fd.FD, flags fs.F
 
 	e.Init()
 
-	ep := transport.NewExternal(e.stype, uniqueid.GlobalProviderFromContext(ctx), &q, e, e)
+	ep := transport.NewExternal(ctx, e.stype, uniqueid.GlobalProviderFromContext(ctx), &q, e, e)
 
 	return unixsocket.NewWithDirent(ctx, d, ep, e.stype, flags), nil
 }
@@ -181,7 +185,7 @@ func newSocket(ctx context.Context, orgfd int, saveable bool) (*fs.File, error) 
 	}
 	f := fd.New(ownedfd)
 	var q waiter.Queue
-	e, err := NewConnectedEndpoint(f, &q, "" /* path */)
+	e, err := NewConnectedEndpoint(ctx, f, &q, "" /* path */)
 	if err != nil {
 		if saveable {
 			f.Close()
@@ -194,13 +198,13 @@ func newSocket(ctx context.Context, orgfd int, saveable bool) (*fs.File, error) 
 	e.srfd = srfd
 	e.Init()
 
-	ep := transport.NewExternal(e.stype, uniqueid.GlobalProviderFromContext(ctx), &q, e, e)
+	ep := transport.NewExternal(ctx, e.stype, uniqueid.GlobalProviderFromContext(ctx), &q, e, e)
 
 	return unixsocket.New(ctx, ep, e.stype), nil
 }
 
 // Send implements transport.ConnectedEndpoint.Send.
-func (c *ConnectedEndpoint) Send(data [][]byte, controlMessages transport.ControlMessages, from tcpip.FullAddress) (uintptr, bool, *syserr.Error) {
+func (c *ConnectedEndpoint) Send(data [][]byte, controlMessages transport.ControlMessages, from tcpip.FullAddress) (int64, bool, *syserr.Error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -277,7 +281,7 @@ func (c *ConnectedEndpoint) EventUpdate() {
 }
 
 // Recv implements transport.Receiver.Recv.
-func (c *ConnectedEndpoint) Recv(data [][]byte, creds bool, numRights uintptr, peek bool) (uintptr, uintptr, transport.ControlMessages, bool, tcpip.FullAddress, bool, *syserr.Error) {
+func (c *ConnectedEndpoint) Recv(data [][]byte, creds bool, numRights int, peek bool) (int64, int64, transport.ControlMessages, bool, tcpip.FullAddress, bool, *syserr.Error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -383,3 +387,8 @@ func (c *ConnectedEndpoint) RecvMaxQueueSize() int64 {
 func (c *ConnectedEndpoint) Release() {
 	c.ref.DecRefWithDestructor(c.close)
 }
+
+// CloseUnread implements transport.ConnectedEndpoint.CloseUnread.
+func (c *ConnectedEndpoint) CloseUnread() {}
+
+// LINT.ThenChange(../../fsimpl/host/socket.go)

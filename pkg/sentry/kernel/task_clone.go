@@ -15,10 +15,13 @@
 package kernel
 
 import (
+	"sync/atomic"
+
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/bpf"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
+	"gvisor.dev/gvisor/pkg/sentry/inet"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 )
 
 // SharingOptions controls what resources are shared by a new task created by
@@ -54,8 +57,7 @@ type SharingOptions struct {
 	NewUserNamespace bool
 
 	// If NewNetworkNamespace is true, the task should have an independent
-	// network namespace. (Note that network namespaces are not really
-	// implemented; see comment on Task.netns for details.)
+	// network namespace.
 	NewNetworkNamespace bool
 
 	// If NewFiles is true, the task should use an independent file descriptor
@@ -199,6 +201,17 @@ func (t *Task) Clone(opts *CloneOptions) (ThreadID, *SyscallControl, error) {
 		ipcns = NewIPCNamespace(userns)
 	}
 
+	netns := t.NetworkNamespace()
+	if opts.NewNetworkNamespace {
+		netns = inet.NewNamespace(netns)
+	}
+
+	// TODO(b/63601033): Implement CLONE_NEWNS.
+	mntnsVFS2 := t.mountNamespaceVFS2
+	if mntnsVFS2 != nil {
+		mntnsVFS2.IncRef()
+	}
+
 	tc, err := t.tc.Fork(t, t.k, !opts.NewAddressSpace)
 	if err != nil {
 		return 0, nil, err
@@ -214,20 +227,20 @@ func (t *Task) Clone(opts *CloneOptions) (ThreadID, *SyscallControl, error) {
 		}
 	}
 
-	var fsc *FSContext
+	var fsContext *FSContext
 	if opts.NewFSContext {
-		fsc = t.fsc.Fork()
+		fsContext = t.fsContext.Fork()
 	} else {
-		fsc = t.fsc
-		fsc.IncRef()
+		fsContext = t.fsContext
+		fsContext.IncRef()
 	}
 
-	var fds *FDMap
+	var fdTable *FDTable
 	if opts.NewFiles {
-		fds = t.fds.Fork()
+		fdTable = t.fdTable.Fork()
 	} else {
-		fds = t.fds
-		fds.IncRef()
+		fdTable = t.fdTable
+		fdTable.IncRef()
 	}
 
 	pidns := t.tg.pidns
@@ -236,13 +249,22 @@ func (t *Task) Clone(opts *CloneOptions) (ThreadID, *SyscallControl, error) {
 	} else if opts.NewPIDNamespace {
 		pidns = pidns.NewChild(userns)
 	}
+
 	tg := t.tg
+	rseqAddr := usermem.Addr(0)
+	rseqSignature := uint32(0)
 	if opts.NewThreadGroup {
+		if tg.mounts != nil {
+			tg.mounts.IncRef()
+		}
 		sh := t.tg.signalHandlers
 		if opts.NewSignalHandlers {
 			sh = sh.Fork()
 		}
-		tg = t.k.newThreadGroup(pidns, sh, opts.TerminationSignal, tg.limits.GetCopy(), t.k.monotonicClock)
+		tg = t.k.NewThreadGroup(tg.mounts, pidns, sh, opts.TerminationSignal, tg.limits.GetCopy())
+		tg.oomScoreAdj = atomic.LoadInt32(&t.tg.oomScoreAdj)
+		rseqAddr = t.rseqAddr
+		rseqSignature = t.rseqSignature
 	}
 
 	cfg := &TaskConfig{
@@ -250,24 +272,24 @@ func (t *Task) Clone(opts *CloneOptions) (ThreadID, *SyscallControl, error) {
 		ThreadGroup:             tg,
 		SignalMask:              t.SignalMask(),
 		TaskContext:             tc,
-		FSContext:               fsc,
-		FDMap:                   fds,
+		FSContext:               fsContext,
+		FDTable:                 fdTable,
 		Credentials:             creds,
 		Niceness:                t.Niceness(),
-		NetworkNamespaced:       t.netns,
+		NetworkNamespace:        netns,
 		AllowedCPUMask:          t.CPUMask(),
 		UTSNamespace:            utsns,
 		IPCNamespace:            ipcns,
 		AbstractSocketNamespace: t.abstractSockets,
+		MountNamespaceVFS2:      mntnsVFS2,
+		RSeqAddr:                rseqAddr,
+		RSeqSignature:           rseqSignature,
 		ContainerID:             t.ContainerID(),
 	}
 	if opts.NewThreadGroup {
 		cfg.Parent = t
 	} else {
 		cfg.InheritParent = t
-	}
-	if opts.NewNetworkNamespace {
-		cfg.NetworkNamespaced = true
 	}
 	nt, err := t.tg.pidns.owner.NewTask(cfg)
 	if err != nil {
@@ -298,6 +320,7 @@ func (t *Task) Clone(opts *CloneOptions) (ThreadID, *SyscallControl, error) {
 	// nt that it must receive before its task goroutine starts running.
 	tid := nt.k.tasks.Root.IDOfTask(nt)
 	defer nt.Start(tid)
+	t.traceCloneEvent(tid)
 
 	// "If fork/clone and execve are allowed by @prog, any child processes will
 	// be constrained to the same filters and system call ABI as the parent." -
@@ -424,6 +447,7 @@ func (t *Task) Unshare(opts *SharingOptions) error {
 	if opts.NewAddressSpace || opts.NewSignalHandlers {
 		return syserror.EINVAL
 	}
+	creds := t.Credentials()
 	if opts.NewThreadGroup {
 		t.tg.signalHandlers.mu.Lock()
 		if t.tg.tasksCount != 1 {
@@ -438,8 +462,6 @@ func (t *Task) Unshare(opts *SharingOptions) error {
 		if t.IsChrooted() {
 			return syserror.EPERM
 		}
-		// This temporary is needed because Go.
-		creds := t.Credentials()
 		newUserNS, err := creds.NewChildUserNamespace()
 		if err != nil {
 			return err
@@ -448,6 +470,8 @@ func (t *Task) Unshare(opts *SharingOptions) error {
 		if err != nil {
 			return err
 		}
+		// Need to reload creds, becaue t.SetUserNamespace() changed task credentials.
+		creds = t.Credentials()
 	}
 	haveCapSysAdmin := t.HasCapability(linux.CAP_SYS_ADMIN)
 	if opts.NewPIDNamespace {
@@ -463,7 +487,7 @@ func (t *Task) Unshare(opts *SharingOptions) error {
 			t.mu.Unlock()
 			return syserror.EPERM
 		}
-		t.netns = true
+		t.netns = inet.NewNamespace(t.netns)
 	}
 	if opts.NewUTSNamespace {
 		if !haveCapSysAdmin {
@@ -472,7 +496,7 @@ func (t *Task) Unshare(opts *SharingOptions) error {
 		}
 		// Note that this must happen after NewUserNamespace, so the
 		// new user namespace is used if there is one.
-		t.utsns = t.utsns.Clone(t.creds.UserNamespace)
+		t.utsns = t.utsns.Clone(creds.UserNamespace)
 	}
 	if opts.NewIPCNamespace {
 		if !haveCapSysAdmin {
@@ -481,24 +505,24 @@ func (t *Task) Unshare(opts *SharingOptions) error {
 		}
 		// Note that "If CLONE_NEWIPC is set, then create the process in a new IPC
 		// namespace"
-		t.ipcns = NewIPCNamespace(t.creds.UserNamespace)
+		t.ipcns = NewIPCNamespace(creds.UserNamespace)
 	}
-	var oldfds *FDMap
+	var oldFDTable *FDTable
 	if opts.NewFiles {
-		oldfds = t.fds
-		t.fds = oldfds.Fork()
+		oldFDTable = t.fdTable
+		t.fdTable = oldFDTable.Fork()
 	}
-	var oldfsc *FSContext
+	var oldFSContext *FSContext
 	if opts.NewFSContext {
-		oldfsc = t.fsc
-		t.fsc = oldfsc.Fork()
+		oldFSContext = t.fsContext
+		t.fsContext = oldFSContext.Fork()
 	}
 	t.mu.Unlock()
-	if oldfds != nil {
-		oldfds.DecRef()
+	if oldFDTable != nil {
+		oldFDTable.DecRef()
 	}
-	if oldfsc != nil {
-		oldfsc.DecRef()
+	if oldFSContext != nil {
+		oldFSContext.DecRef()
 	}
 	return nil
 }

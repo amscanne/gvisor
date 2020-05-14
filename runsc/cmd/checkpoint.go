@@ -20,11 +20,11 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"flag"
 	"github.com/google/subcommands"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/runsc/boot"
 	"gvisor.dev/gvisor/runsc/container"
+	"gvisor.dev/gvisor/runsc/flag"
 	"gvisor.dev/gvisor/runsc/specutils"
 )
 
@@ -133,7 +133,12 @@ func (c *Checkpoint) Execute(_ context.Context, f *flag.FlagSet, args ...interfa
 		Fatalf("destroying container: %v", err)
 	}
 
-	cont, err = container.Create(id, spec, conf, bundleDir, "", "", "")
+	contArgs := container.Args{
+		ID:        id,
+		Spec:      spec,
+		BundleDir: bundleDir,
+	}
+	cont, err = container.New(conf, contArgs)
 	if err != nil {
 		Fatalf("restoring container: %v", err)
 	}

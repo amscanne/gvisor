@@ -73,27 +73,28 @@ const (
 	SIOCGMIIREG   = 0x8948
 )
 
-// ioctl(2) requests provided by uapi/linux/android/binder.h
+// ioctl(2) directions. Used to calculate requests number.
+// Constants from asm-generic/ioctl.h.
 const (
-	BinderWriteReadIoctl       = 0xc0306201
-	BinderSetIdleTimeoutIoctl  = 0x40086203
-	BinderSetMaxThreadsIoctl   = 0x40046205
-	BinderSetIdlePriorityIoctl = 0x40046206
-	BinderSetContextMgrIoctl   = 0x40046207
-	BinderThreadExitIoctl      = 0x40046208
-	BinderVersionIoctl         = 0xc0046209
+	_IOC_NONE  = 0
+	_IOC_WRITE = 1
+	_IOC_READ  = 2
 )
 
-// ioctl(2) requests provided by drivers/staging/android/uapi/ashmem.h
+// Constants from asm-generic/ioctl.h.
 const (
-	AshmemSetNameIoctl        = 0x41007701
-	AshmemGetNameIoctl        = 0x81007702
-	AshmemSetSizeIoctl        = 0x40087703
-	AshmemGetSizeIoctl        = 0x00007704
-	AshmemSetProtMaskIoctl    = 0x40087705
-	AshmemGetProtMaskIoctl    = 0x00007706
-	AshmemPinIoctl            = 0x40087707
-	AshmemUnpinIoctl          = 0x40087708
-	AshmemGetPinStatusIoctl   = 0x00007709
-	AshmemPurgeAllCachesIoctl = 0x0000770a
+	_IOC_NRBITS   = 8
+	_IOC_TYPEBITS = 8
+	_IOC_SIZEBITS = 14
+	_IOC_DIRBITS  = 2
+
+	_IOC_NRSHIFT   = 0
+	_IOC_TYPESHIFT = _IOC_NRSHIFT + _IOC_NRBITS
+	_IOC_SIZESHIFT = _IOC_TYPESHIFT + _IOC_TYPEBITS
+	_IOC_DIRSHIFT  = _IOC_SIZESHIFT + _IOC_SIZEBITS
 )
+
+// IOC outputs the result of _IOC macro in asm-generic/ioctl.h.
+func IOC(dir, typ, nr, size uint32) uint32 {
+	return uint32(dir)<<_IOC_DIRSHIFT | typ<<_IOC_TYPESHIFT | nr<<_IOC_NRSHIFT | size<<_IOC_SIZESHIFT
+}

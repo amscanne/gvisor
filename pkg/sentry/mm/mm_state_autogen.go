@@ -33,7 +33,9 @@ func (x *ioResult) load(m state.Map) {
 func (x *AIOContext) beforeSave() {}
 func (x *AIOContext) save(m state.Map) {
 	x.beforeSave()
-	if !state.IsZeroValue(x.dead) { m.Failf("dead is %v, expected zero", x.dead) }
+	if !state.IsZeroValue(&x.dead) {
+		m.Failf("dead is %#v, expected zero", &x.dead)
+	}
 	m.Save("results", &x.results)
 	m.Save("maxOutstanding", &x.maxOutstanding)
 	m.Save("outstanding", &x.outstanding)
@@ -139,8 +141,12 @@ func (x *ioEntry) load(m state.Map) {
 
 func (x *MemoryManager) save(m state.Map) {
 	x.beforeSave()
-	if !state.IsZeroValue(x.active) { m.Failf("active is %v, expected zero", x.active) }
-	if !state.IsZeroValue(x.captureInvalidations) { m.Failf("captureInvalidations is %v, expected zero", x.captureInvalidations) }
+	if !state.IsZeroValue(&x.active) {
+		m.Failf("active is %#v, expected zero", &x.active)
+	}
+	if !state.IsZeroValue(&x.captureInvalidations) {
+		m.Failf("captureInvalidations is %#v, expected zero", &x.captureInvalidations)
+	}
 	m.Save("p", &x.p)
 	m.Save("mfp", &x.mfp)
 	m.Save("layout", &x.layout)
@@ -161,6 +167,8 @@ func (x *MemoryManager) save(m state.Map) {
 	m.Save("executable", &x.executable)
 	m.Save("dumpability", &x.dumpability)
 	m.Save("aioManager", &x.aioManager)
+	m.Save("sleepForActivation", &x.sleepForActivation)
+	m.Save("vdsoSigReturnAddr", &x.vdsoSigReturnAddr)
 }
 
 func (x *MemoryManager) load(m state.Map) {
@@ -184,6 +192,8 @@ func (x *MemoryManager) load(m state.Map) {
 	m.Load("executable", &x.executable)
 	m.Load("dumpability", &x.dumpability)
 	m.Load("aioManager", &x.aioManager)
+	m.Load("sleepForActivation", &x.sleepForActivation)
+	m.Load("vdsoSigReturnAddr", &x.vdsoSigReturnAddr)
 	m.AfterLoad(x.afterLoad)
 }
 
@@ -194,6 +204,7 @@ func (x *vma) save(m state.Map) {
 	m.SaveValue("realPerms", realPerms)
 	m.Save("mappable", &x.mappable)
 	m.Save("off", &x.off)
+	m.Save("dontfork", &x.dontfork)
 	m.Save("mlockMode", &x.mlockMode)
 	m.Save("numaPolicy", &x.numaPolicy)
 	m.Save("numaNodemask", &x.numaNodemask)
@@ -205,6 +216,7 @@ func (x *vma) afterLoad() {}
 func (x *vma) load(m state.Map) {
 	m.Load("mappable", &x.mappable)
 	m.Load("off", &x.off)
+	m.Load("dontfork", &x.dontfork)
 	m.Load("mlockMode", &x.mlockMode)
 	m.Load("numaPolicy", &x.numaPolicy)
 	m.Load("numaNodemask", &x.numaNodemask)
@@ -363,24 +375,24 @@ func (x *vmaSegmentDataSlices) load(m state.Map) {
 }
 
 func init() {
-	state.Register("mm.aioManager", (*aioManager)(nil), state.Fns{Save: (*aioManager).save, Load: (*aioManager).load})
-	state.Register("mm.ioResult", (*ioResult)(nil), state.Fns{Save: (*ioResult).save, Load: (*ioResult).load})
-	state.Register("mm.AIOContext", (*AIOContext)(nil), state.Fns{Save: (*AIOContext).save, Load: (*AIOContext).load})
-	state.Register("mm.aioMappable", (*aioMappable)(nil), state.Fns{Save: (*aioMappable).save, Load: (*aioMappable).load})
-	state.Register("mm.fileRefcountSet", (*fileRefcountSet)(nil), state.Fns{Save: (*fileRefcountSet).save, Load: (*fileRefcountSet).load})
-	state.Register("mm.fileRefcountnode", (*fileRefcountnode)(nil), state.Fns{Save: (*fileRefcountnode).save, Load: (*fileRefcountnode).load})
-	state.Register("mm.fileRefcountSegmentDataSlices", (*fileRefcountSegmentDataSlices)(nil), state.Fns{Save: (*fileRefcountSegmentDataSlices).save, Load: (*fileRefcountSegmentDataSlices).load})
-	state.Register("mm.ioList", (*ioList)(nil), state.Fns{Save: (*ioList).save, Load: (*ioList).load})
-	state.Register("mm.ioEntry", (*ioEntry)(nil), state.Fns{Save: (*ioEntry).save, Load: (*ioEntry).load})
-	state.Register("mm.MemoryManager", (*MemoryManager)(nil), state.Fns{Save: (*MemoryManager).save, Load: (*MemoryManager).load})
-	state.Register("mm.vma", (*vma)(nil), state.Fns{Save: (*vma).save, Load: (*vma).load})
-	state.Register("mm.pma", (*pma)(nil), state.Fns{Save: (*pma).save, Load: (*pma).load})
-	state.Register("mm.privateRefs", (*privateRefs)(nil), state.Fns{Save: (*privateRefs).save, Load: (*privateRefs).load})
-	state.Register("mm.pmaSet", (*pmaSet)(nil), state.Fns{Save: (*pmaSet).save, Load: (*pmaSet).load})
-	state.Register("mm.pmanode", (*pmanode)(nil), state.Fns{Save: (*pmanode).save, Load: (*pmanode).load})
-	state.Register("mm.pmaSegmentDataSlices", (*pmaSegmentDataSlices)(nil), state.Fns{Save: (*pmaSegmentDataSlices).save, Load: (*pmaSegmentDataSlices).load})
-	state.Register("mm.SpecialMappable", (*SpecialMappable)(nil), state.Fns{Save: (*SpecialMappable).save, Load: (*SpecialMappable).load})
-	state.Register("mm.vmaSet", (*vmaSet)(nil), state.Fns{Save: (*vmaSet).save, Load: (*vmaSet).load})
-	state.Register("mm.vmanode", (*vmanode)(nil), state.Fns{Save: (*vmanode).save, Load: (*vmanode).load})
-	state.Register("mm.vmaSegmentDataSlices", (*vmaSegmentDataSlices)(nil), state.Fns{Save: (*vmaSegmentDataSlices).save, Load: (*vmaSegmentDataSlices).load})
+	state.Register("pkg/sentry/mm.aioManager", (*aioManager)(nil), state.Fns{Save: (*aioManager).save, Load: (*aioManager).load})
+	state.Register("pkg/sentry/mm.ioResult", (*ioResult)(nil), state.Fns{Save: (*ioResult).save, Load: (*ioResult).load})
+	state.Register("pkg/sentry/mm.AIOContext", (*AIOContext)(nil), state.Fns{Save: (*AIOContext).save, Load: (*AIOContext).load})
+	state.Register("pkg/sentry/mm.aioMappable", (*aioMappable)(nil), state.Fns{Save: (*aioMappable).save, Load: (*aioMappable).load})
+	state.Register("pkg/sentry/mm.fileRefcountSet", (*fileRefcountSet)(nil), state.Fns{Save: (*fileRefcountSet).save, Load: (*fileRefcountSet).load})
+	state.Register("pkg/sentry/mm.fileRefcountnode", (*fileRefcountnode)(nil), state.Fns{Save: (*fileRefcountnode).save, Load: (*fileRefcountnode).load})
+	state.Register("pkg/sentry/mm.fileRefcountSegmentDataSlices", (*fileRefcountSegmentDataSlices)(nil), state.Fns{Save: (*fileRefcountSegmentDataSlices).save, Load: (*fileRefcountSegmentDataSlices).load})
+	state.Register("pkg/sentry/mm.ioList", (*ioList)(nil), state.Fns{Save: (*ioList).save, Load: (*ioList).load})
+	state.Register("pkg/sentry/mm.ioEntry", (*ioEntry)(nil), state.Fns{Save: (*ioEntry).save, Load: (*ioEntry).load})
+	state.Register("pkg/sentry/mm.MemoryManager", (*MemoryManager)(nil), state.Fns{Save: (*MemoryManager).save, Load: (*MemoryManager).load})
+	state.Register("pkg/sentry/mm.vma", (*vma)(nil), state.Fns{Save: (*vma).save, Load: (*vma).load})
+	state.Register("pkg/sentry/mm.pma", (*pma)(nil), state.Fns{Save: (*pma).save, Load: (*pma).load})
+	state.Register("pkg/sentry/mm.privateRefs", (*privateRefs)(nil), state.Fns{Save: (*privateRefs).save, Load: (*privateRefs).load})
+	state.Register("pkg/sentry/mm.pmaSet", (*pmaSet)(nil), state.Fns{Save: (*pmaSet).save, Load: (*pmaSet).load})
+	state.Register("pkg/sentry/mm.pmanode", (*pmanode)(nil), state.Fns{Save: (*pmanode).save, Load: (*pmanode).load})
+	state.Register("pkg/sentry/mm.pmaSegmentDataSlices", (*pmaSegmentDataSlices)(nil), state.Fns{Save: (*pmaSegmentDataSlices).save, Load: (*pmaSegmentDataSlices).load})
+	state.Register("pkg/sentry/mm.SpecialMappable", (*SpecialMappable)(nil), state.Fns{Save: (*SpecialMappable).save, Load: (*SpecialMappable).load})
+	state.Register("pkg/sentry/mm.vmaSet", (*vmaSet)(nil), state.Fns{Save: (*vmaSet).save, Load: (*vmaSet).load})
+	state.Register("pkg/sentry/mm.vmanode", (*vmanode)(nil), state.Fns{Save: (*vmanode).save, Load: (*vmanode).load})
+	state.Register("pkg/sentry/mm.vmaSegmentDataSlices", (*vmaSegmentDataSlices)(nil), state.Fns{Save: (*vmaSegmentDataSlices).save, Load: (*vmaSegmentDataSlices).load})
 }

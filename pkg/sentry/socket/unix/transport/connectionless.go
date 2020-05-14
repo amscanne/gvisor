@@ -16,13 +16,14 @@ package transport
 
 import (
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/syserr"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
 // connectionlessEndpoint is a unix endpoint for unix sockets that support operating in
-// a conectionless fashon.
+// a connectionless fashon.
 //
 // Specifically, this means datagram unix sockets not created with
 // socketpair(2).
@@ -32,10 +33,17 @@ type connectionlessEndpoint struct {
 	baseEndpoint
 }
 
+var (
+	_ = BoundEndpoint((*connectionlessEndpoint)(nil))
+	_ = Endpoint((*connectionlessEndpoint)(nil))
+)
+
 // NewConnectionless creates a new unbound dgram endpoint.
-func NewConnectionless() Endpoint {
+func NewConnectionless(ctx context.Context) Endpoint {
 	ep := &connectionlessEndpoint{baseEndpoint{Queue: &waiter.Queue{}}}
-	ep.receiver = &queueReceiver{readQueue: &queue{ReaderQueue: ep.Queue, WriterQueue: &waiter.Queue{}, limit: initialLimit}}
+	q := queue{ReaderQueue: ep.Queue, WriterQueue: &waiter.Queue{}, limit: initialLimit}
+	q.EnableLeakCheck("transport.queue")
+	ep.receiver = &queueReceiver{readQueue: &q}
 	return ep
 }
 
@@ -46,38 +54,33 @@ func (e *connectionlessEndpoint) isBound() bool {
 
 // Close puts the endpoint in a closed state and frees all resources associated
 // with it.
-//
-// The socket will be a fresh state after a call to close and may be reused.
-// That is, close may be used to "unbind" or "disconnect" the socket in error
-// paths.
 func (e *connectionlessEndpoint) Close() {
 	e.Lock()
-	var r Receiver
-	if e.Connected() {
-		e.receiver.CloseRecv()
-		r = e.receiver
-		e.receiver = nil
-
+	if e.connected != nil {
 		e.connected.Release()
 		e.connected = nil
 	}
+
 	if e.isBound() {
 		e.path = ""
 	}
+
+	e.receiver.CloseRecv()
+	r := e.receiver
+	e.receiver = nil
 	e.Unlock()
-	if r != nil {
-		r.CloseNotify()
-		r.Release()
-	}
+
+	r.CloseNotify()
+	r.Release()
 }
 
 // BidirectionalConnect implements BoundEndpoint.BidirectionalConnect.
-func (e *connectionlessEndpoint) BidirectionalConnect(ce ConnectingEndpoint, returnConnect func(Receiver, ConnectedEndpoint)) *syserr.Error {
+func (e *connectionlessEndpoint) BidirectionalConnect(ctx context.Context, ce ConnectingEndpoint, returnConnect func(Receiver, ConnectedEndpoint)) *syserr.Error {
 	return syserr.ErrConnectionRefused
 }
 
 // UnidirectionalConnect implements BoundEndpoint.UnidirectionalConnect.
-func (e *connectionlessEndpoint) UnidirectionalConnect() (ConnectedEndpoint, *syserr.Error) {
+func (e *connectionlessEndpoint) UnidirectionalConnect(ctx context.Context) (ConnectedEndpoint, *syserr.Error) {
 	e.Lock()
 	r := e.receiver
 	e.Unlock()
@@ -96,12 +99,12 @@ func (e *connectionlessEndpoint) UnidirectionalConnect() (ConnectedEndpoint, *sy
 
 // SendMsg writes data and a control message to the specified endpoint.
 // This method does not block if the data cannot be written.
-func (e *connectionlessEndpoint) SendMsg(data [][]byte, c ControlMessages, to BoundEndpoint) (uintptr, *syserr.Error) {
+func (e *connectionlessEndpoint) SendMsg(ctx context.Context, data [][]byte, c ControlMessages, to BoundEndpoint) (int64, *syserr.Error) {
 	if to == nil {
-		return e.baseEndpoint.SendMsg(data, c, nil)
+		return e.baseEndpoint.SendMsg(ctx, data, c, nil)
 	}
 
-	connected, err := to.UnidirectionalConnect()
+	connected, err := to.UnidirectionalConnect(ctx)
 	if err != nil {
 		return 0, syserr.ErrInvalidEndpointState
 	}
@@ -124,13 +127,16 @@ func (e *connectionlessEndpoint) Type() linux.SockType {
 }
 
 // Connect attempts to connect directly to server.
-func (e *connectionlessEndpoint) Connect(server BoundEndpoint) *syserr.Error {
-	connected, err := server.UnidirectionalConnect()
+func (e *connectionlessEndpoint) Connect(ctx context.Context, server BoundEndpoint) *syserr.Error {
+	connected, err := server.UnidirectionalConnect(ctx)
 	if err != nil {
 		return err
 	}
 
 	e.Lock()
+	if e.connected != nil {
+		e.connected.Release()
+	}
 	e.connected = connected
 	e.Unlock()
 

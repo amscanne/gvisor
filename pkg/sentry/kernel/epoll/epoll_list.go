@@ -52,11 +52,21 @@ func (l *pollEntryList) Back() *pollEntry {
 	return l.tail
 }
 
+// Len returns the number of elements in the list.
+//
+// NOTE: This is an O(n) operation.
+func (l *pollEntryList) Len() (count int) {
+	for e := l.Front(); e != nil; e = e.Next() {
+		count++
+	}
+	return count
+}
+
 // PushFront inserts the element e at the front of list l.
 func (l *pollEntryList) PushFront(e *pollEntry) {
-	pollEntryElementMapper{}.linkerFor(e).SetNext(l.head)
-	pollEntryElementMapper{}.linkerFor(e).SetPrev(nil)
-
+	linker := pollEntryElementMapper{}.linkerFor(e)
+	linker.SetNext(l.head)
+	linker.SetPrev(nil)
 	if l.head != nil {
 		pollEntryElementMapper{}.linkerFor(l.head).SetPrev(e)
 	} else {
@@ -68,9 +78,9 @@ func (l *pollEntryList) PushFront(e *pollEntry) {
 
 // PushBack inserts the element e at the back of list l.
 func (l *pollEntryList) PushBack(e *pollEntry) {
-	pollEntryElementMapper{}.linkerFor(e).SetNext(nil)
-	pollEntryElementMapper{}.linkerFor(e).SetPrev(l.tail)
-
+	linker := pollEntryElementMapper{}.linkerFor(e)
+	linker.SetNext(nil)
+	linker.SetPrev(l.tail)
 	if l.tail != nil {
 		pollEntryElementMapper{}.linkerFor(l.tail).SetNext(e)
 	} else {
@@ -91,17 +101,20 @@ func (l *pollEntryList) PushBackList(m *pollEntryList) {
 
 		l.tail = m.tail
 	}
-
 	m.head = nil
 	m.tail = nil
 }
 
 // InsertAfter inserts e after b.
 func (l *pollEntryList) InsertAfter(b, e *pollEntry) {
-	a := pollEntryElementMapper{}.linkerFor(b).Next()
-	pollEntryElementMapper{}.linkerFor(e).SetNext(a)
-	pollEntryElementMapper{}.linkerFor(e).SetPrev(b)
-	pollEntryElementMapper{}.linkerFor(b).SetNext(e)
+	bLinker := pollEntryElementMapper{}.linkerFor(b)
+	eLinker := pollEntryElementMapper{}.linkerFor(e)
+
+	a := bLinker.Next()
+
+	eLinker.SetNext(a)
+	eLinker.SetPrev(b)
+	bLinker.SetNext(e)
 
 	if a != nil {
 		pollEntryElementMapper{}.linkerFor(a).SetPrev(e)
@@ -112,10 +125,13 @@ func (l *pollEntryList) InsertAfter(b, e *pollEntry) {
 
 // InsertBefore inserts e before a.
 func (l *pollEntryList) InsertBefore(a, e *pollEntry) {
-	b := pollEntryElementMapper{}.linkerFor(a).Prev()
-	pollEntryElementMapper{}.linkerFor(e).SetNext(a)
-	pollEntryElementMapper{}.linkerFor(e).SetPrev(b)
-	pollEntryElementMapper{}.linkerFor(a).SetPrev(e)
+	aLinker := pollEntryElementMapper{}.linkerFor(a)
+	eLinker := pollEntryElementMapper{}.linkerFor(e)
+
+	b := aLinker.Prev()
+	eLinker.SetNext(a)
+	eLinker.SetPrev(b)
+	aLinker.SetPrev(e)
 
 	if b != nil {
 		pollEntryElementMapper{}.linkerFor(b).SetNext(e)
@@ -126,8 +142,9 @@ func (l *pollEntryList) InsertBefore(a, e *pollEntry) {
 
 // Remove removes e from l.
 func (l *pollEntryList) Remove(e *pollEntry) {
-	prev := pollEntryElementMapper{}.linkerFor(e).Prev()
-	next := pollEntryElementMapper{}.linkerFor(e).Next()
+	linker := pollEntryElementMapper{}.linkerFor(e)
+	prev := linker.Prev()
+	next := linker.Next()
 
 	if prev != nil {
 		pollEntryElementMapper{}.linkerFor(prev).SetNext(next)
@@ -140,6 +157,9 @@ func (l *pollEntryList) Remove(e *pollEntry) {
 	} else {
 		l.tail = prev
 	}
+
+	linker.SetNext(nil)
+	linker.SetPrev(nil)
 }
 
 // Entry is a default implementation of Linker. Users can add anonymous fields

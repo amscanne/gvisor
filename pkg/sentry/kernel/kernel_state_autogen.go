@@ -3,9 +3,9 @@
 package kernel
 
 import (
-	"gvisor.dev/gvisor/pkg/state"
 	"gvisor.dev/gvisor/pkg/bpf"
 	"gvisor.dev/gvisor/pkg/sentry/device"
+	"gvisor.dev/gvisor/pkg/state"
 	"gvisor.dev/gvisor/pkg/tcpip"
 )
 
@@ -52,30 +52,37 @@ func (x *descriptor) beforeSave() {}
 func (x *descriptor) save(m state.Map) {
 	x.beforeSave()
 	m.Save("file", &x.file)
+	m.Save("fileVFS2", &x.fileVFS2)
 	m.Save("flags", &x.flags)
 }
 
 func (x *descriptor) afterLoad() {}
 func (x *descriptor) load(m state.Map) {
 	m.Load("file", &x.file)
+	m.Load("fileVFS2", &x.fileVFS2)
 	m.Load("flags", &x.flags)
 }
 
-func (x *FDMap) beforeSave() {}
-func (x *FDMap) save(m state.Map) {
+func (x *FDTable) beforeSave() {}
+func (x *FDTable) save(m state.Map) {
 	x.beforeSave()
+	var descriptorTable map[int32]descriptor = x.saveDescriptorTable()
+	m.SaveValue("descriptorTable", descriptorTable)
 	m.Save("AtomicRefCount", &x.AtomicRefCount)
 	m.Save("k", &x.k)
-	m.Save("files", &x.files)
 	m.Save("uid", &x.uid)
+	m.Save("next", &x.next)
+	m.Save("used", &x.used)
 }
 
-func (x *FDMap) afterLoad() {}
-func (x *FDMap) load(m state.Map) {
+func (x *FDTable) afterLoad() {}
+func (x *FDTable) load(m state.Map) {
 	m.Load("AtomicRefCount", &x.AtomicRefCount)
 	m.Load("k", &x.k)
-	m.Load("files", &x.files)
 	m.Load("uid", &x.uid)
+	m.Load("next", &x.next)
+	m.Load("used", &x.used)
+	m.LoadValue("descriptorTable", new(map[int32]descriptor), func(y interface{}) { x.loadDescriptorTable(y.(map[int32]descriptor)) })
 }
 
 func (x *FSContext) beforeSave() {}
@@ -83,7 +90,9 @@ func (x *FSContext) save(m state.Map) {
 	x.beforeSave()
 	m.Save("AtomicRefCount", &x.AtomicRefCount)
 	m.Save("root", &x.root)
+	m.Save("rootVFS2", &x.rootVFS2)
 	m.Save("cwd", &x.cwd)
+	m.Save("cwdVFS2", &x.cwdVFS2)
 	m.Save("umask", &x.umask)
 }
 
@@ -91,7 +100,9 @@ func (x *FSContext) afterLoad() {}
 func (x *FSContext) load(m state.Map) {
 	m.Load("AtomicRefCount", &x.AtomicRefCount)
 	m.Load("root", &x.root)
+	m.Load("rootVFS2", &x.rootVFS2)
 	m.Load("cwd", &x.cwd)
+	m.Load("cwdVFS2", &x.cwdVFS2)
 	m.Load("umask", &x.umask)
 }
 
@@ -121,6 +132,7 @@ func (x *Kernel) save(m state.Map) {
 	m.Save("timekeeper", &x.timekeeper)
 	m.Save("tasks", &x.tasks)
 	m.Save("rootUserNamespace", &x.rootUserNamespace)
+	m.Save("rootNetworkNamespace", &x.rootNetworkNamespace)
 	m.Save("applicationCores", &x.applicationCores)
 	m.Save("useHostCores", &x.useHostCores)
 	m.Save("extraAuxv", &x.extraAuxv)
@@ -128,13 +140,15 @@ func (x *Kernel) save(m state.Map) {
 	m.Save("rootUTSNamespace", &x.rootUTSNamespace)
 	m.Save("rootIPCNamespace", &x.rootIPCNamespace)
 	m.Save("rootAbstractSocketNamespace", &x.rootAbstractSocketNamespace)
-	m.Save("mounts", &x.mounts)
 	m.Save("futexes", &x.futexes)
 	m.Save("globalInit", &x.globalInit)
 	m.Save("realtimeClock", &x.realtimeClock)
 	m.Save("monotonicClock", &x.monotonicClock)
 	m.Save("syslog", &x.syslog)
+	m.Save("runningTasks", &x.runningTasks)
 	m.Save("cpuClock", &x.cpuClock)
+	m.Save("cpuClockTickerDisabled", &x.cpuClockTickerDisabled)
+	m.Save("cpuClockTickerSetting", &x.cpuClockTickerSetting)
 	m.Save("fdMapUids", &x.fdMapUids)
 	m.Save("uniqueID", &x.uniqueID)
 	m.Save("nextInotifyCookie", &x.nextInotifyCookie)
@@ -142,6 +156,12 @@ func (x *Kernel) save(m state.Map) {
 	m.Save("sockets", &x.sockets)
 	m.Save("nextSocketEntry", &x.nextSocketEntry)
 	m.Save("DirentCacheLimiter", &x.DirentCacheLimiter)
+	m.Save("SpecialOpts", &x.SpecialOpts)
+	m.Save("vfs", &x.vfs)
+	m.Save("hostMount", &x.hostMount)
+	m.Save("pipeMount", &x.pipeMount)
+	m.Save("socketMount", &x.socketMount)
+	m.Save("SleepForAddressSpaceActivation", &x.SleepForAddressSpaceActivation)
 }
 
 func (x *Kernel) afterLoad() {}
@@ -150,6 +170,7 @@ func (x *Kernel) load(m state.Map) {
 	m.Load("timekeeper", &x.timekeeper)
 	m.Load("tasks", &x.tasks)
 	m.Load("rootUserNamespace", &x.rootUserNamespace)
+	m.Load("rootNetworkNamespace", &x.rootNetworkNamespace)
 	m.Load("applicationCores", &x.applicationCores)
 	m.Load("useHostCores", &x.useHostCores)
 	m.Load("extraAuxv", &x.extraAuxv)
@@ -157,13 +178,15 @@ func (x *Kernel) load(m state.Map) {
 	m.Load("rootUTSNamespace", &x.rootUTSNamespace)
 	m.Load("rootIPCNamespace", &x.rootIPCNamespace)
 	m.Load("rootAbstractSocketNamespace", &x.rootAbstractSocketNamespace)
-	m.Load("mounts", &x.mounts)
 	m.Load("futexes", &x.futexes)
 	m.Load("globalInit", &x.globalInit)
 	m.Load("realtimeClock", &x.realtimeClock)
 	m.Load("monotonicClock", &x.monotonicClock)
 	m.Load("syslog", &x.syslog)
+	m.Load("runningTasks", &x.runningTasks)
 	m.Load("cpuClock", &x.cpuClock)
+	m.Load("cpuClockTickerDisabled", &x.cpuClockTickerDisabled)
+	m.Load("cpuClockTickerSetting", &x.cpuClockTickerSetting)
 	m.Load("fdMapUids", &x.fdMapUids)
 	m.Load("uniqueID", &x.uniqueID)
 	m.Load("nextInotifyCookie", &x.nextInotifyCookie)
@@ -171,6 +194,12 @@ func (x *Kernel) load(m state.Map) {
 	m.Load("sockets", &x.sockets)
 	m.Load("nextSocketEntry", &x.nextSocketEntry)
 	m.Load("DirentCacheLimiter", &x.DirentCacheLimiter)
+	m.Load("SpecialOpts", &x.SpecialOpts)
+	m.Load("vfs", &x.vfs)
+	m.Load("hostMount", &x.hostMount)
+	m.Load("pipeMount", &x.pipeMount)
+	m.Load("socketMount", &x.socketMount)
+	m.Load("SleepForAddressSpaceActivation", &x.SleepForAddressSpaceActivation)
 	m.LoadValue("danglingEndpoints", new([]tcpip.Endpoint), func(y interface{}) { x.loadDanglingEndpoints(y.([]tcpip.Endpoint)) })
 	m.LoadValue("deviceRegistry", new(*device.Registry), func(y interface{}) { x.loadDeviceRegistry(y.(*device.Registry)) })
 }
@@ -181,6 +210,7 @@ func (x *SocketEntry) save(m state.Map) {
 	m.Save("socketEntry", &x.socketEntry)
 	m.Save("k", &x.k)
 	m.Save("Sock", &x.Sock)
+	m.Save("SockVFS2", &x.SockVFS2)
 	m.Save("ID", &x.ID)
 }
 
@@ -189,6 +219,7 @@ func (x *SocketEntry) load(m state.Map) {
 	m.Load("socketEntry", &x.socketEntry)
 	m.Load("k", &x.k)
 	m.Load("Sock", &x.Sock)
+	m.Load("SockVFS2", &x.SockVFS2)
 	m.Load("ID", &x.ID)
 }
 
@@ -366,15 +397,15 @@ func (x *ptraceStop) load(m state.Map) {
 	m.Load("listen", &x.listen)
 }
 
-func (x *RSEQCriticalRegion) beforeSave() {}
-func (x *RSEQCriticalRegion) save(m state.Map) {
+func (x *OldRSeqCriticalRegion) beforeSave() {}
+func (x *OldRSeqCriticalRegion) save(m state.Map) {
 	x.beforeSave()
 	m.Save("CriticalSection", &x.CriticalSection)
 	m.Save("Restart", &x.Restart)
 }
 
-func (x *RSEQCriticalRegion) afterLoad() {}
-func (x *RSEQCriticalRegion) load(m state.Map) {
+func (x *OldRSeqCriticalRegion) afterLoad() {}
+func (x *OldRSeqCriticalRegion) load(m state.Map) {
 	m.Load("CriticalSection", &x.CriticalSection)
 	m.Load("Restart", &x.Restart)
 }
@@ -411,6 +442,7 @@ func (x *Session) save(m state.Map) {
 	m.Save("refs", &x.refs)
 	m.Save("leader", &x.leader)
 	m.Save("id", &x.id)
+	m.Save("foreground", &x.foreground)
 	m.Save("processGroups", &x.processGroups)
 	m.Save("sessionEntry", &x.sessionEntry)
 }
@@ -420,6 +452,7 @@ func (x *Session) load(m state.Map) {
 	m.Load("refs", &x.refs)
 	m.Load("leader", &x.leader)
 	m.Load("id", &x.id)
+	m.Load("foreground", &x.foreground)
 	m.Load("processGroups", &x.processGroups)
 	m.Load("sessionEntry", &x.sessionEntry)
 }
@@ -482,17 +515,17 @@ func (x *socketEntry) load(m state.Map) {
 	m.Load("prev", &x.prev)
 }
 
-func (x *SyscallTable) beforeSave() {}
-func (x *SyscallTable) save(m state.Map) {
+func (x *syscallTableInfo) beforeSave() {}
+func (x *syscallTableInfo) save(m state.Map) {
 	x.beforeSave()
 	m.Save("OS", &x.OS)
 	m.Save("Arch", &x.Arch)
 }
 
-func (x *SyscallTable) load(m state.Map) {
-	m.LoadWait("OS", &x.OS)
-	m.LoadWait("Arch", &x.Arch)
-	m.AfterLoad(x.afterLoad)
+func (x *syscallTableInfo) afterLoad() {}
+func (x *syscallTableInfo) load(m state.Map) {
+	m.Load("OS", &x.OS)
+	m.Load("Arch", &x.Arch)
 }
 
 func (x *syslog) beforeSave() {}
@@ -509,10 +542,11 @@ func (x *syslog) load(m state.Map) {
 func (x *Task) beforeSave() {}
 func (x *Task) save(m state.Map) {
 	x.beforeSave()
+	if !state.IsZeroValue(&x.signalQueue) {
+		m.Failf("signalQueue is %#v, expected zero", &x.signalQueue)
+	}
 	var ptraceTracer *Task = x.savePtraceTracer()
 	m.SaveValue("ptraceTracer", ptraceTracer)
-	var logPrefix string = x.saveLogPrefix()
-	m.SaveValue("logPrefix", logPrefix)
 	var syscallFilters []bpf.Program = x.saveSyscallFilters()
 	m.SaveValue("syscallFilters", syscallFilters)
 	m.Save("taskNode", &x.taskNode)
@@ -536,8 +570,8 @@ func (x *Task) save(m state.Map) {
 	m.Save("k", &x.k)
 	m.Save("containerID", &x.containerID)
 	m.Save("tc", &x.tc)
-	m.Save("fsc", &x.fsc)
-	m.Save("fds", &x.fds)
+	m.Save("fsContext", &x.fsContext)
+	m.Save("fdTable", &x.fdTable)
 	m.Save("vforkParent", &x.vforkParent)
 	m.Save("exitState", &x.exitState)
 	m.Save("exitTracerNotified", &x.exitTracerNotified)
@@ -557,6 +591,7 @@ func (x *Task) save(m state.Map) {
 	m.Save("utsns", &x.utsns)
 	m.Save("ipcns", &x.ipcns)
 	m.Save("abstractSockets", &x.abstractSockets)
+	m.Save("mountNamespaceVFS2", &x.mountNamespaceVFS2)
 	m.Save("parentDeathSignal", &x.parentDeathSignal)
 	m.Save("cleartid", &x.cleartid)
 	m.Save("allowedCPUMask", &x.allowedCPUMask)
@@ -565,8 +600,10 @@ func (x *Task) save(m state.Map) {
 	m.Save("numaPolicy", &x.numaPolicy)
 	m.Save("numaNodeMask", &x.numaNodeMask)
 	m.Save("netns", &x.netns)
-	m.Save("rseqCPUAddr", &x.rseqCPUAddr)
 	m.Save("rseqCPU", &x.rseqCPU)
+	m.Save("oldRSeqCPUAddr", &x.oldRSeqCPUAddr)
+	m.Save("rseqAddr", &x.rseqAddr)
+	m.Save("rseqSignature", &x.rseqSignature)
 	m.Save("startTime", &x.startTime)
 }
 
@@ -592,8 +629,8 @@ func (x *Task) load(m state.Map) {
 	m.Load("k", &x.k)
 	m.Load("containerID", &x.containerID)
 	m.Load("tc", &x.tc)
-	m.Load("fsc", &x.fsc)
-	m.Load("fds", &x.fds)
+	m.Load("fsContext", &x.fsContext)
+	m.Load("fdTable", &x.fdTable)
 	m.Load("vforkParent", &x.vforkParent)
 	m.Load("exitState", &x.exitState)
 	m.Load("exitTracerNotified", &x.exitTracerNotified)
@@ -613,6 +650,7 @@ func (x *Task) load(m state.Map) {
 	m.Load("utsns", &x.utsns)
 	m.Load("ipcns", &x.ipcns)
 	m.Load("abstractSockets", &x.abstractSockets)
+	m.Load("mountNamespaceVFS2", &x.mountNamespaceVFS2)
 	m.Load("parentDeathSignal", &x.parentDeathSignal)
 	m.Load("cleartid", &x.cleartid)
 	m.Load("allowedCPUMask", &x.allowedCPUMask)
@@ -621,11 +659,12 @@ func (x *Task) load(m state.Map) {
 	m.Load("numaPolicy", &x.numaPolicy)
 	m.Load("numaNodeMask", &x.numaNodeMask)
 	m.Load("netns", &x.netns)
-	m.Load("rseqCPUAddr", &x.rseqCPUAddr)
 	m.Load("rseqCPU", &x.rseqCPU)
+	m.Load("oldRSeqCPUAddr", &x.oldRSeqCPUAddr)
+	m.Load("rseqAddr", &x.rseqAddr)
+	m.Load("rseqSignature", &x.rseqSignature)
 	m.Load("startTime", &x.startTime)
 	m.LoadValue("ptraceTracer", new(*Task), func(y interface{}) { x.loadPtraceTracer(y.(*Task)) })
-	m.LoadValue("logPrefix", new(string), func(y interface{}) { x.loadLogPrefix(y.(string)) })
 	m.LoadValue("syscallFilters", new([]bpf.Program), func(y interface{}) { x.loadSyscallFilters(y.([]bpf.Program)) })
 	m.AfterLoad(x.afterLoad)
 }
@@ -666,11 +705,12 @@ func (x *vforkStop) load(m state.Map) {
 func (x *TaskContext) beforeSave() {}
 func (x *TaskContext) save(m state.Map) {
 	x.beforeSave()
+	var st syscallTableInfo = x.saveSt()
+	m.SaveValue("st", st)
 	m.Save("Name", &x.Name)
 	m.Save("Arch", &x.Arch)
 	m.Save("MemoryManager", &x.MemoryManager)
 	m.Save("fu", &x.fu)
-	m.Save("st", &x.st)
 }
 
 func (x *TaskContext) afterLoad() {}
@@ -679,7 +719,7 @@ func (x *TaskContext) load(m state.Map) {
 	m.Load("Arch", &x.Arch)
 	m.Load("MemoryManager", &x.MemoryManager)
 	m.Load("fu", &x.fu)
-	m.Load("st", &x.st)
+	m.LoadValue("st", new(syscallTableInfo), func(y interface{}) { x.loadSt(y.(syscallTableInfo)) })
 }
 
 func (x *execStop) beforeSave() {}
@@ -886,8 +926,8 @@ func (x *runSyscallExit) load(m state.Map) {
 func (x *ThreadGroup) beforeSave() {}
 func (x *ThreadGroup) save(m state.Map) {
 	x.beforeSave()
-	var rscr *RSEQCriticalRegion = x.saveRscr()
-	m.SaveValue("rscr", rscr)
+	var oldRSeqCritical *OldRSeqCriticalRegion = x.saveOldRSeqCritical()
+	m.SaveValue("oldRSeqCritical", oldRSeqCritical)
 	m.Save("threadGroupNode", &x.threadGroupNode)
 	m.Save("signalHandlers", &x.signalHandlers)
 	m.Save("pendingSignals", &x.pendingSignals)
@@ -917,6 +957,9 @@ func (x *ThreadGroup) save(m state.Map) {
 	m.Save("limits", &x.limits)
 	m.Save("processGroup", &x.processGroup)
 	m.Save("execed", &x.execed)
+	m.Save("mounts", &x.mounts)
+	m.Save("tty", &x.tty)
+	m.Save("oomScoreAdj", &x.oomScoreAdj)
 }
 
 func (x *ThreadGroup) afterLoad() {}
@@ -950,7 +993,10 @@ func (x *ThreadGroup) load(m state.Map) {
 	m.Load("limits", &x.limits)
 	m.Load("processGroup", &x.processGroup)
 	m.Load("execed", &x.execed)
-	m.LoadValue("rscr", new(*RSEQCriticalRegion), func(y interface{}) { x.loadRscr(y.(*RSEQCriticalRegion)) })
+	m.Load("mounts", &x.mounts)
+	m.Load("tty", &x.tty)
+	m.Load("oomScoreAdj", &x.oomScoreAdj)
+	m.LoadValue("oldRSeqCritical", new(*OldRSeqCriticalRegion), func(y interface{}) { x.loadOldRSeqCritical(y.(*OldRSeqCriticalRegion)) })
 }
 
 func (x *itimerRealListener) beforeSave() {}
@@ -1081,6 +1127,19 @@ func (x *timekeeperClock) load(m state.Map) {
 	m.Load("c", &x.c)
 }
 
+func (x *TTY) beforeSave() {}
+func (x *TTY) save(m state.Map) {
+	x.beforeSave()
+	m.Save("Index", &x.Index)
+	m.Save("tg", &x.tg)
+}
+
+func (x *TTY) afterLoad() {}
+func (x *TTY) load(m state.Map) {
+	m.Load("Index", &x.Index)
+	m.Load("tg", &x.tg)
+}
+
 func (x *UTSNamespace) beforeSave() {}
 func (x *UTSNamespace) save(m state.Map) {
 	x.beforeSave()
@@ -1112,68 +1171,69 @@ func (x *VDSOParamPage) load(m state.Map) {
 }
 
 func init() {
-	state.Register("kernel.abstractEndpoint", (*abstractEndpoint)(nil), state.Fns{Save: (*abstractEndpoint).save, Load: (*abstractEndpoint).load})
-	state.Register("kernel.AbstractSocketNamespace", (*AbstractSocketNamespace)(nil), state.Fns{Save: (*AbstractSocketNamespace).save, Load: (*AbstractSocketNamespace).load})
-	state.Register("kernel.FDFlags", (*FDFlags)(nil), state.Fns{Save: (*FDFlags).save, Load: (*FDFlags).load})
-	state.Register("kernel.descriptor", (*descriptor)(nil), state.Fns{Save: (*descriptor).save, Load: (*descriptor).load})
-	state.Register("kernel.FDMap", (*FDMap)(nil), state.Fns{Save: (*FDMap).save, Load: (*FDMap).load})
-	state.Register("kernel.FSContext", (*FSContext)(nil), state.Fns{Save: (*FSContext).save, Load: (*FSContext).load})
-	state.Register("kernel.IPCNamespace", (*IPCNamespace)(nil), state.Fns{Save: (*IPCNamespace).save, Load: (*IPCNamespace).load})
-	state.Register("kernel.Kernel", (*Kernel)(nil), state.Fns{Save: (*Kernel).save, Load: (*Kernel).load})
-	state.Register("kernel.SocketEntry", (*SocketEntry)(nil), state.Fns{Save: (*SocketEntry).save, Load: (*SocketEntry).load})
-	state.Register("kernel.pendingSignals", (*pendingSignals)(nil), state.Fns{Save: (*pendingSignals).save, Load: (*pendingSignals).load})
-	state.Register("kernel.pendingSignalQueue", (*pendingSignalQueue)(nil), state.Fns{Save: (*pendingSignalQueue).save, Load: (*pendingSignalQueue).load})
-	state.Register("kernel.pendingSignal", (*pendingSignal)(nil), state.Fns{Save: (*pendingSignal).save, Load: (*pendingSignal).load})
-	state.Register("kernel.pendingSignalList", (*pendingSignalList)(nil), state.Fns{Save: (*pendingSignalList).save, Load: (*pendingSignalList).load})
-	state.Register("kernel.pendingSignalEntry", (*pendingSignalEntry)(nil), state.Fns{Save: (*pendingSignalEntry).save, Load: (*pendingSignalEntry).load})
-	state.Register("kernel.savedPendingSignal", (*savedPendingSignal)(nil), state.Fns{Save: (*savedPendingSignal).save, Load: (*savedPendingSignal).load})
-	state.Register("kernel.IntervalTimer", (*IntervalTimer)(nil), state.Fns{Save: (*IntervalTimer).save, Load: (*IntervalTimer).load})
-	state.Register("kernel.processGroupList", (*processGroupList)(nil), state.Fns{Save: (*processGroupList).save, Load: (*processGroupList).load})
-	state.Register("kernel.processGroupEntry", (*processGroupEntry)(nil), state.Fns{Save: (*processGroupEntry).save, Load: (*processGroupEntry).load})
-	state.Register("kernel.ptraceOptions", (*ptraceOptions)(nil), state.Fns{Save: (*ptraceOptions).save, Load: (*ptraceOptions).load})
-	state.Register("kernel.ptraceStop", (*ptraceStop)(nil), state.Fns{Save: (*ptraceStop).save, Load: (*ptraceStop).load})
-	state.Register("kernel.RSEQCriticalRegion", (*RSEQCriticalRegion)(nil), state.Fns{Save: (*RSEQCriticalRegion).save, Load: (*RSEQCriticalRegion).load})
-	state.Register("kernel.sessionList", (*sessionList)(nil), state.Fns{Save: (*sessionList).save, Load: (*sessionList).load})
-	state.Register("kernel.sessionEntry", (*sessionEntry)(nil), state.Fns{Save: (*sessionEntry).save, Load: (*sessionEntry).load})
-	state.Register("kernel.Session", (*Session)(nil), state.Fns{Save: (*Session).save, Load: (*Session).load})
-	state.Register("kernel.ProcessGroup", (*ProcessGroup)(nil), state.Fns{Save: (*ProcessGroup).save, Load: (*ProcessGroup).load})
-	state.Register("kernel.SignalHandlers", (*SignalHandlers)(nil), state.Fns{Save: (*SignalHandlers).save, Load: (*SignalHandlers).load})
-	state.Register("kernel.socketList", (*socketList)(nil), state.Fns{Save: (*socketList).save, Load: (*socketList).load})
-	state.Register("kernel.socketEntry", (*socketEntry)(nil), state.Fns{Save: (*socketEntry).save, Load: (*socketEntry).load})
-	state.Register("kernel.SyscallTable", (*SyscallTable)(nil), state.Fns{Save: (*SyscallTable).save, Load: (*SyscallTable).load})
-	state.Register("kernel.syslog", (*syslog)(nil), state.Fns{Save: (*syslog).save, Load: (*syslog).load})
-	state.Register("kernel.Task", (*Task)(nil), state.Fns{Save: (*Task).save, Load: (*Task).load})
-	state.Register("kernel.runSyscallAfterPtraceEventClone", (*runSyscallAfterPtraceEventClone)(nil), state.Fns{Save: (*runSyscallAfterPtraceEventClone).save, Load: (*runSyscallAfterPtraceEventClone).load})
-	state.Register("kernel.runSyscallAfterVforkStop", (*runSyscallAfterVforkStop)(nil), state.Fns{Save: (*runSyscallAfterVforkStop).save, Load: (*runSyscallAfterVforkStop).load})
-	state.Register("kernel.vforkStop", (*vforkStop)(nil), state.Fns{Save: (*vforkStop).save, Load: (*vforkStop).load})
-	state.Register("kernel.TaskContext", (*TaskContext)(nil), state.Fns{Save: (*TaskContext).save, Load: (*TaskContext).load})
-	state.Register("kernel.execStop", (*execStop)(nil), state.Fns{Save: (*execStop).save, Load: (*execStop).load})
-	state.Register("kernel.runSyscallAfterExecStop", (*runSyscallAfterExecStop)(nil), state.Fns{Save: (*runSyscallAfterExecStop).save, Load: (*runSyscallAfterExecStop).load})
-	state.Register("kernel.ExitStatus", (*ExitStatus)(nil), state.Fns{Save: (*ExitStatus).save, Load: (*ExitStatus).load})
-	state.Register("kernel.runExit", (*runExit)(nil), state.Fns{Save: (*runExit).save, Load: (*runExit).load})
-	state.Register("kernel.runExitMain", (*runExitMain)(nil), state.Fns{Save: (*runExitMain).save, Load: (*runExitMain).load})
-	state.Register("kernel.runExitNotify", (*runExitNotify)(nil), state.Fns{Save: (*runExitNotify).save, Load: (*runExitNotify).load})
-	state.Register("kernel.taskList", (*taskList)(nil), state.Fns{Save: (*taskList).save, Load: (*taskList).load})
-	state.Register("kernel.taskEntry", (*taskEntry)(nil), state.Fns{Save: (*taskEntry).save, Load: (*taskEntry).load})
-	state.Register("kernel.runApp", (*runApp)(nil), state.Fns{Save: (*runApp).save, Load: (*runApp).load})
-	state.Register("kernel.TaskGoroutineSchedInfo", (*TaskGoroutineSchedInfo)(nil), state.Fns{Save: (*TaskGoroutineSchedInfo).save, Load: (*TaskGoroutineSchedInfo).load})
-	state.Register("kernel.taskClock", (*taskClock)(nil), state.Fns{Save: (*taskClock).save, Load: (*taskClock).load})
-	state.Register("kernel.tgClock", (*tgClock)(nil), state.Fns{Save: (*tgClock).save, Load: (*tgClock).load})
-	state.Register("kernel.groupStop", (*groupStop)(nil), state.Fns{Save: (*groupStop).save, Load: (*groupStop).load})
-	state.Register("kernel.runInterrupt", (*runInterrupt)(nil), state.Fns{Save: (*runInterrupt).save, Load: (*runInterrupt).load})
-	state.Register("kernel.runInterruptAfterSignalDeliveryStop", (*runInterruptAfterSignalDeliveryStop)(nil), state.Fns{Save: (*runInterruptAfterSignalDeliveryStop).save, Load: (*runInterruptAfterSignalDeliveryStop).load})
-	state.Register("kernel.runSyscallAfterSyscallEnterStop", (*runSyscallAfterSyscallEnterStop)(nil), state.Fns{Save: (*runSyscallAfterSyscallEnterStop).save, Load: (*runSyscallAfterSyscallEnterStop).load})
-	state.Register("kernel.runSyscallAfterSysemuStop", (*runSyscallAfterSysemuStop)(nil), state.Fns{Save: (*runSyscallAfterSysemuStop).save, Load: (*runSyscallAfterSysemuStop).load})
-	state.Register("kernel.runSyscallReinvoke", (*runSyscallReinvoke)(nil), state.Fns{Save: (*runSyscallReinvoke).save, Load: (*runSyscallReinvoke).load})
-	state.Register("kernel.runSyscallExit", (*runSyscallExit)(nil), state.Fns{Save: (*runSyscallExit).save, Load: (*runSyscallExit).load})
-	state.Register("kernel.ThreadGroup", (*ThreadGroup)(nil), state.Fns{Save: (*ThreadGroup).save, Load: (*ThreadGroup).load})
-	state.Register("kernel.itimerRealListener", (*itimerRealListener)(nil), state.Fns{Save: (*itimerRealListener).save, Load: (*itimerRealListener).load})
-	state.Register("kernel.TaskSet", (*TaskSet)(nil), state.Fns{Save: (*TaskSet).save, Load: (*TaskSet).load})
-	state.Register("kernel.PIDNamespace", (*PIDNamespace)(nil), state.Fns{Save: (*PIDNamespace).save, Load: (*PIDNamespace).load})
-	state.Register("kernel.threadGroupNode", (*threadGroupNode)(nil), state.Fns{Save: (*threadGroupNode).save, Load: (*threadGroupNode).load})
-	state.Register("kernel.taskNode", (*taskNode)(nil), state.Fns{Save: (*taskNode).save, Load: (*taskNode).load})
-	state.Register("kernel.Timekeeper", (*Timekeeper)(nil), state.Fns{Save: (*Timekeeper).save, Load: (*Timekeeper).load})
-	state.Register("kernel.timekeeperClock", (*timekeeperClock)(nil), state.Fns{Save: (*timekeeperClock).save, Load: (*timekeeperClock).load})
-	state.Register("kernel.UTSNamespace", (*UTSNamespace)(nil), state.Fns{Save: (*UTSNamespace).save, Load: (*UTSNamespace).load})
-	state.Register("kernel.VDSOParamPage", (*VDSOParamPage)(nil), state.Fns{Save: (*VDSOParamPage).save, Load: (*VDSOParamPage).load})
+	state.Register("pkg/sentry/kernel.abstractEndpoint", (*abstractEndpoint)(nil), state.Fns{Save: (*abstractEndpoint).save, Load: (*abstractEndpoint).load})
+	state.Register("pkg/sentry/kernel.AbstractSocketNamespace", (*AbstractSocketNamespace)(nil), state.Fns{Save: (*AbstractSocketNamespace).save, Load: (*AbstractSocketNamespace).load})
+	state.Register("pkg/sentry/kernel.FDFlags", (*FDFlags)(nil), state.Fns{Save: (*FDFlags).save, Load: (*FDFlags).load})
+	state.Register("pkg/sentry/kernel.descriptor", (*descriptor)(nil), state.Fns{Save: (*descriptor).save, Load: (*descriptor).load})
+	state.Register("pkg/sentry/kernel.FDTable", (*FDTable)(nil), state.Fns{Save: (*FDTable).save, Load: (*FDTable).load})
+	state.Register("pkg/sentry/kernel.FSContext", (*FSContext)(nil), state.Fns{Save: (*FSContext).save, Load: (*FSContext).load})
+	state.Register("pkg/sentry/kernel.IPCNamespace", (*IPCNamespace)(nil), state.Fns{Save: (*IPCNamespace).save, Load: (*IPCNamespace).load})
+	state.Register("pkg/sentry/kernel.Kernel", (*Kernel)(nil), state.Fns{Save: (*Kernel).save, Load: (*Kernel).load})
+	state.Register("pkg/sentry/kernel.SocketEntry", (*SocketEntry)(nil), state.Fns{Save: (*SocketEntry).save, Load: (*SocketEntry).load})
+	state.Register("pkg/sentry/kernel.pendingSignals", (*pendingSignals)(nil), state.Fns{Save: (*pendingSignals).save, Load: (*pendingSignals).load})
+	state.Register("pkg/sentry/kernel.pendingSignalQueue", (*pendingSignalQueue)(nil), state.Fns{Save: (*pendingSignalQueue).save, Load: (*pendingSignalQueue).load})
+	state.Register("pkg/sentry/kernel.pendingSignal", (*pendingSignal)(nil), state.Fns{Save: (*pendingSignal).save, Load: (*pendingSignal).load})
+	state.Register("pkg/sentry/kernel.pendingSignalList", (*pendingSignalList)(nil), state.Fns{Save: (*pendingSignalList).save, Load: (*pendingSignalList).load})
+	state.Register("pkg/sentry/kernel.pendingSignalEntry", (*pendingSignalEntry)(nil), state.Fns{Save: (*pendingSignalEntry).save, Load: (*pendingSignalEntry).load})
+	state.Register("pkg/sentry/kernel.savedPendingSignal", (*savedPendingSignal)(nil), state.Fns{Save: (*savedPendingSignal).save, Load: (*savedPendingSignal).load})
+	state.Register("pkg/sentry/kernel.IntervalTimer", (*IntervalTimer)(nil), state.Fns{Save: (*IntervalTimer).save, Load: (*IntervalTimer).load})
+	state.Register("pkg/sentry/kernel.processGroupList", (*processGroupList)(nil), state.Fns{Save: (*processGroupList).save, Load: (*processGroupList).load})
+	state.Register("pkg/sentry/kernel.processGroupEntry", (*processGroupEntry)(nil), state.Fns{Save: (*processGroupEntry).save, Load: (*processGroupEntry).load})
+	state.Register("pkg/sentry/kernel.ptraceOptions", (*ptraceOptions)(nil), state.Fns{Save: (*ptraceOptions).save, Load: (*ptraceOptions).load})
+	state.Register("pkg/sentry/kernel.ptraceStop", (*ptraceStop)(nil), state.Fns{Save: (*ptraceStop).save, Load: (*ptraceStop).load})
+	state.Register("pkg/sentry/kernel.OldRSeqCriticalRegion", (*OldRSeqCriticalRegion)(nil), state.Fns{Save: (*OldRSeqCriticalRegion).save, Load: (*OldRSeqCriticalRegion).load})
+	state.Register("pkg/sentry/kernel.sessionList", (*sessionList)(nil), state.Fns{Save: (*sessionList).save, Load: (*sessionList).load})
+	state.Register("pkg/sentry/kernel.sessionEntry", (*sessionEntry)(nil), state.Fns{Save: (*sessionEntry).save, Load: (*sessionEntry).load})
+	state.Register("pkg/sentry/kernel.Session", (*Session)(nil), state.Fns{Save: (*Session).save, Load: (*Session).load})
+	state.Register("pkg/sentry/kernel.ProcessGroup", (*ProcessGroup)(nil), state.Fns{Save: (*ProcessGroup).save, Load: (*ProcessGroup).load})
+	state.Register("pkg/sentry/kernel.SignalHandlers", (*SignalHandlers)(nil), state.Fns{Save: (*SignalHandlers).save, Load: (*SignalHandlers).load})
+	state.Register("pkg/sentry/kernel.socketList", (*socketList)(nil), state.Fns{Save: (*socketList).save, Load: (*socketList).load})
+	state.Register("pkg/sentry/kernel.socketEntry", (*socketEntry)(nil), state.Fns{Save: (*socketEntry).save, Load: (*socketEntry).load})
+	state.Register("pkg/sentry/kernel.syscallTableInfo", (*syscallTableInfo)(nil), state.Fns{Save: (*syscallTableInfo).save, Load: (*syscallTableInfo).load})
+	state.Register("pkg/sentry/kernel.syslog", (*syslog)(nil), state.Fns{Save: (*syslog).save, Load: (*syslog).load})
+	state.Register("pkg/sentry/kernel.Task", (*Task)(nil), state.Fns{Save: (*Task).save, Load: (*Task).load})
+	state.Register("pkg/sentry/kernel.runSyscallAfterPtraceEventClone", (*runSyscallAfterPtraceEventClone)(nil), state.Fns{Save: (*runSyscallAfterPtraceEventClone).save, Load: (*runSyscallAfterPtraceEventClone).load})
+	state.Register("pkg/sentry/kernel.runSyscallAfterVforkStop", (*runSyscallAfterVforkStop)(nil), state.Fns{Save: (*runSyscallAfterVforkStop).save, Load: (*runSyscallAfterVforkStop).load})
+	state.Register("pkg/sentry/kernel.vforkStop", (*vforkStop)(nil), state.Fns{Save: (*vforkStop).save, Load: (*vforkStop).load})
+	state.Register("pkg/sentry/kernel.TaskContext", (*TaskContext)(nil), state.Fns{Save: (*TaskContext).save, Load: (*TaskContext).load})
+	state.Register("pkg/sentry/kernel.execStop", (*execStop)(nil), state.Fns{Save: (*execStop).save, Load: (*execStop).load})
+	state.Register("pkg/sentry/kernel.runSyscallAfterExecStop", (*runSyscallAfterExecStop)(nil), state.Fns{Save: (*runSyscallAfterExecStop).save, Load: (*runSyscallAfterExecStop).load})
+	state.Register("pkg/sentry/kernel.ExitStatus", (*ExitStatus)(nil), state.Fns{Save: (*ExitStatus).save, Load: (*ExitStatus).load})
+	state.Register("pkg/sentry/kernel.runExit", (*runExit)(nil), state.Fns{Save: (*runExit).save, Load: (*runExit).load})
+	state.Register("pkg/sentry/kernel.runExitMain", (*runExitMain)(nil), state.Fns{Save: (*runExitMain).save, Load: (*runExitMain).load})
+	state.Register("pkg/sentry/kernel.runExitNotify", (*runExitNotify)(nil), state.Fns{Save: (*runExitNotify).save, Load: (*runExitNotify).load})
+	state.Register("pkg/sentry/kernel.taskList", (*taskList)(nil), state.Fns{Save: (*taskList).save, Load: (*taskList).load})
+	state.Register("pkg/sentry/kernel.taskEntry", (*taskEntry)(nil), state.Fns{Save: (*taskEntry).save, Load: (*taskEntry).load})
+	state.Register("pkg/sentry/kernel.runApp", (*runApp)(nil), state.Fns{Save: (*runApp).save, Load: (*runApp).load})
+	state.Register("pkg/sentry/kernel.TaskGoroutineSchedInfo", (*TaskGoroutineSchedInfo)(nil), state.Fns{Save: (*TaskGoroutineSchedInfo).save, Load: (*TaskGoroutineSchedInfo).load})
+	state.Register("pkg/sentry/kernel.taskClock", (*taskClock)(nil), state.Fns{Save: (*taskClock).save, Load: (*taskClock).load})
+	state.Register("pkg/sentry/kernel.tgClock", (*tgClock)(nil), state.Fns{Save: (*tgClock).save, Load: (*tgClock).load})
+	state.Register("pkg/sentry/kernel.groupStop", (*groupStop)(nil), state.Fns{Save: (*groupStop).save, Load: (*groupStop).load})
+	state.Register("pkg/sentry/kernel.runInterrupt", (*runInterrupt)(nil), state.Fns{Save: (*runInterrupt).save, Load: (*runInterrupt).load})
+	state.Register("pkg/sentry/kernel.runInterruptAfterSignalDeliveryStop", (*runInterruptAfterSignalDeliveryStop)(nil), state.Fns{Save: (*runInterruptAfterSignalDeliveryStop).save, Load: (*runInterruptAfterSignalDeliveryStop).load})
+	state.Register("pkg/sentry/kernel.runSyscallAfterSyscallEnterStop", (*runSyscallAfterSyscallEnterStop)(nil), state.Fns{Save: (*runSyscallAfterSyscallEnterStop).save, Load: (*runSyscallAfterSyscallEnterStop).load})
+	state.Register("pkg/sentry/kernel.runSyscallAfterSysemuStop", (*runSyscallAfterSysemuStop)(nil), state.Fns{Save: (*runSyscallAfterSysemuStop).save, Load: (*runSyscallAfterSysemuStop).load})
+	state.Register("pkg/sentry/kernel.runSyscallReinvoke", (*runSyscallReinvoke)(nil), state.Fns{Save: (*runSyscallReinvoke).save, Load: (*runSyscallReinvoke).load})
+	state.Register("pkg/sentry/kernel.runSyscallExit", (*runSyscallExit)(nil), state.Fns{Save: (*runSyscallExit).save, Load: (*runSyscallExit).load})
+	state.Register("pkg/sentry/kernel.ThreadGroup", (*ThreadGroup)(nil), state.Fns{Save: (*ThreadGroup).save, Load: (*ThreadGroup).load})
+	state.Register("pkg/sentry/kernel.itimerRealListener", (*itimerRealListener)(nil), state.Fns{Save: (*itimerRealListener).save, Load: (*itimerRealListener).load})
+	state.Register("pkg/sentry/kernel.TaskSet", (*TaskSet)(nil), state.Fns{Save: (*TaskSet).save, Load: (*TaskSet).load})
+	state.Register("pkg/sentry/kernel.PIDNamespace", (*PIDNamespace)(nil), state.Fns{Save: (*PIDNamespace).save, Load: (*PIDNamespace).load})
+	state.Register("pkg/sentry/kernel.threadGroupNode", (*threadGroupNode)(nil), state.Fns{Save: (*threadGroupNode).save, Load: (*threadGroupNode).load})
+	state.Register("pkg/sentry/kernel.taskNode", (*taskNode)(nil), state.Fns{Save: (*taskNode).save, Load: (*taskNode).load})
+	state.Register("pkg/sentry/kernel.Timekeeper", (*Timekeeper)(nil), state.Fns{Save: (*Timekeeper).save, Load: (*Timekeeper).load})
+	state.Register("pkg/sentry/kernel.timekeeperClock", (*timekeeperClock)(nil), state.Fns{Save: (*timekeeperClock).save, Load: (*timekeeperClock).load})
+	state.Register("pkg/sentry/kernel.TTY", (*TTY)(nil), state.Fns{Save: (*TTY).save, Load: (*TTY).load})
+	state.Register("pkg/sentry/kernel.UTSNamespace", (*UTSNamespace)(nil), state.Fns{Save: (*UTSNamespace).save, Load: (*UTSNamespace).load})
+	state.Register("pkg/sentry/kernel.VDSOParamPage", (*VDSOParamPage)(nil), state.Fns{Save: (*VDSOParamPage).save, Load: (*VDSOParamPage).load})
 }

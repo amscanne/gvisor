@@ -16,6 +16,7 @@ package state
 
 import (
 	"container/list"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -38,6 +39,9 @@ type queuedObject struct {
 // The encoding process is a breadth-first traversal of the object graph. The
 // inherent races and dependencies are much simpler than the decode case.
 type encodeState struct {
+	// ctx is the encode context.
+	ctx context.Context
+
 	// lastID is the last object ID.
 	//
 	// See idsByObject for context. Because of the special zero encoding
@@ -84,7 +88,7 @@ type encodeState struct {
 
 // register looks up an ID, registering if necessary.
 //
-// If the object was not previosly registered, it is enqueued to be serialized.
+// If the object was not previously registered, it is enqueued to be serialized.
 // See the documentation for idsByObject for more information.
 func (es *encodeState) register(obj reflect.Value) uint64 {
 	// It is not legal to call register for any non-pointer objects (see

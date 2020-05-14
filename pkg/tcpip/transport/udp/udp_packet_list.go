@@ -52,11 +52,21 @@ func (l *udpPacketList) Back() *udpPacket {
 	return l.tail
 }
 
+// Len returns the number of elements in the list.
+//
+// NOTE: This is an O(n) operation.
+func (l *udpPacketList) Len() (count int) {
+	for e := l.Front(); e != nil; e = e.Next() {
+		count++
+	}
+	return count
+}
+
 // PushFront inserts the element e at the front of list l.
 func (l *udpPacketList) PushFront(e *udpPacket) {
-	udpPacketElementMapper{}.linkerFor(e).SetNext(l.head)
-	udpPacketElementMapper{}.linkerFor(e).SetPrev(nil)
-
+	linker := udpPacketElementMapper{}.linkerFor(e)
+	linker.SetNext(l.head)
+	linker.SetPrev(nil)
 	if l.head != nil {
 		udpPacketElementMapper{}.linkerFor(l.head).SetPrev(e)
 	} else {
@@ -68,9 +78,9 @@ func (l *udpPacketList) PushFront(e *udpPacket) {
 
 // PushBack inserts the element e at the back of list l.
 func (l *udpPacketList) PushBack(e *udpPacket) {
-	udpPacketElementMapper{}.linkerFor(e).SetNext(nil)
-	udpPacketElementMapper{}.linkerFor(e).SetPrev(l.tail)
-
+	linker := udpPacketElementMapper{}.linkerFor(e)
+	linker.SetNext(nil)
+	linker.SetPrev(l.tail)
 	if l.tail != nil {
 		udpPacketElementMapper{}.linkerFor(l.tail).SetNext(e)
 	} else {
@@ -91,17 +101,20 @@ func (l *udpPacketList) PushBackList(m *udpPacketList) {
 
 		l.tail = m.tail
 	}
-
 	m.head = nil
 	m.tail = nil
 }
 
 // InsertAfter inserts e after b.
 func (l *udpPacketList) InsertAfter(b, e *udpPacket) {
-	a := udpPacketElementMapper{}.linkerFor(b).Next()
-	udpPacketElementMapper{}.linkerFor(e).SetNext(a)
-	udpPacketElementMapper{}.linkerFor(e).SetPrev(b)
-	udpPacketElementMapper{}.linkerFor(b).SetNext(e)
+	bLinker := udpPacketElementMapper{}.linkerFor(b)
+	eLinker := udpPacketElementMapper{}.linkerFor(e)
+
+	a := bLinker.Next()
+
+	eLinker.SetNext(a)
+	eLinker.SetPrev(b)
+	bLinker.SetNext(e)
 
 	if a != nil {
 		udpPacketElementMapper{}.linkerFor(a).SetPrev(e)
@@ -112,10 +125,13 @@ func (l *udpPacketList) InsertAfter(b, e *udpPacket) {
 
 // InsertBefore inserts e before a.
 func (l *udpPacketList) InsertBefore(a, e *udpPacket) {
-	b := udpPacketElementMapper{}.linkerFor(a).Prev()
-	udpPacketElementMapper{}.linkerFor(e).SetNext(a)
-	udpPacketElementMapper{}.linkerFor(e).SetPrev(b)
-	udpPacketElementMapper{}.linkerFor(a).SetPrev(e)
+	aLinker := udpPacketElementMapper{}.linkerFor(a)
+	eLinker := udpPacketElementMapper{}.linkerFor(e)
+
+	b := aLinker.Prev()
+	eLinker.SetNext(a)
+	eLinker.SetPrev(b)
+	aLinker.SetPrev(e)
 
 	if b != nil {
 		udpPacketElementMapper{}.linkerFor(b).SetNext(e)
@@ -126,8 +142,9 @@ func (l *udpPacketList) InsertBefore(a, e *udpPacket) {
 
 // Remove removes e from l.
 func (l *udpPacketList) Remove(e *udpPacket) {
-	prev := udpPacketElementMapper{}.linkerFor(e).Prev()
-	next := udpPacketElementMapper{}.linkerFor(e).Next()
+	linker := udpPacketElementMapper{}.linkerFor(e)
+	prev := linker.Prev()
+	next := linker.Next()
 
 	if prev != nil {
 		udpPacketElementMapper{}.linkerFor(prev).SetNext(next)
@@ -140,6 +157,9 @@ func (l *udpPacketList) Remove(e *udpPacket) {
 	} else {
 		l.tail = prev
 	}
+
+	linker.SetNext(nil)
+	linker.SetPrev(nil)
 }
 
 // Entry is a default implementation of Linker. Users can add anonymous fields

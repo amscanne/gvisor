@@ -18,16 +18,18 @@ package amutex
 
 import (
 	"sync/atomic"
+
+	"gvisor.dev/gvisor/pkg/syserror"
 )
 
 // Sleeper must be implemented by users of the abortable mutex to allow for
-// cancelation of waits.
+// cancellation of waits.
 type Sleeper interface {
 	// SleepStart is called by the AbortableMutex.Lock() function when the
 	// mutex is contended and the goroutine is about to sleep.
 	//
 	// A channel can be returned that causes the sleep to be canceled if
-	// it's readable. If no cancelation is desired, nil can be returned.
+	// it's readable. If no cancellation is desired, nil can be returned.
 	SleepStart() <-chan struct{}
 
 	// SleepFinish is called by AbortableMutex.Lock() once a contended mutex
@@ -52,6 +54,21 @@ func (NoopSleeper) SleepFinish(success bool) {}
 
 // Interrupted implements Sleeper.Interrupted.
 func (NoopSleeper) Interrupted() bool { return false }
+
+// Block blocks until either receiving from ch succeeds (in which case it
+// returns nil) or sleeper is interrupted (in which case it returns
+// syserror.ErrInterrupted).
+func Block(sleeper Sleeper, ch <-chan struct{}) error {
+	cancel := sleeper.SleepStart()
+	select {
+	case <-ch:
+		sleeper.SleepFinish(true)
+		return nil
+	case <-cancel:
+		sleeper.SleepFinish(false)
+		return syserror.ErrInterrupted
+	}
+}
 
 // AbortableMutex is an abortable mutex. It allows Lock() to be aborted while it
 // waits to acquire the mutex.

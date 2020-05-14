@@ -20,16 +20,17 @@ import (
 	"sort"
 	"strconv"
 
-	"gvisor.dev/gvisor/pkg/sentry/context"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/fs/fsutil"
 	"gvisor.dev/gvisor/pkg/sentry/fs/proc/device"
 	"gvisor.dev/gvisor/pkg/sentry/fs/proc/seqfile"
 	"gvisor.dev/gvisor/pkg/sentry/fs/ramfs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
-	"gvisor.dev/gvisor/pkg/sentry/socket/rpcinet"
 	"gvisor.dev/gvisor/pkg/syserror"
 )
+
+// LINT.IfChange
 
 // proc is a root proc node.
 //
@@ -68,7 +69,8 @@ func New(ctx context.Context, msrc *fs.MountSource, cgroupControllers map[string
 		"filesystems": seqfile.NewSeqFileInode(ctx, &filesystemsData{}, msrc),
 		"loadavg":     seqfile.NewSeqFileInode(ctx, &loadavgData{}, msrc),
 		"meminfo":     seqfile.NewSeqFileInode(ctx, &meminfoData{k}, msrc),
-		"mounts":      newProcInode(ramfs.NewSymlink(ctx, fs.RootOwner, "self/mounts"), msrc, fs.Symlink, nil),
+		"mounts":      newProcInode(ctx, ramfs.NewSymlink(ctx, fs.RootOwner, "self/mounts"), msrc, fs.Symlink, nil),
+		"net":         newProcInode(ctx, ramfs.NewSymlink(ctx, fs.RootOwner, "self/net"), msrc, fs.Symlink, nil),
 		"self":        newSelf(ctx, pidns, msrc),
 		"stat":        seqfile.NewSeqFileInode(ctx, &statData{k}, msrc),
 		"thread-self": newThreadSelf(ctx, pidns, msrc),
@@ -87,14 +89,7 @@ func New(ctx context.Context, msrc *fs.MountSource, cgroupControllers map[string
 	// Add more contents that need proc to be initialized.
 	p.AddChild(ctx, "sys", p.newSysDir(ctx, msrc))
 
-	// If we're using rpcinet we will let it manage /proc/net.
-	if _, ok := p.k.NetworkStack().(*rpcinet.Stack); ok {
-		p.AddChild(ctx, "net", newRPCInetProcNet(ctx, msrc))
-	} else {
-		p.AddChild(ctx, "net", p.newNetDir(ctx, k, msrc))
-	}
-
-	return newProcInode(p, msrc, fs.SpecialDirectory, nil), nil
+	return newProcInode(ctx, p, msrc, fs.SpecialDirectory, nil), nil
 }
 
 // self is a magical link.
@@ -112,7 +107,7 @@ func newSelf(ctx context.Context, pidns *kernel.PIDNamespace, msrc *fs.MountSour
 		Symlink: *ramfs.NewSymlink(ctx, fs.RootOwner, ""),
 		pidns:   pidns,
 	}
-	return newProcInode(s, msrc, fs.Symlink, nil)
+	return newProcInode(ctx, s, msrc, fs.Symlink, nil)
 }
 
 // newThreadSelf returns a new "threadSelf" node.
@@ -121,7 +116,7 @@ func newThreadSelf(ctx context.Context, pidns *kernel.PIDNamespace, msrc *fs.Mou
 		Symlink: *ramfs.NewSymlink(ctx, fs.RootOwner, ""),
 		pidns:   pidns,
 	}
-	return newProcInode(s, msrc, fs.Symlink, nil)
+	return newProcInode(ctx, s, msrc, fs.Symlink, nil)
 }
 
 // Readlink implements fs.InodeOperations.Readlink.
@@ -185,7 +180,7 @@ func (p *proc) Lookup(ctx context.Context, dir *fs.Inode, name string) (*fs.Dire
 
 	// Wrap it in a taskDir.
 	td := p.newTaskDir(otherTask, dir.MountSource, true)
-	return fs.NewDirent(td, name), nil
+	return fs.NewDirent(ctx, td, name), nil
 }
 
 // GetFile implements fs.InodeOperations.
@@ -230,7 +225,7 @@ func (rpf *rootProcFile) Readdir(ctx context.Context, file *fs.File, ser fs.Dent
 	// But for whatever crazy reason, you can still walk to the given node.
 	for _, tg := range rpf.iops.pidns.ThreadGroups() {
 		if leader := tg.Leader(); leader != nil {
-			name := strconv.FormatUint(uint64(tg.ID()), 10)
+			name := strconv.FormatUint(uint64(rpf.iops.pidns.IDOfThreadGroup(tg)), 10)
 			m[name] = fs.GenericDentAttr(fs.SpecialDirectory, device.ProcDevice)
 			names = append(names, name)
 		}
@@ -249,3 +244,5 @@ func (rpf *rootProcFile) Readdir(ctx context.Context, file *fs.File, ser fs.Dent
 	}
 	return offset, nil
 }
+
+// LINT.ThenChange(../../fsimpl/proc/tasks.go)

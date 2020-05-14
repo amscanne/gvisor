@@ -24,7 +24,7 @@ import (
 	"gvisor.dev/gvisor/pkg/cpuid"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sentry/limits"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
+	"gvisor.dev/gvisor/pkg/usermem"
 )
 
 // Arch describes an architecture.
@@ -33,6 +33,8 @@ type Arch int
 const (
 	// AMD64 is the x86-64 architecture.
 	AMD64 Arch = iota
+	// ARM64 is the aarch64 architecture.
+	ARM64
 )
 
 // String implements fmt.Stringer.
@@ -40,6 +42,8 @@ func (a Arch) String() string {
 	switch a {
 	case AMD64:
 		return "amd64"
+	case ARM64:
+		return "arm64"
 	default:
 		return fmt.Sprintf("Arch(%d)", a)
 	}
@@ -84,6 +88,9 @@ type Context interface {
 	// SyscallNo returns the syscall number.
 	SyscallNo() uintptr
 
+	// SyscallSaveOrig save orignal register value.
+	SyscallSaveOrig()
+
 	// SyscallArgs returns the syscall arguments in an array.
 	SyscallArgs() SyscallArguments
 
@@ -121,9 +128,9 @@ type Context interface {
 	// SetTLS sets the current TLS pointer. Returns false if value is invalid.
 	SetTLS(value uintptr) bool
 
-	// SetRSEQInterruptedIP sets the register that contains the old IP when a
-	// restartable sequence is interrupted.
-	SetRSEQInterruptedIP(value uintptr)
+	// SetOldRSeqInterruptedIP sets the register that contains the old IP
+	// when an "old rseq" restartable sequence is interrupted.
+	SetOldRSeqInterruptedIP(value uintptr)
 
 	// StateData returns a pointer to underlying architecture state.
 	StateData() *State

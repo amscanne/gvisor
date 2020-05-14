@@ -19,9 +19,10 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
-	"gvisor.dev/gvisor/pkg/sentry/kernel/kdefs"
 	"gvisor.dev/gvisor/pkg/syserror"
 )
+
+// LINT.IfChange
 
 // Sync implements linux system call sync(2).
 func Sync(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
@@ -32,9 +33,9 @@ func Sync(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallC
 
 // Syncfs implements linux system call syncfs(2).
 func Syncfs(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
-	fd := kdefs.FD(args[0].Int())
+	fd := args[0].Int()
 
-	file := t.FDMap().GetFile(fd)
+	file := t.GetFile(fd)
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
@@ -47,9 +48,9 @@ func Syncfs(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 
 // Fsync implements linux syscall fsync(2).
 func Fsync(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
-	fd := kdefs.FD(args[0].Int())
+	fd := args[0].Int()
 
-	file := t.FDMap().GetFile(fd)
+	file := t.GetFile(fd)
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
@@ -63,9 +64,9 @@ func Fsync(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 //
 // At the moment, it just calls Fsync, which is a big hammer, but correct.
 func Fdatasync(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
-	fd := kdefs.FD(args[0].Int())
+	fd := args[0].Int()
 
-	file := t.FDMap().GetFile(fd)
+	file := t.GetFile(fd)
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
@@ -79,6 +80,7 @@ func Fdatasync(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sys
 func SyncFileRange(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	var err error
 
+	fd := args[0].Int()
 	offset := args[1].Int64()
 	nbytes := args[2].Int64()
 	uflags := args[3].Uint()
@@ -97,8 +99,7 @@ func SyncFileRange(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel
 		nbytes = fs.FileMaxOffset
 	}
 
-	fd := kdefs.FD(args[0].Int())
-	file := t.FDMap().GetFile(fd)
+	file := t.GetFile(fd)
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
@@ -136,3 +137,5 @@ func SyncFileRange(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel
 
 	return 0, nil, syserror.ConvertIntr(err, kernel.ERESTARTSYS)
 }
+
+// LINT.ThenChange(vfs2/sync.go)

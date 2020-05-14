@@ -52,11 +52,21 @@ func (l *processGroupList) Back() *ProcessGroup {
 	return l.tail
 }
 
+// Len returns the number of elements in the list.
+//
+// NOTE: This is an O(n) operation.
+func (l *processGroupList) Len() (count int) {
+	for e := l.Front(); e != nil; e = e.Next() {
+		count++
+	}
+	return count
+}
+
 // PushFront inserts the element e at the front of list l.
 func (l *processGroupList) PushFront(e *ProcessGroup) {
-	processGroupElementMapper{}.linkerFor(e).SetNext(l.head)
-	processGroupElementMapper{}.linkerFor(e).SetPrev(nil)
-
+	linker := processGroupElementMapper{}.linkerFor(e)
+	linker.SetNext(l.head)
+	linker.SetPrev(nil)
 	if l.head != nil {
 		processGroupElementMapper{}.linkerFor(l.head).SetPrev(e)
 	} else {
@@ -68,9 +78,9 @@ func (l *processGroupList) PushFront(e *ProcessGroup) {
 
 // PushBack inserts the element e at the back of list l.
 func (l *processGroupList) PushBack(e *ProcessGroup) {
-	processGroupElementMapper{}.linkerFor(e).SetNext(nil)
-	processGroupElementMapper{}.linkerFor(e).SetPrev(l.tail)
-
+	linker := processGroupElementMapper{}.linkerFor(e)
+	linker.SetNext(nil)
+	linker.SetPrev(l.tail)
 	if l.tail != nil {
 		processGroupElementMapper{}.linkerFor(l.tail).SetNext(e)
 	} else {
@@ -91,17 +101,20 @@ func (l *processGroupList) PushBackList(m *processGroupList) {
 
 		l.tail = m.tail
 	}
-
 	m.head = nil
 	m.tail = nil
 }
 
 // InsertAfter inserts e after b.
 func (l *processGroupList) InsertAfter(b, e *ProcessGroup) {
-	a := processGroupElementMapper{}.linkerFor(b).Next()
-	processGroupElementMapper{}.linkerFor(e).SetNext(a)
-	processGroupElementMapper{}.linkerFor(e).SetPrev(b)
-	processGroupElementMapper{}.linkerFor(b).SetNext(e)
+	bLinker := processGroupElementMapper{}.linkerFor(b)
+	eLinker := processGroupElementMapper{}.linkerFor(e)
+
+	a := bLinker.Next()
+
+	eLinker.SetNext(a)
+	eLinker.SetPrev(b)
+	bLinker.SetNext(e)
 
 	if a != nil {
 		processGroupElementMapper{}.linkerFor(a).SetPrev(e)
@@ -112,10 +125,13 @@ func (l *processGroupList) InsertAfter(b, e *ProcessGroup) {
 
 // InsertBefore inserts e before a.
 func (l *processGroupList) InsertBefore(a, e *ProcessGroup) {
-	b := processGroupElementMapper{}.linkerFor(a).Prev()
-	processGroupElementMapper{}.linkerFor(e).SetNext(a)
-	processGroupElementMapper{}.linkerFor(e).SetPrev(b)
-	processGroupElementMapper{}.linkerFor(a).SetPrev(e)
+	aLinker := processGroupElementMapper{}.linkerFor(a)
+	eLinker := processGroupElementMapper{}.linkerFor(e)
+
+	b := aLinker.Prev()
+	eLinker.SetNext(a)
+	eLinker.SetPrev(b)
+	aLinker.SetPrev(e)
 
 	if b != nil {
 		processGroupElementMapper{}.linkerFor(b).SetNext(e)
@@ -126,8 +142,9 @@ func (l *processGroupList) InsertBefore(a, e *ProcessGroup) {
 
 // Remove removes e from l.
 func (l *processGroupList) Remove(e *ProcessGroup) {
-	prev := processGroupElementMapper{}.linkerFor(e).Prev()
-	next := processGroupElementMapper{}.linkerFor(e).Next()
+	linker := processGroupElementMapper{}.linkerFor(e)
+	prev := linker.Prev()
+	next := linker.Next()
 
 	if prev != nil {
 		processGroupElementMapper{}.linkerFor(prev).SetNext(next)
@@ -140,6 +157,9 @@ func (l *processGroupList) Remove(e *ProcessGroup) {
 	} else {
 		l.tail = prev
 	}
+
+	linker.SetNext(nil)
+	linker.SetPrev(nil)
 }
 
 // Entry is a default implementation of Linker. Users can add anonymous fields

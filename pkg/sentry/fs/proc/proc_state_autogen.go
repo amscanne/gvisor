@@ -181,6 +181,28 @@ func (x *netDev) load(m state.Map) {
 	m.Load("s", &x.s)
 }
 
+func (x *netSnmp) beforeSave() {}
+func (x *netSnmp) save(m state.Map) {
+	x.beforeSave()
+	m.Save("s", &x.s)
+}
+
+func (x *netSnmp) afterLoad() {}
+func (x *netSnmp) load(m state.Map) {
+	m.Load("s", &x.s)
+}
+
+func (x *netRoute) beforeSave() {}
+func (x *netRoute) save(m state.Map) {
+	x.beforeSave()
+	m.Save("s", &x.s)
+}
+
+func (x *netRoute) afterLoad() {}
+func (x *netRoute) load(m state.Map) {
+	m.Load("s", &x.s)
+}
+
 func (x *netUnix) beforeSave() {}
 func (x *netUnix) save(m state.Map) {
 	x.beforeSave()
@@ -189,6 +211,39 @@ func (x *netUnix) save(m state.Map) {
 
 func (x *netUnix) afterLoad() {}
 func (x *netUnix) load(m state.Map) {
+	m.Load("k", &x.k)
+}
+
+func (x *netTCP) beforeSave() {}
+func (x *netTCP) save(m state.Map) {
+	x.beforeSave()
+	m.Save("k", &x.k)
+}
+
+func (x *netTCP) afterLoad() {}
+func (x *netTCP) load(m state.Map) {
+	m.Load("k", &x.k)
+}
+
+func (x *netTCP6) beforeSave() {}
+func (x *netTCP6) save(m state.Map) {
+	x.beforeSave()
+	m.Save("k", &x.k)
+}
+
+func (x *netTCP6) afterLoad() {}
+func (x *netTCP6) load(m state.Map) {
+	m.Load("k", &x.k)
+}
+
+func (x *netUDP) beforeSave() {}
+func (x *netUDP) save(m state.Map) {
+	x.beforeSave()
+	m.Save("k", &x.k)
+}
+
+func (x *netUDP) afterLoad() {}
+func (x *netUDP) load(m state.Map) {
 	m.Load("k", &x.k)
 }
 
@@ -327,15 +382,15 @@ func (x *tcpMemFile) load(m state.Map) {
 func (x *tcpSack) beforeSave() {}
 func (x *tcpSack) save(m state.Map) {
 	x.beforeSave()
+	m.Save("SimpleFileInode", &x.SimpleFileInode)
 	m.Save("stack", &x.stack)
 	m.Save("enabled", &x.enabled)
-	m.Save("SimpleFileInode", &x.SimpleFileInode)
 }
 
 func (x *tcpSack) load(m state.Map) {
+	m.Load("SimpleFileInode", &x.SimpleFileInode)
 	m.LoadWait("stack", &x.stack)
 	m.Load("enabled", &x.enabled)
-	m.Load("SimpleFileInode", &x.SimpleFileInode)
 	m.AfterLoad(x.afterLoad)
 }
 
@@ -357,14 +412,12 @@ func (x *taskDir) save(m state.Map) {
 	x.beforeSave()
 	m.Save("Dir", &x.Dir)
 	m.Save("t", &x.t)
-	m.Save("pidns", &x.pidns)
 }
 
 func (x *taskDir) afterLoad() {}
 func (x *taskDir) load(m state.Map) {
 	m.Load("Dir", &x.Dir)
 	m.Load("t", &x.t)
-	m.Load("pidns", &x.pidns)
 }
 
 func (x *subtasks) beforeSave() {}
@@ -541,6 +594,30 @@ func (x *auxvecFile) load(m state.Map) {
 	m.Load("t", &x.t)
 }
 
+func (x *oomScoreAdj) beforeSave() {}
+func (x *oomScoreAdj) save(m state.Map) {
+	x.beforeSave()
+	m.Save("SimpleFileInode", &x.SimpleFileInode)
+	m.Save("t", &x.t)
+}
+
+func (x *oomScoreAdj) afterLoad() {}
+func (x *oomScoreAdj) load(m state.Map) {
+	m.Load("SimpleFileInode", &x.SimpleFileInode)
+	m.Load("t", &x.t)
+}
+
+func (x *oomScoreAdjFile) beforeSave() {}
+func (x *oomScoreAdjFile) save(m state.Map) {
+	x.beforeSave()
+	m.Save("t", &x.t)
+}
+
+func (x *oomScoreAdjFile) afterLoad() {}
+func (x *oomScoreAdjFile) load(m state.Map) {
+	m.Load("t", &x.t)
+}
+
 func (x *idMapInodeOperations) beforeSave() {}
 func (x *idMapInodeOperations) save(m state.Map) {
 	x.beforeSave()
@@ -605,53 +682,60 @@ func (x *versionData) load(m state.Map) {
 }
 
 func init() {
-	state.Register("proc.execArgInode", (*execArgInode)(nil), state.Fns{Save: (*execArgInode).save, Load: (*execArgInode).load})
-	state.Register("proc.execArgFile", (*execArgFile)(nil), state.Fns{Save: (*execArgFile).save, Load: (*execArgFile).load})
-	state.Register("proc.fdDir", (*fdDir)(nil), state.Fns{Save: (*fdDir).save, Load: (*fdDir).load})
-	state.Register("proc.fdDirFile", (*fdDirFile)(nil), state.Fns{Save: (*fdDirFile).save, Load: (*fdDirFile).load})
-	state.Register("proc.fdInfoDir", (*fdInfoDir)(nil), state.Fns{Save: (*fdInfoDir).save, Load: (*fdInfoDir).load})
-	state.Register("proc.filesystemsData", (*filesystemsData)(nil), state.Fns{Save: (*filesystemsData).save, Load: (*filesystemsData).load})
-	state.Register("proc.filesystem", (*filesystem)(nil), state.Fns{Save: (*filesystem).save, Load: (*filesystem).load})
-	state.Register("proc.taskOwnedInodeOps", (*taskOwnedInodeOps)(nil), state.Fns{Save: (*taskOwnedInodeOps).save, Load: (*taskOwnedInodeOps).load})
-	state.Register("proc.staticFileInodeOps", (*staticFileInodeOps)(nil), state.Fns{Save: (*staticFileInodeOps).save, Load: (*staticFileInodeOps).load})
-	state.Register("proc.loadavgData", (*loadavgData)(nil), state.Fns{Save: (*loadavgData).save, Load: (*loadavgData).load})
-	state.Register("proc.meminfoData", (*meminfoData)(nil), state.Fns{Save: (*meminfoData).save, Load: (*meminfoData).load})
-	state.Register("proc.mountInfoFile", (*mountInfoFile)(nil), state.Fns{Save: (*mountInfoFile).save, Load: (*mountInfoFile).load})
-	state.Register("proc.mountsFile", (*mountsFile)(nil), state.Fns{Save: (*mountsFile).save, Load: (*mountsFile).load})
-	state.Register("proc.ifinet6", (*ifinet6)(nil), state.Fns{Save: (*ifinet6).save, Load: (*ifinet6).load})
-	state.Register("proc.netDev", (*netDev)(nil), state.Fns{Save: (*netDev).save, Load: (*netDev).load})
-	state.Register("proc.netUnix", (*netUnix)(nil), state.Fns{Save: (*netUnix).save, Load: (*netUnix).load})
-	state.Register("proc.proc", (*proc)(nil), state.Fns{Save: (*proc).save, Load: (*proc).load})
-	state.Register("proc.self", (*self)(nil), state.Fns{Save: (*self).save, Load: (*self).load})
-	state.Register("proc.threadSelf", (*threadSelf)(nil), state.Fns{Save: (*threadSelf).save, Load: (*threadSelf).load})
-	state.Register("proc.rootProcFile", (*rootProcFile)(nil), state.Fns{Save: (*rootProcFile).save, Load: (*rootProcFile).load})
-	state.Register("proc.statData", (*statData)(nil), state.Fns{Save: (*statData).save, Load: (*statData).load})
-	state.Register("proc.mmapMinAddrData", (*mmapMinAddrData)(nil), state.Fns{Save: (*mmapMinAddrData).save, Load: (*mmapMinAddrData).load})
-	state.Register("proc.overcommitMemory", (*overcommitMemory)(nil), state.Fns{Save: (*overcommitMemory).save, Load: (*overcommitMemory).load})
-	state.Register("proc.hostname", (*hostname)(nil), state.Fns{Save: (*hostname).save, Load: (*hostname).load})
-	state.Register("proc.hostnameFile", (*hostnameFile)(nil), state.Fns{Save: (*hostnameFile).save, Load: (*hostnameFile).load})
-	state.Register("proc.tcpMemInode", (*tcpMemInode)(nil), state.Fns{Save: (*tcpMemInode).save, Load: (*tcpMemInode).load})
-	state.Register("proc.tcpMemFile", (*tcpMemFile)(nil), state.Fns{Save: (*tcpMemFile).save, Load: (*tcpMemFile).load})
-	state.Register("proc.tcpSack", (*tcpSack)(nil), state.Fns{Save: (*tcpSack).save, Load: (*tcpSack).load})
-	state.Register("proc.tcpSackFile", (*tcpSackFile)(nil), state.Fns{Save: (*tcpSackFile).save, Load: (*tcpSackFile).load})
-	state.Register("proc.taskDir", (*taskDir)(nil), state.Fns{Save: (*taskDir).save, Load: (*taskDir).load})
-	state.Register("proc.subtasks", (*subtasks)(nil), state.Fns{Save: (*subtasks).save, Load: (*subtasks).load})
-	state.Register("proc.subtasksFile", (*subtasksFile)(nil), state.Fns{Save: (*subtasksFile).save, Load: (*subtasksFile).load})
-	state.Register("proc.exe", (*exe)(nil), state.Fns{Save: (*exe).save, Load: (*exe).load})
-	state.Register("proc.namespaceSymlink", (*namespaceSymlink)(nil), state.Fns{Save: (*namespaceSymlink).save, Load: (*namespaceSymlink).load})
-	state.Register("proc.mapsData", (*mapsData)(nil), state.Fns{Save: (*mapsData).save, Load: (*mapsData).load})
-	state.Register("proc.smapsData", (*smapsData)(nil), state.Fns{Save: (*smapsData).save, Load: (*smapsData).load})
-	state.Register("proc.taskStatData", (*taskStatData)(nil), state.Fns{Save: (*taskStatData).save, Load: (*taskStatData).load})
-	state.Register("proc.statmData", (*statmData)(nil), state.Fns{Save: (*statmData).save, Load: (*statmData).load})
-	state.Register("proc.statusData", (*statusData)(nil), state.Fns{Save: (*statusData).save, Load: (*statusData).load})
-	state.Register("proc.ioData", (*ioData)(nil), state.Fns{Save: (*ioData).save, Load: (*ioData).load})
-	state.Register("proc.comm", (*comm)(nil), state.Fns{Save: (*comm).save, Load: (*comm).load})
-	state.Register("proc.commFile", (*commFile)(nil), state.Fns{Save: (*commFile).save, Load: (*commFile).load})
-	state.Register("proc.auxvec", (*auxvec)(nil), state.Fns{Save: (*auxvec).save, Load: (*auxvec).load})
-	state.Register("proc.auxvecFile", (*auxvecFile)(nil), state.Fns{Save: (*auxvecFile).save, Load: (*auxvecFile).load})
-	state.Register("proc.idMapInodeOperations", (*idMapInodeOperations)(nil), state.Fns{Save: (*idMapInodeOperations).save, Load: (*idMapInodeOperations).load})
-	state.Register("proc.idMapFileOperations", (*idMapFileOperations)(nil), state.Fns{Save: (*idMapFileOperations).save, Load: (*idMapFileOperations).load})
-	state.Register("proc.uptime", (*uptime)(nil), state.Fns{Save: (*uptime).save, Load: (*uptime).load})
-	state.Register("proc.uptimeFile", (*uptimeFile)(nil), state.Fns{Save: (*uptimeFile).save, Load: (*uptimeFile).load})
-	state.Register("proc.versionData", (*versionData)(nil), state.Fns{Save: (*versionData).save, Load: (*versionData).load})
+	state.Register("pkg/sentry/fs/proc.execArgInode", (*execArgInode)(nil), state.Fns{Save: (*execArgInode).save, Load: (*execArgInode).load})
+	state.Register("pkg/sentry/fs/proc.execArgFile", (*execArgFile)(nil), state.Fns{Save: (*execArgFile).save, Load: (*execArgFile).load})
+	state.Register("pkg/sentry/fs/proc.fdDir", (*fdDir)(nil), state.Fns{Save: (*fdDir).save, Load: (*fdDir).load})
+	state.Register("pkg/sentry/fs/proc.fdDirFile", (*fdDirFile)(nil), state.Fns{Save: (*fdDirFile).save, Load: (*fdDirFile).load})
+	state.Register("pkg/sentry/fs/proc.fdInfoDir", (*fdInfoDir)(nil), state.Fns{Save: (*fdInfoDir).save, Load: (*fdInfoDir).load})
+	state.Register("pkg/sentry/fs/proc.filesystemsData", (*filesystemsData)(nil), state.Fns{Save: (*filesystemsData).save, Load: (*filesystemsData).load})
+	state.Register("pkg/sentry/fs/proc.filesystem", (*filesystem)(nil), state.Fns{Save: (*filesystem).save, Load: (*filesystem).load})
+	state.Register("pkg/sentry/fs/proc.taskOwnedInodeOps", (*taskOwnedInodeOps)(nil), state.Fns{Save: (*taskOwnedInodeOps).save, Load: (*taskOwnedInodeOps).load})
+	state.Register("pkg/sentry/fs/proc.staticFileInodeOps", (*staticFileInodeOps)(nil), state.Fns{Save: (*staticFileInodeOps).save, Load: (*staticFileInodeOps).load})
+	state.Register("pkg/sentry/fs/proc.loadavgData", (*loadavgData)(nil), state.Fns{Save: (*loadavgData).save, Load: (*loadavgData).load})
+	state.Register("pkg/sentry/fs/proc.meminfoData", (*meminfoData)(nil), state.Fns{Save: (*meminfoData).save, Load: (*meminfoData).load})
+	state.Register("pkg/sentry/fs/proc.mountInfoFile", (*mountInfoFile)(nil), state.Fns{Save: (*mountInfoFile).save, Load: (*mountInfoFile).load})
+	state.Register("pkg/sentry/fs/proc.mountsFile", (*mountsFile)(nil), state.Fns{Save: (*mountsFile).save, Load: (*mountsFile).load})
+	state.Register("pkg/sentry/fs/proc.ifinet6", (*ifinet6)(nil), state.Fns{Save: (*ifinet6).save, Load: (*ifinet6).load})
+	state.Register("pkg/sentry/fs/proc.netDev", (*netDev)(nil), state.Fns{Save: (*netDev).save, Load: (*netDev).load})
+	state.Register("pkg/sentry/fs/proc.netSnmp", (*netSnmp)(nil), state.Fns{Save: (*netSnmp).save, Load: (*netSnmp).load})
+	state.Register("pkg/sentry/fs/proc.netRoute", (*netRoute)(nil), state.Fns{Save: (*netRoute).save, Load: (*netRoute).load})
+	state.Register("pkg/sentry/fs/proc.netUnix", (*netUnix)(nil), state.Fns{Save: (*netUnix).save, Load: (*netUnix).load})
+	state.Register("pkg/sentry/fs/proc.netTCP", (*netTCP)(nil), state.Fns{Save: (*netTCP).save, Load: (*netTCP).load})
+	state.Register("pkg/sentry/fs/proc.netTCP6", (*netTCP6)(nil), state.Fns{Save: (*netTCP6).save, Load: (*netTCP6).load})
+	state.Register("pkg/sentry/fs/proc.netUDP", (*netUDP)(nil), state.Fns{Save: (*netUDP).save, Load: (*netUDP).load})
+	state.Register("pkg/sentry/fs/proc.proc", (*proc)(nil), state.Fns{Save: (*proc).save, Load: (*proc).load})
+	state.Register("pkg/sentry/fs/proc.self", (*self)(nil), state.Fns{Save: (*self).save, Load: (*self).load})
+	state.Register("pkg/sentry/fs/proc.threadSelf", (*threadSelf)(nil), state.Fns{Save: (*threadSelf).save, Load: (*threadSelf).load})
+	state.Register("pkg/sentry/fs/proc.rootProcFile", (*rootProcFile)(nil), state.Fns{Save: (*rootProcFile).save, Load: (*rootProcFile).load})
+	state.Register("pkg/sentry/fs/proc.statData", (*statData)(nil), state.Fns{Save: (*statData).save, Load: (*statData).load})
+	state.Register("pkg/sentry/fs/proc.mmapMinAddrData", (*mmapMinAddrData)(nil), state.Fns{Save: (*mmapMinAddrData).save, Load: (*mmapMinAddrData).load})
+	state.Register("pkg/sentry/fs/proc.overcommitMemory", (*overcommitMemory)(nil), state.Fns{Save: (*overcommitMemory).save, Load: (*overcommitMemory).load})
+	state.Register("pkg/sentry/fs/proc.hostname", (*hostname)(nil), state.Fns{Save: (*hostname).save, Load: (*hostname).load})
+	state.Register("pkg/sentry/fs/proc.hostnameFile", (*hostnameFile)(nil), state.Fns{Save: (*hostnameFile).save, Load: (*hostnameFile).load})
+	state.Register("pkg/sentry/fs/proc.tcpMemInode", (*tcpMemInode)(nil), state.Fns{Save: (*tcpMemInode).save, Load: (*tcpMemInode).load})
+	state.Register("pkg/sentry/fs/proc.tcpMemFile", (*tcpMemFile)(nil), state.Fns{Save: (*tcpMemFile).save, Load: (*tcpMemFile).load})
+	state.Register("pkg/sentry/fs/proc.tcpSack", (*tcpSack)(nil), state.Fns{Save: (*tcpSack).save, Load: (*tcpSack).load})
+	state.Register("pkg/sentry/fs/proc.tcpSackFile", (*tcpSackFile)(nil), state.Fns{Save: (*tcpSackFile).save, Load: (*tcpSackFile).load})
+	state.Register("pkg/sentry/fs/proc.taskDir", (*taskDir)(nil), state.Fns{Save: (*taskDir).save, Load: (*taskDir).load})
+	state.Register("pkg/sentry/fs/proc.subtasks", (*subtasks)(nil), state.Fns{Save: (*subtasks).save, Load: (*subtasks).load})
+	state.Register("pkg/sentry/fs/proc.subtasksFile", (*subtasksFile)(nil), state.Fns{Save: (*subtasksFile).save, Load: (*subtasksFile).load})
+	state.Register("pkg/sentry/fs/proc.exe", (*exe)(nil), state.Fns{Save: (*exe).save, Load: (*exe).load})
+	state.Register("pkg/sentry/fs/proc.namespaceSymlink", (*namespaceSymlink)(nil), state.Fns{Save: (*namespaceSymlink).save, Load: (*namespaceSymlink).load})
+	state.Register("pkg/sentry/fs/proc.mapsData", (*mapsData)(nil), state.Fns{Save: (*mapsData).save, Load: (*mapsData).load})
+	state.Register("pkg/sentry/fs/proc.smapsData", (*smapsData)(nil), state.Fns{Save: (*smapsData).save, Load: (*smapsData).load})
+	state.Register("pkg/sentry/fs/proc.taskStatData", (*taskStatData)(nil), state.Fns{Save: (*taskStatData).save, Load: (*taskStatData).load})
+	state.Register("pkg/sentry/fs/proc.statmData", (*statmData)(nil), state.Fns{Save: (*statmData).save, Load: (*statmData).load})
+	state.Register("pkg/sentry/fs/proc.statusData", (*statusData)(nil), state.Fns{Save: (*statusData).save, Load: (*statusData).load})
+	state.Register("pkg/sentry/fs/proc.ioData", (*ioData)(nil), state.Fns{Save: (*ioData).save, Load: (*ioData).load})
+	state.Register("pkg/sentry/fs/proc.comm", (*comm)(nil), state.Fns{Save: (*comm).save, Load: (*comm).load})
+	state.Register("pkg/sentry/fs/proc.commFile", (*commFile)(nil), state.Fns{Save: (*commFile).save, Load: (*commFile).load})
+	state.Register("pkg/sentry/fs/proc.auxvec", (*auxvec)(nil), state.Fns{Save: (*auxvec).save, Load: (*auxvec).load})
+	state.Register("pkg/sentry/fs/proc.auxvecFile", (*auxvecFile)(nil), state.Fns{Save: (*auxvecFile).save, Load: (*auxvecFile).load})
+	state.Register("pkg/sentry/fs/proc.oomScoreAdj", (*oomScoreAdj)(nil), state.Fns{Save: (*oomScoreAdj).save, Load: (*oomScoreAdj).load})
+	state.Register("pkg/sentry/fs/proc.oomScoreAdjFile", (*oomScoreAdjFile)(nil), state.Fns{Save: (*oomScoreAdjFile).save, Load: (*oomScoreAdjFile).load})
+	state.Register("pkg/sentry/fs/proc.idMapInodeOperations", (*idMapInodeOperations)(nil), state.Fns{Save: (*idMapInodeOperations).save, Load: (*idMapInodeOperations).load})
+	state.Register("pkg/sentry/fs/proc.idMapFileOperations", (*idMapFileOperations)(nil), state.Fns{Save: (*idMapFileOperations).save, Load: (*idMapFileOperations).load})
+	state.Register("pkg/sentry/fs/proc.uptime", (*uptime)(nil), state.Fns{Save: (*uptime).save, Load: (*uptime).load})
+	state.Register("pkg/sentry/fs/proc.uptimeFile", (*uptimeFile)(nil), state.Fns{Save: (*uptimeFile).save, Load: (*uptimeFile).load})
+	state.Register("pkg/sentry/fs/proc.versionData", (*versionData)(nil), state.Fns{Save: (*versionData).save, Load: (*versionData).load})
 }

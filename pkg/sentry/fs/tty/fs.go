@@ -15,7 +15,7 @@
 package tty
 
 import (
-	"gvisor.dev/gvisor/pkg/sentry/context"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/sentry/device"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/syserror"
@@ -67,7 +67,7 @@ func (f *filesystem) Mount(ctx context.Context, device string, flags fs.MountSou
 		return nil, syserror.EINVAL
 	}
 
-	return newDir(ctx, fs.NewMountSource(&superOperations{}, f, flags)), nil
+	return newDir(ctx, fs.NewMountSource(ctx, &superOperations{}, f, flags)), nil
 }
 
 // superOperations implements fs.MountSourceOperations, preventing caching.
@@ -91,6 +91,13 @@ func (superOperations) Revalidate(context.Context, string, *fs.Inode, *fs.Inode)
 // Keep returns false because Revalidate would force a lookup on cached entries
 // anyways.
 func (superOperations) Keep(*fs.Dirent) bool {
+	return false
+}
+
+// CacheReaddir implements fs.DirentOperations.CacheReaddir.
+//
+// CacheReaddir returns false because entries change on master operations.
+func (superOperations) CacheReaddir() bool {
 	return false
 }
 

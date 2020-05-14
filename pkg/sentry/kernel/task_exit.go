@@ -236,6 +236,7 @@ func (*runExit) execute(t *Task) taskRunState {
 type runExitMain struct{}
 
 func (*runExitMain) execute(t *Task) taskRunState {
+	t.traceExitEvent()
 	lastExiter := t.exitThreadGroup()
 
 	// If the task has a cleartid, and the thread group wasn't killed by a
@@ -265,8 +266,15 @@ func (*runExitMain) execute(t *Task) taskRunState {
 	// Releasing the MM unblocks a blocked CLONE_VFORK parent.
 	t.unstopVforkParent()
 
-	t.fsc.DecRef()
-	t.fds.DecRef()
+	t.fsContext.DecRef()
+	t.fdTable.DecRef()
+
+	t.mu.Lock()
+	if t.mountNamespaceVFS2 != nil {
+		t.mountNamespaceVFS2.DecRef()
+		t.mountNamespaceVFS2 = nil
+	}
+	t.mu.Unlock()
 
 	// If this is the last task to exit from the thread group, release the
 	// thread group's resources.

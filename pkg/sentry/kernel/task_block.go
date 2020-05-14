@@ -15,6 +15,8 @@
 package kernel
 
 import (
+	"runtime"
+	"runtime/trace"
 	"time"
 
 	ktime "gvisor.dev/gvisor/pkg/sentry/kernel/time"
@@ -121,19 +123,35 @@ func (t *Task) block(C <-chan struct{}, timerChan <-chan struct{}) error {
 	// Deactive our address space, we don't need it.
 	interrupt := t.SleepStart()
 
+	// If the request is not completed, but the timer has already expired,
+	// then ensure that we run through a scheduler cycle. This is because
+	// we may see applications relying on timer slack to yield the thread.
+	// For example, they may attempt to sleep for some number of nanoseconds,
+	// and expect that this will actually yield the CPU and sleep for at
+	// least microseconds, e.g.:
+	// https://github.com/LMAX-Exchange/disruptor/commit/6ca210f2bcd23f703c479804d583718e16f43c07
+	if len(timerChan) > 0 {
+		runtime.Gosched()
+	}
+
+	region := trace.StartRegion(t.traceContext, blockRegion)
 	select {
 	case <-C:
+		region.End()
 		t.SleepFinish(true)
+		// Woken by event.
 		return nil
 
 	case <-interrupt:
+		region.End()
 		t.SleepFinish(false)
 		// Return the indicated error on interrupt.
 		return syserror.ErrInterrupted
 
 	case <-timerChan:
-		// We've timed out.
+		region.End()
 		t.SleepFinish(true)
+		// We've timed out.
 		return syserror.ETIMEDOUT
 	}
 }

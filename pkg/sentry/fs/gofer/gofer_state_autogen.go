@@ -6,6 +6,19 @@ import (
 	"gvisor.dev/gvisor/pkg/state"
 )
 
+func (x *fifo) beforeSave() {}
+func (x *fifo) save(m state.Map) {
+	x.beforeSave()
+	m.Save("InodeOperations", &x.InodeOperations)
+	m.Save("fileIops", &x.fileIops)
+}
+
+func (x *fifo) afterLoad() {}
+func (x *fifo) load(m state.Map) {
+	m.Load("InodeOperations", &x.InodeOperations)
+	m.Load("fileIops", &x.fileIops)
+}
+
 func (x *fileOperations) beforeSave() {}
 func (x *fileOperations) save(m state.Map) {
 	x.beforeSave()
@@ -62,16 +75,29 @@ func (x *inodeFileState) load(m state.Map) {
 	m.AfterLoad(x.afterLoad)
 }
 
-func (x *endpointMaps) beforeSave() {}
-func (x *endpointMaps) save(m state.Map) {
+func (x *overrideInfo) beforeSave() {}
+func (x *overrideInfo) save(m state.Map) {
 	x.beforeSave()
-	m.Save("direntMap", &x.direntMap)
+	m.Save("dirent", &x.dirent)
+	m.Save("endpoint", &x.endpoint)
+	m.Save("inode", &x.inode)
+}
+
+func (x *overrideInfo) afterLoad() {}
+func (x *overrideInfo) load(m state.Map) {
+	m.Load("dirent", &x.dirent)
+	m.Load("endpoint", &x.endpoint)
+	m.Load("inode", &x.inode)
+}
+
+func (x *overrideMaps) beforeSave() {}
+func (x *overrideMaps) save(m state.Map) {
+	x.beforeSave()
 	m.Save("pathMap", &x.pathMap)
 }
 
-func (x *endpointMaps) afterLoad() {}
-func (x *endpointMaps) load(m state.Map) {
-	m.Load("direntMap", &x.direntMap)
+func (x *overrideMaps) afterLoad() {}
+func (x *overrideMaps) load(m state.Map) {
 	m.Load("pathMap", &x.pathMap)
 }
 
@@ -83,10 +109,12 @@ func (x *session) save(m state.Map) {
 	m.Save("cachePolicy", &x.cachePolicy)
 	m.Save("aname", &x.aname)
 	m.Save("superBlockFlags", &x.superBlockFlags)
+	m.Save("limitHostFDTranslation", &x.limitHostFDTranslation)
+	m.Save("overlayfsStaleRead", &x.overlayfsStaleRead)
 	m.Save("connID", &x.connID)
 	m.Save("inodeMappings", &x.inodeMappings)
 	m.Save("mounter", &x.mounter)
-	m.Save("endpoints", &x.endpoints)
+	m.Save("overrides", &x.overrides)
 }
 
 func (x *session) load(m state.Map) {
@@ -96,18 +124,22 @@ func (x *session) load(m state.Map) {
 	m.LoadWait("cachePolicy", &x.cachePolicy)
 	m.LoadWait("aname", &x.aname)
 	m.LoadWait("superBlockFlags", &x.superBlockFlags)
+	m.Load("limitHostFDTranslation", &x.limitHostFDTranslation)
+	m.Load("overlayfsStaleRead", &x.overlayfsStaleRead)
 	m.LoadWait("connID", &x.connID)
 	m.LoadWait("inodeMappings", &x.inodeMappings)
 	m.LoadWait("mounter", &x.mounter)
-	m.LoadWait("endpoints", &x.endpoints)
+	m.LoadWait("overrides", &x.overrides)
 	m.AfterLoad(x.afterLoad)
 }
 
 func init() {
-	state.Register("gofer.fileOperations", (*fileOperations)(nil), state.Fns{Save: (*fileOperations).save, Load: (*fileOperations).load})
-	state.Register("gofer.filesystem", (*filesystem)(nil), state.Fns{Save: (*filesystem).save, Load: (*filesystem).load})
-	state.Register("gofer.inodeOperations", (*inodeOperations)(nil), state.Fns{Save: (*inodeOperations).save, Load: (*inodeOperations).load})
-	state.Register("gofer.inodeFileState", (*inodeFileState)(nil), state.Fns{Save: (*inodeFileState).save, Load: (*inodeFileState).load})
-	state.Register("gofer.endpointMaps", (*endpointMaps)(nil), state.Fns{Save: (*endpointMaps).save, Load: (*endpointMaps).load})
-	state.Register("gofer.session", (*session)(nil), state.Fns{Save: (*session).save, Load: (*session).load})
+	state.Register("pkg/sentry/fs/gofer.fifo", (*fifo)(nil), state.Fns{Save: (*fifo).save, Load: (*fifo).load})
+	state.Register("pkg/sentry/fs/gofer.fileOperations", (*fileOperations)(nil), state.Fns{Save: (*fileOperations).save, Load: (*fileOperations).load})
+	state.Register("pkg/sentry/fs/gofer.filesystem", (*filesystem)(nil), state.Fns{Save: (*filesystem).save, Load: (*filesystem).load})
+	state.Register("pkg/sentry/fs/gofer.inodeOperations", (*inodeOperations)(nil), state.Fns{Save: (*inodeOperations).save, Load: (*inodeOperations).load})
+	state.Register("pkg/sentry/fs/gofer.inodeFileState", (*inodeFileState)(nil), state.Fns{Save: (*inodeFileState).save, Load: (*inodeFileState).load})
+	state.Register("pkg/sentry/fs/gofer.overrideInfo", (*overrideInfo)(nil), state.Fns{Save: (*overrideInfo).save, Load: (*overrideInfo).load})
+	state.Register("pkg/sentry/fs/gofer.overrideMaps", (*overrideMaps)(nil), state.Fns{Save: (*overrideMaps).save, Load: (*overrideMaps).load})
+	state.Register("pkg/sentry/fs/gofer.session", (*session)(nil), state.Fns{Save: (*session).save, Load: (*session).load})
 }

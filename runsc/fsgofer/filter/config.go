@@ -25,11 +25,7 @@ import (
 
 // allowedSyscalls is the set of syscalls executed by the gofer.
 var allowedSyscalls = seccomp.SyscallRules{
-	syscall.SYS_ACCEPT: {},
-	syscall.SYS_ARCH_PRCTL: []seccomp.Rule{
-		{seccomp.AllowValue(linux.ARCH_GET_FS)},
-		{seccomp.AllowValue(linux.ARCH_SET_FS)},
-	},
+	syscall.SYS_ACCEPT:        {},
 	syscall.SYS_CLOCK_GETTIME: {},
 	syscall.SYS_CLONE: []seccomp.Rule{
 		{
@@ -83,6 +79,11 @@ var allowedSyscalls = seccomp.SyscallRules{
 			seccomp.AllowAny{},
 			seccomp.AllowValue(syscall.F_GETFD),
 		},
+		// Used by flipcall.PacketWindowAllocator.Init().
+		{
+			seccomp.AllowAny{},
+			seccomp.AllowValue(unix.F_ADD_SEALS),
+		},
 	},
 	syscall.SYS_FSTAT:     {},
 	syscall.SYS_FSTATFS:   {},
@@ -103,6 +104,19 @@ var allowedSyscalls = seccomp.SyscallRules{
 			seccomp.AllowAny{},
 			seccomp.AllowValue(0),
 		},
+		// Non-private futex used for flipcall.
+		seccomp.Rule{
+			seccomp.AllowAny{},
+			seccomp.AllowValue(linux.FUTEX_WAIT),
+			seccomp.AllowAny{},
+			seccomp.AllowAny{},
+		},
+		seccomp.Rule{
+			seccomp.AllowAny{},
+			seccomp.AllowValue(linux.FUTEX_WAKE),
+			seccomp.AllowAny{},
+			seccomp.AllowAny{},
+		},
 	},
 	syscall.SYS_GETDENTS64:   {},
 	syscall.SYS_GETPID:       {},
@@ -112,7 +126,20 @@ var allowedSyscalls = seccomp.SyscallRules{
 	syscall.SYS_LINKAT:       {},
 	syscall.SYS_LSEEK:        {},
 	syscall.SYS_MADVISE:      {},
+	unix.SYS_MEMFD_CREATE:    {}, /// Used by flipcall.PacketWindowAllocator.Init().
 	syscall.SYS_MKDIRAT:      {},
+	// Used by the Go runtime as a temporarily workaround for a Linux
+	// 5.2-5.4 bug.
+	//
+	// See src/runtime/os_linux_x86.go.
+	//
+	// TODO(b/148688965): Remove once this is gone from Go.
+	syscall.SYS_MLOCK: []seccomp.Rule{
+		{
+			seccomp.AllowAny{},
+			seccomp.AllowValue(4096),
+		},
+	},
 	syscall.SYS_MMAP: []seccomp.Rule{
 		{
 			seccomp.AllowAny{},
@@ -136,9 +163,8 @@ var allowedSyscalls = seccomp.SyscallRules{
 	syscall.SYS_MPROTECT:   {},
 	syscall.SYS_MUNMAP:     {},
 	syscall.SYS_NANOSLEEP:  {},
-	syscall.SYS_NEWFSTATAT: {},
 	syscall.SYS_OPENAT:     {},
-	syscall.SYS_POLL:       {},
+	syscall.SYS_PPOLL:      {},
 	syscall.SYS_PREAD64:    {},
 	syscall.SYS_PWRITE64:   {},
 	syscall.SYS_READ:       {},
@@ -158,8 +184,16 @@ var allowedSyscalls = seccomp.SyscallRules{
 	syscall.SYS_RENAMEAT:        {},
 	syscall.SYS_RESTART_SYSCALL: {},
 	syscall.SYS_RT_SIGPROCMASK:  {},
+	syscall.SYS_RT_SIGRETURN:    {},
 	syscall.SYS_SCHED_YIELD:     {},
 	syscall.SYS_SENDMSG: []seccomp.Rule{
+		// Used by fdchannel.Endpoint.SendFD().
+		{
+			seccomp.AllowAny{},
+			seccomp.AllowAny{},
+			seccomp.AllowValue(0),
+		},
+		// Used by unet.SocketWriter.WriteVec().
 		{
 			seccomp.AllowAny{},
 			seccomp.AllowAny{},
@@ -170,7 +204,15 @@ var allowedSyscalls = seccomp.SyscallRules{
 		{seccomp.AllowAny{}, seccomp.AllowValue(syscall.SHUT_RDWR)},
 	},
 	syscall.SYS_SIGALTSTACK: {},
-	syscall.SYS_SYMLINKAT:   {},
+	// Used by fdchannel.NewConnectedSockets().
+	syscall.SYS_SOCKETPAIR: {
+		{
+			seccomp.AllowValue(syscall.AF_UNIX),
+			seccomp.AllowValue(syscall.SOCK_SEQPACKET | syscall.SOCK_CLOEXEC),
+			seccomp.AllowValue(0),
+		},
+	},
+	syscall.SYS_SYMLINKAT: {},
 	syscall.SYS_TGKILL: []seccomp.Rule{
 		{
 			seccomp.AllowValue(uint64(os.Getpid())),
@@ -179,4 +221,29 @@ var allowedSyscalls = seccomp.SyscallRules{
 	syscall.SYS_UNLINKAT:  {},
 	syscall.SYS_UTIMENSAT: {},
 	syscall.SYS_WRITE:     {},
+}
+
+var udsSyscalls = seccomp.SyscallRules{
+	syscall.SYS_SOCKET: []seccomp.Rule{
+		{
+			seccomp.AllowValue(syscall.AF_UNIX),
+			seccomp.AllowValue(syscall.SOCK_STREAM),
+			seccomp.AllowValue(0),
+		},
+		{
+			seccomp.AllowValue(syscall.AF_UNIX),
+			seccomp.AllowValue(syscall.SOCK_DGRAM),
+			seccomp.AllowValue(0),
+		},
+		{
+			seccomp.AllowValue(syscall.AF_UNIX),
+			seccomp.AllowValue(syscall.SOCK_SEQPACKET),
+			seccomp.AllowValue(0),
+		},
+	},
+	syscall.SYS_CONNECT: []seccomp.Rule{
+		{
+			seccomp.AllowAny{},
+		},
+	},
 }

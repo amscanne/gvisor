@@ -21,13 +21,14 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
-	"gvisor.dev/gvisor/pkg/sentry/kernel/kdefs"
 	ktime "gvisor.dev/gvisor/pkg/sentry/kernel/time"
 	"gvisor.dev/gvisor/pkg/sentry/socket"
-	"gvisor.dev/gvisor/pkg/sentry/usermem"
 	"gvisor.dev/gvisor/pkg/syserror"
+	"gvisor.dev/gvisor/pkg/usermem"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
+
+// LINT.IfChange
 
 const (
 	// EventMaskWrite contains events that can be triggered on writes.
@@ -39,11 +40,11 @@ const (
 
 // Write implements linux syscall write(2).
 func Write(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
-	fd := kdefs.FD(args[0].Int())
+	fd := args[0].Int()
 	addr := args[1].Pointer()
 	size := args[2].SizeT()
 
-	file := t.FDMap().GetFile(fd)
+	file := t.GetFile(fd)
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
@@ -75,19 +76,19 @@ func Write(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 
 // Pwrite64 implements linux syscall pwrite64(2).
 func Pwrite64(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
-	fd := kdefs.FD(args[0].Int())
+	fd := args[0].Int()
 	addr := args[1].Pointer()
 	size := args[2].SizeT()
 	offset := args[3].Int64()
 
-	file := t.FDMap().GetFile(fd)
+	file := t.GetFile(fd)
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
 	defer file.DecRef()
 
-	// Check that the offset is legitimate.
-	if offset < 0 {
+	// Check that the offset is legitimate and does not overflow.
+	if offset < 0 || offset+int64(size) < 0 {
 		return 0, nil, syserror.EINVAL
 	}
 
@@ -122,11 +123,11 @@ func Pwrite64(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysc
 
 // Writev implements linux syscall writev(2).
 func Writev(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
-	fd := kdefs.FD(args[0].Int())
+	fd := args[0].Int()
 	addr := args[1].Pointer()
 	iovcnt := int(args[2].Int())
 
-	file := t.FDMap().GetFile(fd)
+	file := t.GetFile(fd)
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
@@ -152,12 +153,12 @@ func Writev(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 
 // Pwritev implements linux syscall pwritev(2).
 func Pwritev(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
-	fd := kdefs.FD(args[0].Int())
+	fd := args[0].Int()
 	addr := args[1].Pointer()
 	iovcnt := int(args[2].Int())
 	offset := args[3].Int64()
 
-	file := t.FDMap().GetFile(fd)
+	file := t.GetFile(fd)
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
@@ -192,8 +193,6 @@ func Pwritev(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysca
 }
 
 // Pwritev2 implements linux syscall pwritev2(2).
-// TODO(b/120162627): Implement RWF_HIPRI functionality.
-// TODO(b/120161091): Implement O_SYNC and D_SYNC functionality.
 func Pwritev2(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	// While the syscall is
 	// pwritev2(int fd, struct iovec* iov, int iov_cnt, off_t offset, int flags)
@@ -202,7 +201,7 @@ func Pwritev2(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysc
 	// splits the offset argument into a high/low value for compatibility with
 	// 32-bit architectures. The flags argument is the 5th argument.
 
-	fd := kdefs.FD(args[0].Int())
+	fd := args[0].Int()
 	addr := args[1].Pointer()
 	iovcnt := int(args[2].Int())
 	offset := args[3].Int64()
@@ -212,7 +211,7 @@ func Pwritev2(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysc
 		return 0, nil, syserror.EACCES
 	}
 
-	file := t.FDMap().GetFile(fd)
+	file := t.GetFile(fd)
 	if file == nil {
 		return 0, nil, syserror.EBADF
 	}
@@ -228,6 +227,8 @@ func Pwritev2(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysc
 		return 0, nil, syserror.ESPIPE
 	}
 
+	// Note: gVisor does not implement the RWF_HIPRI feature, but the flag is
+	// accepted as a valid flag argument for pwritev2.
 	if flags&^linux.RWF_VALID != 0 {
 		return uintptr(flags), nil, syserror.EOPNOTSUPP
 	}
@@ -359,3 +360,5 @@ func pwritev(t *kernel.Task, f *fs.File, src usermem.IOSequence, offset int64) (
 
 	return total, err
 }
+
+// LINT.ThenChange(vfs2/read_write.go)
