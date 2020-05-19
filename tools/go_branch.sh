@@ -88,6 +88,10 @@ EOF
 # because they may correspond to unused templates, etc.
 cp "${repo_orig}"/runsc/*.go runsc/
 
+# Fix-up permissions on all Go source files.
+find . -type f -a -name \*.go -exec chmod 0644 {} \;
+find . -type d -exec chmod 0755 {} \;
+
 # Update the current working set and commit.
 git add . && git commit -m "Merge ${head} (automated)"
 
