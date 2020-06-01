@@ -28,6 +28,19 @@ BAZEL_CACHE := $(shell readlink -m ~/.cache/bazel/)
 GCLOUD_CONFIG := $(shell readlink -m ~/.config/gcloud/)
 DOCKER_SOCKET := /var/run/docker.sock
 
+# Bazel flags.
+STARTUP_OPTIONS += \
+ --show_timestamps \
+ --test_output=errors \
+ --keep_going \
+ --verbose_failures=true
+ifneq ($(AUTH_CREDENTIALS),)
+STARTUP_OPTIONS += \
+ --auth_credentials=${AUTH_CREDENTIALS} \
+ --config=remote
+endif
+BAZEL := bazel $(STARTUP_OPTIONS)
+
 # Non-configurable.
 UID := $(shell id -u ${USER})
 GID := $(shell id -g ${USER})
@@ -75,14 +88,14 @@ bazel-server-start: load-default ## Starts the bazel server.
 		sh -c "groupadd --gid $(GID) --non-unique $(USER) && \
 		       $(GROUPADD_DOCKER) \
 		       useradd --uid $(UID) --non-unique --no-create-home --gid $(GID) $(USERADD_OPTIONS) -d $(HOME) $(USER) && \
-	               bazel version && \
-		       exec tail --pid=\$$(bazel info server_pid) -f /dev/null"
+	               $(BAZEL) version && \
+		       exec tail --pid=\$$($(BAZEL) info server_pid) -f /dev/null"
 	@while :; do if docker logs $(DOCKER_NAME) 2>/dev/null | grep "Build label:" >/dev/null; then break; fi; \
 		if ! docker ps | grep $(DOCKER_NAME); then exit 1; else sleep 1; fi; done
 .PHONY: bazel-server-start
 
 bazel-shutdown: ## Shuts down a running bazel server.
-	@docker exec --user $(UID):$(GID) $(DOCKER_NAME) bazel shutdown; rc=$$?; docker kill $(DOCKER_NAME) || [[ $$rc -ne 0 ]]
+	@docker exec --user $(UID):$(GID) $(DOCKER_NAME) $(BAZEL) shutdown; rc=$$?; docker kill $(DOCKER_NAME) || [[ $$rc -ne 0 ]]
 .PHONY: bazel-shutdown
 
 bazel-alias: ## Emits an alias that can be used within the shell.
@@ -93,7 +106,7 @@ bazel-server: ## Ensures that the server exists. Used as an internal target.
 	@docker exec $(DOCKER_NAME) true || $(MAKE) bazel-server-start
 .PHONY: bazel-server
 
-build_cmd = docker exec --user $(UID):$(GID) -i $(DOCKER_NAME) sh -o pipefail -c 'bazel $(STARTUP_OPTIONS) build $(OPTIONS) $(TARGETS)'
+build_cmd = docker exec --user $(UID):$(GID) -i $(DOCKER_NAME) sh -o pipefail -c '$(BAZEL) $(STARTUP_OPTIONS) build $(OPTIONS) $(TARGETS)'
 
 build_paths = $(build_cmd) 2>&1 \
 		| tee /proc/self/fd/2 \
@@ -109,7 +122,7 @@ copy: bazel-server
 ifeq (,$(DESTINATION))
 	$(error Destination not provided.)
 endif
-	@$(call build_paths,cp -a {} $(DESTINATION))
+	@$(call build_paths,cp -af {} $(DESTINATION))
 
 run: bazel-server
 	@$(call build_paths,{} $(ARGS))
@@ -120,5 +133,9 @@ sudo: bazel-server
 .PHONY: sudo
 
 test: bazel-server
-	@docker exec --user $(UID):$(GID) -i $(DOCKER_NAME) bazel $(STARTUP_OPTIONS) test $(OPTIONS) $(TARGETS)
+	@docker exec --user $(UID):$(GID) -i $(DOCKER_NAME) $(BAZEL) test $(OPTIONS) $(TARGETS)
 .PHONY: test
+
+query: bazel-server
+	@docker exec --user $(UID):$(GID) -i $(DOCKER_NAME) $(BAZEL) query $(OPTIONS) $(TARGETS)
+.PHONY: query
