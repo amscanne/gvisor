@@ -34,7 +34,7 @@ jobs:
           ${{ runner.os }}-bazel-
     - run: make tests
 
-  integration-tests:
+  integration:
     runs-on: ubuntu-latest
     needs: [status-pending]
     steps:
@@ -54,7 +54,7 @@ jobs:
     if: ${{ success() && github.event_name == 'pull_request' }}
     needs:
       - tests
-      - integration-tests
+      - integration
     steps:
     - run: |
         jq -nc '{"state": "success", "context": "tests"}' | \
@@ -65,7 +65,10 @@ jobs:
 
   status-failure:
     runs-on: ubuntu-latest
-    if: ${{ failure() && github.event_name == 'pull_request' }}
+    if: ${{ needs.tests.result == 'success' && needs.integration.result == 'success' && github.event_name == 'pull_request' }}
+    needs:
+      - tests
+      - integration
     steps:
     - run: |
         jq -nc '{"state": "failure", "context": "tests"}' | \
