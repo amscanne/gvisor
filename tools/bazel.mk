@@ -23,7 +23,7 @@ BRANCH_NAME := $(shell (git branch --show-current 2>/dev/null || \
 USER ?= gvisor
 HASH ?= $(shell readlink -m $(CURDIR) | md5sum | cut -c1-8)
 DOCKER_NAME ?= gvisor-bazel-$(HASH)
-DOCKER_PRIVILEGED ?= --privileged
+DOCKER_PRIVILEGED ?= --privileged --network host
 BAZEL_CACHE := $(shell readlink -m ~/.cache/bazel/)
 GCLOUD_CONFIG := $(shell readlink -m ~/.config/gcloud/)
 DOCKER_SOCKET := /var/run/docker.sock
@@ -51,6 +51,7 @@ FULL_DOCKER_RUN_OPTIONS += -v "$(GCLOUD_CONFIG):$(GCLOUD_CONFIG)"
 FULL_DOCKER_RUN_OPTIONS += -v "/tmp:/tmp"
 ifneq ($(DOCKER_PRIVILEGED),)
 FULL_DOCKER_RUN_OPTIONS += -v "$(DOCKER_SOCKET):$(DOCKER_SOCKET)"
+FULL_DOCKER_RUN_OPTIONS += $(DOCKER_PRIVILEGED)
 DOCKER_GROUP := $(shell stat -c '%g' $(DOCKER_SOCKET))
 ifneq ($(GID),$(DOCKER_GROUP))
 USERADD_OPTIONS += --groups $(DOCKER_GROUP)
@@ -76,6 +77,7 @@ SHELL=/bin/bash -o pipefail
 bazel-server-start: load-default ## Starts the bazel server.
 	@mkdir -p $(BAZEL_CACHE)
 	@mkdir -p $(GCLOUD_CONFIG)
+	@if docker ps --all | grep $(DOCKER_NAME); then docker rm $(DOCKER_NAME); fi
 	docker run -d \
 		--init \
 	        --name $(DOCKER_NAME) \

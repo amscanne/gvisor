@@ -44,7 +44,6 @@ import (
 const defaultWait = time.Minute
 
 func TestHelloWorld(t *testing.T) {
-	t.Parallel()
 	d := dockerutil.MakeDocker(t)
 	defer d.CleanUp()
 
@@ -115,7 +114,6 @@ func testHTTPServer(t *testing.T, port int) {
 }
 
 func TestHttpd(t *testing.T) {
-	t.Parallel()
 	d := dockerutil.MakeDocker(t)
 	defer d.CleanUp()
 
@@ -143,7 +141,6 @@ func TestHttpd(t *testing.T) {
 }
 
 func TestNginx(t *testing.T) {
-	t.Parallel()
 	d := dockerutil.MakeDocker(t)
 	defer d.CleanUp()
 
@@ -171,7 +168,6 @@ func TestNginx(t *testing.T) {
 }
 
 func TestMysql(t *testing.T) {
-	t.Parallel()
 	server := dockerutil.MakeDocker(t)
 	defer server.CleanUp()
 
@@ -209,7 +205,6 @@ func TestMysql(t *testing.T) {
 }
 
 func TestTomcat(t *testing.T) {
-	t.Parallel()
 	d := dockerutil.MakeDocker(t)
 	defer d.CleanUp()
 
@@ -244,7 +239,6 @@ func TestTomcat(t *testing.T) {
 }
 
 func TestRuby(t *testing.T) {
-	t.Parallel()
 	d := dockerutil.MakeDocker(t)
 	defer d.CleanUp()
 
@@ -287,7 +281,6 @@ func TestRuby(t *testing.T) {
 }
 
 func TestStdio(t *testing.T) {
-	t.Parallel()
 	d := dockerutil.MakeDocker(t)
 	defer d.CleanUp()
 

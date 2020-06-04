@@ -39,7 +39,6 @@ import (
 
 // Test that exec uses the exact same capability set as the container.
 func TestExecCapabilities(t *testing.T) {
-	t.Parallel()
 	d := dockerutil.MakeDocker(t)
 	defer d.CleanUp()
 
@@ -75,7 +74,6 @@ func TestExecCapabilities(t *testing.T) {
 // Test that 'exec --privileged' adds all capabilities, except for CAP_NET_RAW
 // which is removed from the container when --net-raw=false.
 func TestExecPrivileged(t *testing.T) {
-	t.Parallel()
 	d := dockerutil.MakeDocker(t)
 	defer d.CleanUp()
 
@@ -120,7 +118,6 @@ func TestExecPrivileged(t *testing.T) {
 }
 
 func TestExecJobControl(t *testing.T) {
-	t.Parallel()
 	d := dockerutil.MakeDocker(t)
 	defer d.CleanUp()
 
@@ -179,7 +176,6 @@ func TestExecJobControl(t *testing.T) {
 
 // Test that failure to exec returns proper error message.
 func TestExecError(t *testing.T) {
-	t.Parallel()
 	d := dockerutil.MakeDocker(t)
 	defer d.CleanUp()
 
@@ -202,7 +198,6 @@ func TestExecError(t *testing.T) {
 
 // Test that exec inherits environment from run.
 func TestExecEnv(t *testing.T) {
-	t.Parallel()
 	d := dockerutil.MakeDocker(t)
 	defer d.CleanUp()
 
@@ -227,7 +222,6 @@ func TestExecEnv(t *testing.T) {
 // TestRunEnvHasHome tests that run always has HOME environment set.
 func TestRunEnvHasHome(t *testing.T) {
 	// Base alpine image does not have any environment variables set.
-	t.Parallel()
 	d := dockerutil.MakeDocker(t)
 	defer d.CleanUp()
 
@@ -249,7 +243,6 @@ func TestRunEnvHasHome(t *testing.T) {
 // Test that exec always has HOME environment set, even when not set in run.
 func TestExecEnvHasHome(t *testing.T) {
 	// Base alpine image does not have any environment variables set.
-	t.Parallel()
 	d := dockerutil.MakeDocker(t)
 	defer d.CleanUp()
 

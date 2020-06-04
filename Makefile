@@ -16,7 +16,7 @@
 
 # Helpful pretty-printer.
 INFO := \033[0;32mINFO:\033[0m
-submake = echo -e "$(INFO) make $1"; $(MAKE) $1
+submake = echo -e "$(INFO) make $1"; sh -c "$(MAKE) $1"
 
 # Described below.
 OPTIONS :=
