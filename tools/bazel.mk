@@ -29,13 +29,13 @@ GCLOUD_CONFIG := $(shell readlink -m ~/.config/gcloud/)
 DOCKER_SOCKET := /var/run/docker.sock
 
 # Bazel flags.
-STARTUP_OPTIONS += \
- --show_timestamps \
+OPTIONS += \
+ --show_timestamps
  --test_output=errors \
  --keep_going \
  --verbose_failures=true
 ifneq ($(AUTH_CREDENTIALS),)
-STARTUP_OPTIONS += \
+OPTIONS += \
  --auth_credentials=${AUTH_CREDENTIALS} \
  --config=remote
 endif
