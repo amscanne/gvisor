@@ -38,6 +38,9 @@ import (
 	"gvisor.dev/gvisor/pkg/test/testutil"
 )
 
+// defaultWait is the default wait time used for tests.
+const defaultWait = time.Minute
+
 // httpRequestSucceeds sends a request to a given url and checks that the status is OK.
 func httpRequestSucceeds(client http.Client, server string, port int) error {
 	url := fmt.Sprintf("http://%s:%d", server, port)
@@ -73,10 +76,10 @@ func TestLifeCycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("docker.FindPort(80) failed: %v", err)
 	}
-	if err := testutil.WaitForHTTP(port, 30*time.Second); err != nil {
+	if err := testutil.WaitForHTTP(port, defaultWait); err != nil {
 		t.Fatalf("WaitForHTTP() timeout: %v", err)
 	}
-	client := http.Client{Timeout: time.Duration(2 * time.Second)}
+	client := http.Client{Timeout: defaultWait}
 	if err := httpRequestSucceeds(client, "localhost", port); err != nil {
 		t.Errorf("http request failed: %v", err)
 	}
@@ -112,12 +115,12 @@ func TestPauseResume(t *testing.T) {
 	}
 
 	// Wait until it's up and running.
-	if err := testutil.WaitForHTTP(port, 30*time.Second); err != nil {
+	if err := testutil.WaitForHTTP(port, defaultWait); err != nil {
 		t.Fatalf("WaitForHTTP() timeout: %v", err)
 	}
 
 	// Check that container is working.
-	client := http.Client{Timeout: time.Duration(2 * time.Second)}
+	client := http.Client{Timeout: defaultWait}
 	if err := httpRequestSucceeds(client, "localhost", port); err != nil {
 		t.Error("http request failed:", err)
 	}
@@ -127,6 +130,7 @@ func TestPauseResume(t *testing.T) {
 	}
 
 	// Check if container is paused.
+	client = http.Client{Timeout: 10 * time.Millisecond} // Don't wait a minute.
 	switch _, err := client.Get(fmt.Sprintf("http://localhost:%d", port)); v := err.(type) {
 	case nil:
 		t.Errorf("http req expected to fail but it succeeded")
@@ -143,11 +147,12 @@ func TestPauseResume(t *testing.T) {
 	}
 
 	// Wait until it's up and running.
-	if err := testutil.WaitForHTTP(port, 30*time.Second); err != nil {
+	if err := testutil.WaitForHTTP(port, defaultWait); err != nil {
 		t.Fatalf("WaitForHTTP() timeout: %v", err)
 	}
 
 	// Check if container is working again.
+	client = http.Client{Timeout: defaultWait}
 	if err := httpRequestSucceeds(client, "localhost", port); err != nil {
 		t.Error("http request failed:", err)
 	}
@@ -173,12 +178,12 @@ func TestCheckpointRestore(t *testing.T) {
 	if err := d.Checkpoint("test"); err != nil {
 		t.Fatalf("docker checkpoint failed: %v", err)
 	}
-	if _, err := d.Wait(30 * time.Second); err != nil {
+	if _, err := d.Wait(defaultWait); err != nil {
 		t.Fatalf("wait failed: %v", err)
 	}
 
 	// TODO(b/143498576): Remove Poll after github.com/moby/moby/issues/38963 is fixed.
-	if err := testutil.Poll(func() error { return d.Restore("test") }, 15*time.Second); err != nil {
+	if err := testutil.Poll(func() error { return d.Restore("test") }, defaultWait); err != nil {
 		t.Fatalf("docker restore failed: %v", err)
 	}
 
@@ -189,12 +194,12 @@ func TestCheckpointRestore(t *testing.T) {
 	}
 
 	// Wait until it's up and running.
-	if err := testutil.WaitForHTTP(port, 30*time.Second); err != nil {
+	if err := testutil.WaitForHTTP(port, defaultWait); err != nil {
 		t.Fatalf("WaitForHTTP() timeout: %v", err)
 	}
 
 	// Check if container is working again.
-	client := http.Client{Timeout: time.Duration(2 * time.Second)}
+	client := http.Client{Timeout: defaultWait}
 	if err := httpRequestSucceeds(client, "localhost", port); err != nil {
 		t.Error("http request failed:", err)
 	}
@@ -230,7 +235,7 @@ func TestConnectToSelf(t *testing.T) {
 	if want := "server\n"; reply != want {
 		t.Errorf("Error on server, want: %q, got: %q", want, reply)
 	}
-	if _, err := d.WaitForOutput("^client\n$", 1*time.Second); err != nil {
+	if _, err := d.WaitForOutput("^client\n$", defaultWait); err != nil {
 		t.Fatalf("docker.WaitForOutput(client) timeout: %v", err)
 	}
 }
@@ -304,8 +309,8 @@ func TestJobControl(t *testing.T) {
 				t.Fatalf("error writing to pty: %v", err)
 			}
 
-			// Give shell a few seconds to start executing the sleep.
-			time.Sleep(2 * time.Second)
+			// Wait for the sleep to start executing.
+			time.Sleep(3 * time.Second)
 
 			// Send a ^C to the pty, which should kill sleep, but
 			// not the shell.  \x03 is ASCII "end of text", which
@@ -327,10 +332,11 @@ func TestJobControl(t *testing.T) {
 	}
 
 	// Wait for the container to exit.
-	got, err := d.Wait(5 * time.Second)
+	got, err := d.Wait(defaultWait)
 	if err != nil {
 		t.Fatalf("error getting exit code: %v", err)
 	}
+
 	// Container should exit with code 10+130=140.
 	if want := syscall.WaitStatus(140); got != want {
 		t.Errorf("container exited with code %d want %d", got, want)
@@ -377,7 +383,7 @@ func TestTmpFile(t *testing.T) {
 	d := dockerutil.MakeDocker(t)
 	defer d.CleanUp()
 
-	opts := dockerutil.RunOpts{Image: "tmpfile"}
+	opts := dockerutil.RunOpts{Image: "basic/tmpfile"}
 	got, err := d.Run(opts, "cat", "/tmp/foo/file.txt")
 	if err != nil {
 		t.Fatalf("docker run failed: %v", err)
@@ -395,7 +401,7 @@ func TestHostOverlayfsCopyUp(t *testing.T) {
 	defer d.CleanUp()
 
 	if _, err := d.Run(dockerutil.RunOpts{
-		Image:   "hostoverlaytest",
+		Image:   "basic/hostoverlaytest",
 		WorkDir: "/root",
 	}, "./test"); err != nil {
 		t.Fatalf("docker run failed: %v", err)

@@ -1,0 +1,78 @@
+name: "Tests"
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  status-pending:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+    - run: |
+        jq -nc '{"state": "pending", "context": "tests"}' | \
+        curl -sL -X POST -d @- \
+            -H "Content-Type: application/json" \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "${{ github.event.pull_request.statuses_url }}"
+
+  tests:
+    runs-on: ubuntu-latest
+    needs: [status-pending]
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        fetch-depth: 0
+    - uses: actions/cache@v1
+      with:
+        path: ~/.cache/bazel
+        key: ${{ runner.os }}-bazel-${{ hashFiles('WORKSPACE') }}
+        restore-keys: |
+          ${{ runner.os }}-bazel-
+    - run: make tests
+
+  integration:
+    runs-on: ubuntu-latest
+    needs: [status-pending]
+    steps:
+    - uses: actions/checkout@v2
+      with:
+        fetch-depth: 0
+    - uses: actions/cache@v1
+      with:
+        path: ~/.cache/bazel
+        key: ${{ runner.os }}-bazel-${{ hashFiles('WORKSPACE') }}
+        restore-keys: |
+          ${{ runner.os }}-bazel-
+    - run: make integration-tests
+
+  status-success:
+    runs-on: ubuntu-latest
+    if: needs.tests.result == 'success' && needs.integration.result == 'success' && github.event_name == 'pull_request'
+    needs:
+      - tests
+      - integration
+    steps:
+    - run: |
+        jq -nc '{"state": "success", "context": "tests"}' | \
+        curl -sL  -X POST -d @- \
+            -H "Content-Type: application/json" \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "${{ github.event.pull_request.statuses_url }}"
+
+  status-failure:
+    runs-on: ubuntu-latest
+    if: (needs.tests.result != 'success' || needs.integration.result != 'success') && github.event_name == 'pull_request'
+    needs:
+      - tests
+      - integration
+    steps:
+    - run: |
+        jq -nc '{"state": "failure", "context": "tests"}' | \
+        curl -sL  -X POST -d @- \
+            -H "Content-Type: application/json" \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "${{ github.event.pull_request.statuses_url }}"
