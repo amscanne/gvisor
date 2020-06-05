@@ -364,5 +364,5 @@ configure: ## Configures a single runtime. Requires sudo. Typically called from 
 .PHONY: configure
 
 test-runtime: ## A convenient wrapper around test that provides the runtime argument. Target must still be provided.
-	@$(call submake,test OPTIONS="$(OPTIONS) --test_arg=--runtime=$(RUNTIME)")
+	@$(call submake,test OPTIONS="$(OPTIONS) --test_output=streamed --test_arg=--runtime=$(RUNTIME)")
 .PHONY: test-runtime
