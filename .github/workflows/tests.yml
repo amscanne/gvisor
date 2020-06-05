@@ -10,7 +10,7 @@ on:
 jobs:
   status-pending:
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'pull_request' }}
+    if: github.event_name == 'pull_request'
     steps:
     - run: |
         jq -nc '{"state": "pending", "context": "tests"}' | \
@@ -51,7 +51,7 @@ jobs:
 
   status-success:
     runs-on: ubuntu-latest
-    if: ${{ success() && github.event_name == 'pull_request' }}
+    if: needs.tests.result == 'success' && needs.integration.result == 'success' && github.event_name == 'pull_request'
     needs:
       - tests
       - integration
@@ -65,7 +65,7 @@ jobs:
 
   status-failure:
     runs-on: ubuntu-latest
-    if: ${{ needs.tests.result == 'success' && needs.integration.result == 'success' && github.event_name == 'pull_request' }}
+    if: (needs.tests.result != 'success' || needs.integration.result != 'success') && github.event_name == 'pull_request'
     needs:
       - tests
       - integration
