@@ -14,9 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Helpful pretty-printer.
-INFO := \033[0;32mINFO:\033[0m
-submake = echo -e "$(INFO) make $1"; sh -c "$(MAKE) $1"
+# Helpful pretty-printer (for GitHub actions).
+submake = echo -e "::group::$(MAKE) $1"; sh -c "$(MAKE) $1"; echo -e "::endgroup::"
 
 # Described below.
 OPTIONS :=
@@ -356,6 +355,7 @@ test-install: ## Installs the runtime for testing. Requires sudo.
 	@if sudo systemctl status docker 2>/dev/null; then sudo systemctl restart docker; fi
 .PHONY: test-install
 
+INFO := \033[0;32mINFO:\033[0m
 configure: ## Configures a single runtime. Requires sudo. Typically called from dev or test-install.
 	@sudo sudo "$(RUNTIME_BIN)" install --experimental=true --runtime="$(RUNTIME)" -- --debug-log "$(RUNTIME_LOGS)" $(ARGS)
 	@echo -e "$(INFO) Installed runtime \"$(RUNTIME)\" @ $(RUNTIME_BIN)"
