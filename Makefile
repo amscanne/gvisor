@@ -15,7 +15,11 @@
 # limitations under the License.
 
 # Helpful pretty-printer (for GitHub actions).
-submake = echo -e "::group::$(MAKE) $1"; sh -c "$(MAKE) $1"; echo -e "::endgroup::"
+ifeq($(MAKELEVEL),0)
+submake = echo -e "::group::$(MAKE) $1"; sh -c "$(MAKE) $1"; rc=$$?; echo -e "::endgroup::"; exit $$rc
+else
+submake = $(MAKE) $1
+endif
 
 # Described below.
 OPTIONS :=
