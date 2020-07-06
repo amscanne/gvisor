@@ -272,11 +272,13 @@ func TestHomeDir(t *testing.T) {
 
 const containerdRuntime = "runsc"
 
+// NOTE: The base path name of runtime_root must be equal to "runsc" in order
+// for gvisor-containerd-shim to know that runsc is being evoked.
 const v1Template = `
 disabled_plugins = ["restart"]
 [plugins.linux]
   runtime = "%s"
-  runtime_root = "%s/root"
+  runtime_root = "%s/root/runsc"
   shim = "%s"
   shim_debug = true
 [plugins.cri.containerd.runtimes.` + containerdRuntime + `]
