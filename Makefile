@@ -120,8 +120,7 @@ tests: ## Runs all local ptrace system call tests.
 .PHONY: tests
 
 containerd-test-%: ## Runs a local containerd test.
-containerd-test-%: load-basic_alpine load-basic_python load-basic_busybox load-basic_resolv load-basic_httpd
-containerd-test-%: install-test-runtime
+containerd-test-%: load-basic_alpine load-basic_python load-basic_busybox load-basic_resolv load-basic_httpd install-test-runtime
 	@CONTAINERD_VERSION=$* $(MAKE) sudo TARGETS="tools/installers:containerd"
 	@$(MAKE) sudo TARGETS="test/root:root_test" ARGS="-test.v"
 
