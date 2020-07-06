@@ -27,21 +27,23 @@ install_helper() {
   TAG="${2}"
 
   # Clone the repository.
-  mkdir -p "${GOPATH}"/src/$(dirname "${PACKAGE}") && \
-     git clone https://"${PACKAGE}" "${GOPATH}"/src/"${PACKAGE}"
+  mkdir -p "${GOPATH}"/src/$(dirname "${PACKAGE}") &&
+    git clone https://"${PACKAGE}" "${GOPATH}"/src/"${PACKAGE}"
 
   # Checkout and build the repository.
-  (cd "${GOPATH}"/src/"${PACKAGE}" && \
-      git checkout "${TAG}" && \
-      make && \
-      make install)
+  (cd "${GOPATH}"/src/"${PACKAGE}" &&
+    git checkout "${TAG}" &&
+    make &&
+    make install)
 }
 
 # Install dependencies for the crictl tests.
 while true; do
+  # NOTE: Install btrfs-progs and libbtrfs-dev instead of btrfs-tools if you
+  # are on Ubuntu 20.04+
   if (apt-get update && apt-get install -y \
-      btrfs-tools \
-      libseccomp-dev); then
+    btrfs-tools \
+    libseccomp-dev); then
     break
   fi
   result=$?
@@ -62,7 +64,7 @@ install_helper github.com/kubernetes-sigs/cri-tools "v${CRITOOLS_VERSION}" "${GO
 if [[ "${CONTAINERD_MAJOR}" -le 1 ]] && [[ "${CONTAINERD_MINOR}" -lt 2 ]]; then
   declare -r shim_config_path=/etc/containerd/gvisor-containerd-shim.toml
   mkdir -p $(dirname ${shim_config_path})
-  cat > ${shim_config_path} <<-EOF
+  cat >${shim_config_path} <<-EOF
     runc_shim = "/usr/bin/containerd-shim"
 
 [runsc_config]
