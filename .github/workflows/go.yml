@@ -19,6 +19,8 @@ jobs:
            echo ::set-output has_token=false
         fi
     - run: |
+        echo "${{ steps.setup.outputs.has_token }}"
+    - run: |
         jq -nc '{"state": "pending", "context": "go tests"}' | \
         curl -sL -X POST -d @- \
             -H "Content-Type: application/json" \
