@@ -26,6 +26,17 @@ import (
 var (
 	// The action for bluepillSignal is changed by sigaction().
 	bluepillSignal = syscall.SIGILL
+
+	// vcpuSErr is the event of system error.
+	vcpuSErr = kvmVcpuEvents{
+		exception: exception{
+			sErrPending: 1,
+			sErrHasEsr:  0,
+			pad:         [6]uint8{0, 0, 0, 0, 0, 0},
+			sErrEsr:     1,
+		},
+		rsvd: [12]uint32{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+	}
 )
 
 // bluepillArchEnter is called during bluepillEnter.
@@ -66,6 +77,8 @@ func bluepillArchExit(c *vCPU, context *arch.SignalContext64) {
 
 // KernelSyscall handles kernel syscalls.
 //
+// +checkescape:all
+//
 //go:nosplit
 func (c *vCPU) KernelSyscall() {
 	regs := c.Registers()
@@ -87,6 +100,8 @@ func (c *vCPU) KernelSyscall() {
 }
 
 // KernelException handles kernel exceptions.
+//
+// +checkescape:all
 //
 //go:nosplit
 func (c *vCPU) KernelException(vector ring0.Vector) {

@@ -183,22 +183,29 @@ func (e *endpoint) LinkAddress() tcpip.LinkAddress {
 	return e.addr
 }
 
-// WritePacket writes outbound packets to the file descriptor. If it is not
-// currently writable, the packet is dropped.
-func (e *endpoint) WritePacket(r *stack.Route, _ *stack.GSO, protocol tcpip.NetworkProtocolNumber, pkt stack.PacketBuffer) *tcpip.Error {
-	// Add the ethernet header here.
+// AddHeader implements stack.LinkEndpoint.AddHeader.
+func (e *endpoint) AddHeader(local, remote tcpip.LinkAddress, protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
+	// Add ethernet header if needed.
 	eth := header.Ethernet(pkt.Header.Prepend(header.EthernetMinimumSize))
 	pkt.LinkHeader = buffer.View(eth)
 	ethHdr := &header.EthernetFields{
-		DstAddr: r.RemoteLinkAddress,
+		DstAddr: remote,
 		Type:    protocol,
 	}
-	if r.LocalLinkAddress != "" {
-		ethHdr.SrcAddr = r.LocalLinkAddress
+
+	// Preserve the src address if it's set in the route.
+	if local != "" {
+		ethHdr.SrcAddr = local
 	} else {
 		ethHdr.SrcAddr = e.addr
 	}
 	eth.Encode(ethHdr)
+}
+
+// WritePacket writes outbound packets to the file descriptor. If it is not
+// currently writable, the packet is dropped.
+func (e *endpoint) WritePacket(r *stack.Route, _ *stack.GSO, protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) *tcpip.Error {
+	e.AddHeader(r.LocalLinkAddress, r.RemoteLinkAddress, protocol, pkt)
 
 	v := pkt.Data.ToView()
 	// Transmit the packet.
@@ -275,7 +282,7 @@ func (e *endpoint) dispatchLoop(d stack.NetworkDispatcher) {
 
 		// Send packet up the stack.
 		eth := header.Ethernet(b[:header.EthernetMinimumSize])
-		d.DeliverNetworkPacket(e, eth.SourceAddress(), eth.DestinationAddress(), eth.Type(), stack.PacketBuffer{
+		d.DeliverNetworkPacket(eth.SourceAddress(), eth.DestinationAddress(), eth.Type(), &stack.PacketBuffer{
 			Data:       buffer.View(b[header.EthernetMinimumSize:]).ToVectorisedView(),
 			LinkHeader: buffer.View(eth),
 		})
@@ -286,4 +293,9 @@ func (e *endpoint) dispatchLoop(d stack.NetworkDispatcher) {
 	e.rx.cleanup()
 
 	e.completed.Done()
+}
+
+// ARPHardwareType implements stack.LinkEndpoint.ARPHardwareType
+func (*endpoint) ARPHardwareType() header.ARPHardwareType {
+	return header.ARPHardwareEther
 }

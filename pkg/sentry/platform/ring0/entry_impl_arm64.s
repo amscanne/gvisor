@@ -104,6 +104,20 @@
 
 #define FPEN_ENABLE (FPEN_NOTRAP << FPEN_SHIFT)
 
+// sctlr_el1: system control register el1.
+#define SCTLR_M         1 << 0
+#define SCTLR_C         1 << 2
+#define SCTLR_I         1 << 12
+#define SCTLR_UCT       1 << 15
+
+#define SCTLR_EL1_DEFAULT       (SCTLR_M | SCTLR_C | SCTLR_I | SCTLR_UCT)
+
+// cntkctl_el1: counter-timer kernel control register el1.
+#define CNTKCTL_EL0PCTEN 	1 << 0
+#define CNTKCTL_EL0VCTEN 	1 << 1
+
+#define CNTKCTL_EL1_DEFAULT 	(CNTKCTL_EL0PCTEN | CNTKCTL_EL0VCTEN)
+
 // Saves a register set.
 //
 // This is a macro because it may need to executed in contents where a stack is
@@ -426,9 +440,17 @@ mmio_exit:
 	MOVD R1, CPU_LAZY_VFP(RSV_REG)
 	VFP_DISABLE
 
-	// MMIO_EXIT.
-	MOVD $0, R9
-	MOVD R0, 0xffff000000001000(R9)
+	// Trigger MMIO_EXIT/_KVM_HYPERCALL_VMEXIT.
+	//
+	// To keep it simple, I used the address of exception table as the
+	// MMIO base address, so that I can trigger a MMIO-EXIT by forcibly writing
+	// a read-only space.
+	// Also, the length is engough to match a sufficient number of hypercall ID.
+	// Then, in host user space, I can calculate this address to find out
+	// which hypercall.
+	MRS VBAR_EL1, R9
+	MOVD R0, 0x0(R9)
+
 	RET
 
 // HaltAndResume halts execution and point the pointer to the resume function.
@@ -552,6 +574,14 @@ TEXT ·kernelExitToEl1(SB),NOSPLIT,$0
 // Start is the CPU entrypoint.
 TEXT ·Start(SB),NOSPLIT,$0
 	IRQ_DISABLE
+
+	// Init.
+	MOVD $SCTLR_EL1_DEFAULT, R1
+	MSR R1, SCTLR_EL1
+
+	MOVD $CNTKCTL_EL1_DEFAULT, R1
+	MSR R1, CNTKCTL_EL1
+
 	MOVD R8, RSV_REG
 	ORR $0xffff000000000000, RSV_REG, RSV_REG
 	WORD $0xd518d092        //MSR R18, TPIDR_EL1

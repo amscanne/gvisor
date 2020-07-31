@@ -15,10 +15,11 @@
 package netstack
 
 import (
+	"fmt"
+
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sentry/inet"
-	"gvisor.dev/gvisor/pkg/sentry/socket/netfilter"
 	"gvisor.dev/gvisor/pkg/syserr"
 	"gvisor.dev/gvisor/pkg/syserror"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -41,19 +42,29 @@ func (s *Stack) SupportsIPv6() bool {
 	return s.Stack.CheckNetworkProtocol(ipv6.ProtocolNumber)
 }
 
+// Converts Netstack's ARPHardwareType to equivalent linux constants.
+func toLinuxARPHardwareType(t header.ARPHardwareType) uint16 {
+	switch t {
+	case header.ARPHardwareNone:
+		return linux.ARPHRD_NONE
+	case header.ARPHardwareLoopback:
+		return linux.ARPHRD_LOOPBACK
+	case header.ARPHardwareEther:
+		return linux.ARPHRD_ETHER
+	default:
+		panic(fmt.Sprintf("unknown ARPHRD type: %d", t))
+	}
+}
+
 // Interfaces implements inet.Stack.Interfaces.
 func (s *Stack) Interfaces() map[int32]inet.Interface {
 	is := make(map[int32]inet.Interface)
 	for id, ni := range s.Stack.NICInfo() {
-		var devType uint16
-		if ni.Flags.Loopback {
-			devType = linux.ARPHRD_LOOPBACK
-		}
 		is[int32(id)] = inet.Interface{
 			Name:       ni.Name,
 			Addr:       []byte(ni.LinkAddress),
 			Flags:      uint32(nicStateFlagsToLinux(ni.Flags)),
-			DeviceType: devType,
+			DeviceType: toLinuxARPHardwareType(ni.ARPHardwareType),
 			MTU:        ni.MTU,
 		}
 	}
@@ -314,7 +325,7 @@ func (s *Stack) Statistics(stat interface{}, arg string) error {
 			udp.PacketsSent.Value(),         // OutDatagrams.
 			udp.ReceiveBufferErrors.Value(), // RcvbufErrors.
 			0,                               // Udp/SndbufErrors.
-			0,                               // Udp/InCsumErrors.
+			udp.ChecksumErrors.Value(),      // Udp/InCsumErrors.
 			0,                               // Udp/IgnoredMulti.
 		}
 	default:
@@ -362,14 +373,8 @@ func (s *Stack) RouteTable() []inet.Route {
 }
 
 // IPTables returns the stack's iptables.
-func (s *Stack) IPTables() (stack.IPTables, error) {
+func (s *Stack) IPTables() (*stack.IPTables, error) {
 	return s.Stack.IPTables(), nil
-}
-
-// FillDefaultIPTables sets the stack's iptables to the default tables, which
-// allow and do not modify all traffic.
-func (s *Stack) FillDefaultIPTables() {
-	netfilter.FillDefaultIPTables(s.Stack)
 }
 
 // Resume implements inet.Stack.Resume.

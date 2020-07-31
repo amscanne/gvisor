@@ -75,6 +75,21 @@ type MknodOptions struct {
 type MountFlags struct {
 	// NoExec is equivalent to MS_NOEXEC.
 	NoExec bool
+
+	// NoATime is equivalent to MS_NOATIME and indicates that the
+	// filesystem should not update access time in-place.
+	NoATime bool
+
+	// NoDev is equivalent to MS_NODEV and indicates that the
+	// filesystem should not allow access to devices (special files).
+	// TODO(gVisor.dev/issue/3186): respect this flag in non FUSE
+	// filesystems.
+	NoDev bool
+
+	// NoSUID is equivalent to MS_NOSUID and indicates that the
+	// filesystem should not honor set-user-ID and set-group-ID bits or
+	// file capabilities when executing programs.
+	NoSUID bool
 }
 
 // MountOptions contains options to VirtualFilesystem.MountAt().
@@ -149,6 +164,12 @@ type SetStatOptions struct {
 	// == UTIME_OMIT (VFS users must unset the corresponding bit in Stat.Mask
 	// instead).
 	Stat linux.Statx
+
+	// NeedWritePerm indicates that write permission on the file is needed for
+	// this operation. This is needed for truncate(2) (note that ftruncate(2)
+	// does not require the same check--instead, it checks that the fd is
+	// writable).
+	NeedWritePerm bool
 }
 
 // BoundEndpointOptions contains options to VirtualFilesystem.BoundEndpointAt()

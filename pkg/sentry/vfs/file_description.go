@@ -42,10 +42,19 @@ type FileDescription struct {
 	// operations.
 	refs int64
 
+	// flagsMu protects statusFlags and asyncHandler below.
+	flagsMu sync.Mutex
+
 	// statusFlags contains status flags, "initialized by open(2) and possibly
-	// modified by fcntl()" - fcntl(2). statusFlags is accessed using atomic
-	// memory operations.
+	// modified by fcntl()" - fcntl(2). statusFlags can be read using atomic
+	// memory operations when it does not need to be synchronized with an
+	// access to asyncHandler.
 	statusFlags uint32
+
+	// asyncHandler handles O_ASYNC signal generation. It is set with the
+	// F_SETOWN or F_SETOWN_EX fcntls. For asyncHandler to be used, O_ASYNC must
+	// also be set by fcntl(2).
+	asyncHandler FileAsync
 
 	// epolls is the set of epollInterests registered for this FileDescription.
 	// epolls is protected by epollMu.
@@ -73,6 +82,8 @@ type FileDescription struct {
 	// writable is analogous to Linux's FMODE_WRITE.
 	writable bool
 
+	usedLockBSD uint32
+
 	// impl is the FileDescriptionImpl associated with this Filesystem. impl is
 	// immutable. This should be the last field in FileDescription.
 	impl FileDescriptionImpl
@@ -80,8 +91,7 @@ type FileDescription struct {
 
 // FileDescriptionOptions contains options to FileDescription.Init().
 type FileDescriptionOptions struct {
-	// If AllowDirectIO is true, allow O_DIRECT to be set on the file. This is
-	// usually only the case if O_DIRECT would actually have an effect.
+	// If AllowDirectIO is true, allow O_DIRECT to be set on the file.
 	AllowDirectIO bool
 
 	// If DenyPRead is true, calls to FileDescription.PRead() return ESPIPE.
@@ -106,6 +116,10 @@ type FileDescriptionOptions struct {
 	UseDentryMetadata bool
 }
 
+// FileCreationFlags are the set of flags passed to FileDescription.Init() but
+// omitted from FileDescription.StatusFlags().
+const FileCreationFlags = linux.O_CREAT | linux.O_EXCL | linux.O_NOCTTY | linux.O_TRUNC
+
 // Init must be called before first use of fd. If it succeeds, it takes
 // references on mnt and d. flags is the initial file description flags, which
 // is usually the full set of flags passed to open(2).
@@ -120,8 +134,8 @@ func (fd *FileDescription) Init(impl FileDescriptionImpl, flags uint32, mnt *Mou
 	fd.refs = 1
 
 	// Remove "file creation flags" to mirror the behavior from file.f_flags in
-	// fs/open.c:do_dentry_open
-	fd.statusFlags = flags &^ (linux.O_CREAT | linux.O_EXCL | linux.O_NOCTTY | linux.O_TRUNC)
+	// fs/open.c:do_dentry_open.
+	fd.statusFlags = flags &^ FileCreationFlags
 	fd.vd = VirtualDentry{
 		mount:  mnt,
 		dentry: d,
@@ -175,12 +189,25 @@ func (fd *FileDescription) DecRef() {
 			}
 			ep.interestMu.Unlock()
 		}
+
+		// If BSD locks were used, release any lock that it may have acquired.
+		if atomic.LoadUint32(&fd.usedLockBSD) != 0 {
+			fd.impl.UnlockBSD(context.Background(), fd)
+		}
+
 		// Release implementation resources.
 		fd.impl.Release()
 		if fd.writable {
 			fd.vd.mount.EndWrite()
 		}
 		fd.vd.DecRef()
+		fd.flagsMu.Lock()
+		// TODO(gvisor.dev/issue/1663): We may need to unregister during save, as we do in VFS1.
+		if fd.statusFlags&linux.O_ASYNC != 0 && fd.asyncHandler != nil {
+			fd.asyncHandler.Unregister(fd)
+		}
+		fd.asyncHandler = nil
+		fd.flagsMu.Unlock()
 	} else if refs < 0 {
 		panic("FileDescription.DecRef() called without holding a reference")
 	}
@@ -208,6 +235,11 @@ func (fd *FileDescription) Dentry() *Dentry {
 // a reference on the returned VirtualDentry.
 func (fd *FileDescription) VirtualDentry() VirtualDentry {
 	return fd.vd
+}
+
+// Options returns the options passed to fd.Init().
+func (fd *FileDescription) Options() FileDescriptionOptions {
+	return fd.opts
 }
 
 // StatusFlags returns file description status flags, as for fcntl(F_GETFL).
@@ -259,7 +291,18 @@ func (fd *FileDescription) SetStatusFlags(ctx context.Context, creds *auth.Crede
 	}
 	// TODO(jamieliu): FileDescriptionImpl.SetOAsync()?
 	const settableFlags = linux.O_APPEND | linux.O_ASYNC | linux.O_DIRECT | linux.O_NOATIME | linux.O_NONBLOCK
-	atomic.StoreUint32(&fd.statusFlags, (oldFlags&^settableFlags)|(flags&settableFlags))
+	fd.flagsMu.Lock()
+	if fd.asyncHandler != nil {
+		// Use fd.statusFlags instead of oldFlags, which may have become outdated,
+		// to avoid double registering/unregistering.
+		if fd.statusFlags&linux.O_ASYNC == 0 && flags&linux.O_ASYNC != 0 {
+			fd.asyncHandler.Register(fd)
+		} else if fd.statusFlags&linux.O_ASYNC != 0 && flags&linux.O_ASYNC == 0 {
+			fd.asyncHandler.Unregister(fd)
+		}
+	}
+	fd.statusFlags = (oldFlags &^ settableFlags) | (flags & settableFlags)
+	fd.flagsMu.Unlock()
 	return nil
 }
 
@@ -310,6 +353,10 @@ type FileDescriptionImpl interface {
 	// StatFS returns metadata for the filesystem containing the file
 	// represented by the FileDescription.
 	StatFS(ctx context.Context) (linux.Statfs, error)
+
+	// Allocate grows the file to offset + length bytes.
+	// Only mode == 0 is supported currently.
+	Allocate(ctx context.Context, mode, offset, length uint64) error
 
 	// waiter.Waitable methods may be used to poll for I/O events.
 	waiter.Waitable
@@ -415,24 +462,16 @@ type FileDescriptionImpl interface {
 	Removexattr(ctx context.Context, name string) error
 
 	// LockBSD tries to acquire a BSD-style advisory file lock.
-	//
-	// TODO(gvisor.dev/issue/1480): BSD-style file locking
 	LockBSD(ctx context.Context, uid lock.UniqueID, t lock.LockType, block lock.Blocker) error
 
-	// LockBSD releases a BSD-style advisory file lock.
-	//
-	// TODO(gvisor.dev/issue/1480): BSD-style file locking
+	// UnlockBSD releases a BSD-style advisory file lock.
 	UnlockBSD(ctx context.Context, uid lock.UniqueID) error
 
 	// LockPOSIX tries to acquire a POSIX-style advisory file lock.
-	//
-	// TODO(gvisor.dev/issue/1480): POSIX-style file locking
-	LockPOSIX(ctx context.Context, uid lock.UniqueID, t lock.LockType, rng lock.LockRange, block lock.Blocker) error
+	LockPOSIX(ctx context.Context, uid lock.UniqueID, t lock.LockType, start, length uint64, whence int16, block lock.Blocker) error
 
 	// UnlockPOSIX releases a POSIX-style advisory file lock.
-	//
-	// TODO(gvisor.dev/issue/1480): POSIX-style file locking
-	UnlockPOSIX(ctx context.Context, uid lock.UniqueID, rng lock.LockRange) error
+	UnlockPOSIX(ctx context.Context, uid lock.UniqueID, start, length uint64, whence int16) error
 }
 
 // Dirent holds the information contained in struct linux_dirent64.
@@ -460,6 +499,15 @@ type IterDirentsCallback interface {
 	// the error; the next call to FileDescriptionImpl.IterDirents should
 	// restart with the same Dirent.
 	Handle(dirent Dirent) error
+}
+
+// IterDirentsCallbackFunc implements IterDirentsCallback for a function with
+// the semantics of IterDirentsCallback.Handle.
+type IterDirentsCallbackFunc func(dirent Dirent) error
+
+// Handle implements IterDirentsCallback.Handle.
+func (f IterDirentsCallbackFunc) Handle(dirent Dirent) error {
+	return f(dirent)
 }
 
 // OnClose is called when a file descriptor representing the FileDescription is
@@ -515,17 +563,28 @@ func (fd *FileDescription) StatFS(ctx context.Context) (linux.Statfs, error) {
 	return fd.impl.StatFS(ctx)
 }
 
-// Readiness returns fd's I/O readiness.
+// Allocate grows file represented by FileDescription to offset + length bytes.
+func (fd *FileDescription) Allocate(ctx context.Context, mode, offset, length uint64) error {
+	return fd.impl.Allocate(ctx, mode, offset, length)
+}
+
+// Readiness implements waiter.Waitable.Readiness.
+//
+// It returns fd's I/O readiness.
 func (fd *FileDescription) Readiness(mask waiter.EventMask) waiter.EventMask {
 	return fd.impl.Readiness(mask)
 }
 
-// EventRegister registers e for I/O readiness events in mask.
+// EventRegister implements waiter.Waitable.EventRegister.
+//
+// It registers e for I/O readiness events in mask.
 func (fd *FileDescription) EventRegister(e *waiter.Entry, mask waiter.EventMask) {
 	fd.impl.EventRegister(e, mask)
 }
 
-// EventUnregister unregisters e for I/O readiness events.
+// EventUnregister implements waiter.Waitable.EventUnregister.
+//
+// It unregisters e for I/O readiness events.
 func (fd *FileDescription) EventUnregister(e *waiter.Entry) {
 	fd.impl.EventUnregister(e)
 }
@@ -730,4 +789,54 @@ func (fd *FileDescription) InodeID() uint64 {
 // Msync implements memmap.MappingIdentity.Msync.
 func (fd *FileDescription) Msync(ctx context.Context, mr memmap.MappableRange) error {
 	return fd.Sync(ctx)
+}
+
+// LockBSD tries to acquire a BSD-style advisory file lock.
+func (fd *FileDescription) LockBSD(ctx context.Context, lockType lock.LockType, blocker lock.Blocker) error {
+	atomic.StoreUint32(&fd.usedLockBSD, 1)
+	return fd.impl.LockBSD(ctx, fd, lockType, blocker)
+}
+
+// UnlockBSD releases a BSD-style advisory file lock.
+func (fd *FileDescription) UnlockBSD(ctx context.Context) error {
+	return fd.impl.UnlockBSD(ctx, fd)
+}
+
+// LockPOSIX locks a POSIX-style file range lock.
+func (fd *FileDescription) LockPOSIX(ctx context.Context, uid lock.UniqueID, t lock.LockType, start, end uint64, whence int16, block lock.Blocker) error {
+	return fd.impl.LockPOSIX(ctx, uid, t, start, end, whence, block)
+}
+
+// UnlockPOSIX unlocks a POSIX-style file range lock.
+func (fd *FileDescription) UnlockPOSIX(ctx context.Context, uid lock.UniqueID, start, end uint64, whence int16) error {
+	return fd.impl.UnlockPOSIX(ctx, uid, start, end, whence)
+}
+
+// A FileAsync sends signals to its owner when w is ready for IO. This is only
+// implemented by pkg/sentry/fasync:FileAsync, but we unfortunately need this
+// interface to avoid circular dependencies.
+type FileAsync interface {
+	Register(w waiter.Waitable)
+	Unregister(w waiter.Waitable)
+}
+
+// AsyncHandler returns the FileAsync for fd.
+func (fd *FileDescription) AsyncHandler() FileAsync {
+	fd.flagsMu.Lock()
+	defer fd.flagsMu.Unlock()
+	return fd.asyncHandler
+}
+
+// SetAsyncHandler sets fd.asyncHandler if it has not been set before and
+// returns it.
+func (fd *FileDescription) SetAsyncHandler(newHandler func() FileAsync) FileAsync {
+	fd.flagsMu.Lock()
+	defer fd.flagsMu.Unlock()
+	if fd.asyncHandler == nil {
+		fd.asyncHandler = newHandler()
+		if fd.statusFlags&linux.O_ASYNC != 0 {
+			fd.asyncHandler.Register(fd)
+		}
+	}
+	return fd.asyncHandler
 }

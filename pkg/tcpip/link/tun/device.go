@@ -139,6 +139,7 @@ func attachOrCreateNIC(s *stack.Stack, name, prefix string, linkCaps stack.LinkE
 			stack:    s,
 			nicID:    id,
 			name:     name,
+			isTap:    prefix == "tap",
 		}
 		endpoint.Endpoint.LinkEPCapabilities = linkCaps
 		if endpoint.name == "" {
@@ -213,7 +214,7 @@ func (d *Device) Write(data []byte) (int64, error) {
 		remote = tcpip.LinkAddress(zeroMAC[:])
 	}
 
-	pkt := stack.PacketBuffer{
+	pkt := &stack.PacketBuffer{
 		Data: buffer.View(data).ToVectorisedView(),
 	}
 	if ethHdr != nil {
@@ -271,21 +272,9 @@ func (d *Device) encodePkt(info *channel.PacketInfo) (buffer.View, bool) {
 	if d.hasFlags(linux.IFF_TAP) {
 		// Add ethernet header if not provided.
 		if info.Pkt.LinkHeader == nil {
-			hdr := &header.EthernetFields{
-				SrcAddr: info.Route.LocalLinkAddress,
-				DstAddr: info.Route.RemoteLinkAddress,
-				Type:    info.Proto,
-			}
-			if hdr.SrcAddr == "" {
-				hdr.SrcAddr = d.endpoint.LinkAddress()
-			}
-
-			eth := make(header.Ethernet, header.EthernetMinimumSize)
-			eth.Encode(hdr)
-			vv.AppendView(buffer.View(eth))
-		} else {
-			vv.AppendView(info.Pkt.LinkHeader)
+			d.endpoint.AddHeader(info.Route.LocalLinkAddress, info.Route.RemoteLinkAddress, info.Proto, info.Pkt)
 		}
+		vv.AppendView(info.Pkt.LinkHeader)
 	}
 
 	// Append upper headers.
@@ -348,6 +337,7 @@ type tunEndpoint struct {
 	stack *stack.Stack
 	nicID tcpip.NICID
 	name  string
+	isTap bool
 }
 
 // DecRef decrements refcount of e, removes NIC if refcount goes to 0.
@@ -355,4 +345,39 @@ func (e *tunEndpoint) DecRef() {
 	e.DecRefWithDestructor(func() {
 		e.stack.RemoveNIC(e.nicID)
 	})
+}
+
+// ARPHardwareType implements stack.LinkEndpoint.ARPHardwareType.
+func (e *tunEndpoint) ARPHardwareType() header.ARPHardwareType {
+	if e.isTap {
+		return header.ARPHardwareEther
+	}
+	return header.ARPHardwareNone
+}
+
+// AddHeader implements stack.LinkEndpoint.AddHeader.
+func (e *tunEndpoint) AddHeader(local, remote tcpip.LinkAddress, protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
+	if !e.isTap {
+		return
+	}
+	eth := header.Ethernet(pkt.Header.Prepend(header.EthernetMinimumSize))
+	pkt.LinkHeader = buffer.View(eth)
+	hdr := &header.EthernetFields{
+		SrcAddr: local,
+		DstAddr: remote,
+		Type:    protocol,
+	}
+	if hdr.SrcAddr == "" {
+		hdr.SrcAddr = e.LinkAddress()
+	}
+
+	eth.Encode(hdr)
+}
+
+// MaxHeaderLength returns the maximum size of the link layer header.
+func (e *tunEndpoint) MaxHeaderLength() uint16 {
+	if e.isTap {
+		return header.EthernetMinimumSize
+	}
+	return 0
 }

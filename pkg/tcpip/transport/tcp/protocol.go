@@ -21,6 +21,7 @@
 package tcp
 
 import (
+	"fmt"
 	"runtime"
 	"strings"
 	"time"
@@ -70,33 +71,35 @@ const (
 	DefaultSynRetries = 6
 )
 
-// SACKEnabled option can be used to enable SACK support in the TCP
-// protocol. See: https://tools.ietf.org/html/rfc2018.
+const (
+	ccReno  = "reno"
+	ccCubic = "cubic"
+)
+
+// SACKEnabled is used by stack.(*Stack).TransportProtocolOption to
+// enable/disable SACK support in TCP. See: https://tools.ietf.org/html/rfc2018.
 type SACKEnabled bool
 
-// DelayEnabled option can be used to enable Nagle's algorithm in the TCP protocol.
+// DelayEnabled is used by stack.(Stack*).TransportProtocolOption to
+// enable/disable Nagle's algorithm in TCP.
 type DelayEnabled bool
 
-// SendBufferSizeOption allows the default, min and max send buffer sizes for
-// TCP endpoints to be queried or configured.
+// SendBufferSizeOption is used by stack.(Stack*).TransportProtocolOption
+// to get/set the default, min and max TCP send buffer sizes.
 type SendBufferSizeOption struct {
 	Min     int
 	Default int
 	Max     int
 }
 
-// ReceiveBufferSizeOption allows the default, min and max receive buffer size
-// for TCP endpoints to be queried or configured.
+// ReceiveBufferSizeOption is used by
+// stack.(Stack*).TransportProtocolOption to get/set the default, min and max
+// TCP receive buffer sizes.
 type ReceiveBufferSizeOption struct {
 	Min     int
 	Default int
 	Max     int
 }
-
-const (
-	ccReno  = "reno"
-	ccCubic = "cubic"
-)
 
 // syncRcvdCounter tracks the number of endpoints in the SYN-RCVD state. The
 // value is protected by a mutex so that we can increment only when it's
@@ -171,7 +174,7 @@ type protocol struct {
 	maxRetries                 uint32
 	synRcvdCount               synRcvdCounter
 	synRetries                 uint8
-	dispatcher                 *dispatcher
+	dispatcher                 dispatcher
 }
 
 // Number returns the tcp protocol number.
@@ -206,7 +209,7 @@ func (*protocol) ParsePorts(v buffer.View) (src, dst uint16, err *tcpip.Error) {
 // to a specific processing queue. Each queue is serviced by its own processor
 // goroutine which is responsible for dequeuing and doing full TCP dispatch of
 // the packet.
-func (p *protocol) QueuePacket(r *stack.Route, ep stack.TransportEndpoint, id stack.TransportEndpointID, pkt stack.PacketBuffer) {
+func (p *protocol) QueuePacket(r *stack.Route, ep stack.TransportEndpoint, id stack.TransportEndpointID, pkt *stack.PacketBuffer) {
 	p.dispatcher.queuePacket(r, ep, id, pkt)
 }
 
@@ -217,7 +220,7 @@ func (p *protocol) QueuePacket(r *stack.Route, ep stack.TransportEndpoint, id st
 // a reset is sent in response to any incoming segment except another reset. In
 // particular, SYNs addressed to a non-existent connection are rejected by this
 // means."
-func (*protocol) HandleUnknownDestinationPacket(r *stack.Route, id stack.TransportEndpointID, pkt stack.PacketBuffer) bool {
+func (*protocol) HandleUnknownDestinationPacket(r *stack.Route, id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
 	s := newSegment(r, id, pkt)
 	defer s.decRef()
 
@@ -490,20 +493,49 @@ func (p *protocol) SynRcvdCounter() *synRcvdCounter {
 	return &p.synRcvdCount
 }
 
+// Parse implements stack.TransportProtocol.Parse.
+func (*protocol) Parse(pkt *stack.PacketBuffer) bool {
+	hdr, ok := pkt.Data.PullUp(header.TCPMinimumSize)
+	if !ok {
+		return false
+	}
+
+	// If the header has options, pull those up as well.
+	if offset := int(header.TCP(hdr).DataOffset()); offset > header.TCPMinimumSize && offset <= pkt.Data.Size() {
+		hdr, ok = pkt.Data.PullUp(offset)
+		if !ok {
+			panic(fmt.Sprintf("There should be at least %d bytes in pkt.Data.", offset))
+		}
+	}
+
+	pkt.TransportHeader = hdr
+	pkt.Data.TrimFront(len(hdr))
+	return true
+}
+
 // NewProtocol returns a TCP transport protocol.
 func NewProtocol() stack.TransportProtocol {
-	return &protocol{
-		sendBufferSize:             SendBufferSizeOption{MinBufferSize, DefaultSendBufferSize, MaxBufferSize},
-		recvBufferSize:             ReceiveBufferSizeOption{MinBufferSize, DefaultReceiveBufferSize, MaxBufferSize},
+	p := protocol{
+		sendBufferSize: SendBufferSizeOption{
+			Min:     MinBufferSize,
+			Default: DefaultSendBufferSize,
+			Max:     MaxBufferSize,
+		},
+		recvBufferSize: ReceiveBufferSizeOption{
+			Min:     MinBufferSize,
+			Default: DefaultReceiveBufferSize,
+			Max:     MaxBufferSize,
+		},
 		congestionControl:          ccReno,
 		availableCongestionControl: []string{ccReno, ccCubic},
 		tcpLingerTimeout:           DefaultTCPLingerTimeout,
 		tcpTimeWaitTimeout:         DefaultTCPTimeWaitTimeout,
 		synRcvdCount:               synRcvdCounter{threshold: SynRcvdCountThreshold},
-		dispatcher:                 newDispatcher(runtime.GOMAXPROCS(0)),
 		synRetries:                 DefaultSynRetries,
 		minRTO:                     MinRTO,
 		maxRTO:                     MaxRTO,
 		maxRetries:                 MaxRetries,
 	}
+	p.dispatcher.init(runtime.GOMAXPROCS(0))
+	return &p
 }

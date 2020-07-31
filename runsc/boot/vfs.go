@@ -22,25 +22,32 @@ import (
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/fspath"
+	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sentry/devices/memdev"
-	"gvisor.dev/gvisor/pkg/sentry/fs"
+	"gvisor.dev/gvisor/pkg/sentry/devices/ttydev"
+	"gvisor.dev/gvisor/pkg/sentry/devices/tundev"
+	"gvisor.dev/gvisor/pkg/sentry/fs/user"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/devpts"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/devtmpfs"
+	"gvisor.dev/gvisor/pkg/sentry/fsimpl/fuse"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/gofer"
+	"gvisor.dev/gvisor/pkg/sentry/fsimpl/overlay"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/proc"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/sys"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/tmpfs"
-	"gvisor.dev/gvisor/pkg/syserror"
-
-	"gvisor.dev/gvisor/pkg/context"
-	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
+	"gvisor.dev/gvisor/pkg/syserror"
 )
 
-func registerFilesystems(ctx context.Context, vfsObj *vfs.VirtualFilesystem, creds *auth.Credentials) error {
+func registerFilesystems(k *kernel.Kernel) error {
+	ctx := k.SupervisorContext()
+	creds := auth.NewRootCredentials(k.RootUserNamespace())
+	vfsObj := k.VFS()
+
 	vfsObj.MustRegisterFilesystemType(devpts.Name, &devpts.FilesystemType{}, &vfs.RegisterFilesystemTypeOptions{
 		AllowUserList: true,
 		// TODO(b/29356795): Users may mount this once the terminals are in a
@@ -54,6 +61,10 @@ func registerFilesystems(ctx context.Context, vfsObj *vfs.VirtualFilesystem, cre
 	vfsObj.MustRegisterFilesystemType(gofer.Name, &gofer.FilesystemType{}, &vfs.RegisterFilesystemTypeOptions{
 		AllowUserList: true,
 	})
+	vfsObj.MustRegisterFilesystemType(overlay.Name, &overlay.FilesystemType{}, &vfs.RegisterFilesystemTypeOptions{
+		AllowUserMount: true,
+		AllowUserList:  true,
+	})
 	vfsObj.MustRegisterFilesystemType(proc.Name, &proc.FilesystemType{}, &vfs.RegisterFilesystemTypeOptions{
 		AllowUserMount: true,
 		AllowUserList:  true,
@@ -66,10 +77,27 @@ func registerFilesystems(ctx context.Context, vfsObj *vfs.VirtualFilesystem, cre
 		AllowUserMount: true,
 		AllowUserList:  true,
 	})
+	vfsObj.MustRegisterFilesystemType(fuse.Name, &fuse.FilesystemType{}, &vfs.RegisterFilesystemTypeOptions{
+		AllowUserMount: true,
+		AllowUserList:  true,
+	})
 
 	// Setup files in devtmpfs.
 	if err := memdev.Register(vfsObj); err != nil {
 		return fmt.Errorf("registering memdev: %w", err)
+	}
+	if err := ttydev.Register(vfsObj); err != nil {
+		return fmt.Errorf("registering ttydev: %w", err)
+	}
+
+	if kernel.FUSEEnabled {
+		if err := fuse.Register(vfsObj); err != nil {
+			return fmt.Errorf("registering fusedev: %w", err)
+		}
+	}
+
+	if err := tundev.Register(vfsObj); err != nil {
+		return fmt.Errorf("registering tundev: %v", err)
 	}
 	a, err := devtmpfs.NewAccessor(ctx, vfsObj, creds, devtmpfs.Name)
 	if err != nil {
@@ -81,83 +109,38 @@ func registerFilesystems(ctx context.Context, vfsObj *vfs.VirtualFilesystem, cre
 		return fmt.Errorf("initializing userspace: %w", err)
 	}
 	if err := memdev.CreateDevtmpfsFiles(ctx, a); err != nil {
-		return fmt.Errorf("creating devtmpfs files: %w", err)
+		return fmt.Errorf("creating memdev devtmpfs files: %w", err)
 	}
+	if err := ttydev.CreateDevtmpfsFiles(ctx, a); err != nil {
+		return fmt.Errorf("creating ttydev devtmpfs files: %w", err)
+	}
+	if err := tundev.CreateDevtmpfsFiles(ctx, a); err != nil {
+		return fmt.Errorf("creating tundev devtmpfs files: %v", err)
+	}
+
+	if kernel.FUSEEnabled {
+		if err := fuse.CreateDevtmpfsFile(ctx, a); err != nil {
+			return fmt.Errorf("creating fusedev devtmpfs files: %w", err)
+		}
+	}
+
 	return nil
 }
 
 func setupContainerVFS2(ctx context.Context, conf *Config, mntr *containerMounter, procArgs *kernel.CreateProcessArgs) error {
-	if err := mntr.k.VFS().Init(); err != nil {
-		return fmt.Errorf("failed to initialize VFS: %w", err)
-	}
 	mns, err := mntr.setupVFS2(ctx, conf, procArgs)
 	if err != nil {
 		return fmt.Errorf("failed to setupFS: %w", err)
 	}
 	procArgs.MountNamespaceVFS2 = mns
-	return setExecutablePathVFS2(ctx, procArgs)
-}
 
-func setExecutablePathVFS2(ctx context.Context, procArgs *kernel.CreateProcessArgs) error {
-	exe := procArgs.Argv[0]
-
-	// Absolute paths can be used directly.
-	if path.IsAbs(exe) {
-		procArgs.Filename = exe
-		return nil
+	// Resolve the executable path from working dir and environment.
+	resolved, err := user.ResolveExecutablePath(ctx, procArgs)
+	if err != nil {
+		return err
 	}
-
-	// Paths with '/' in them should be joined to the working directory, or
-	// to the root if working directory is not set.
-	if strings.IndexByte(exe, '/') > 0 {
-		if !path.IsAbs(procArgs.WorkingDirectory) {
-			return fmt.Errorf("working directory %q must be absolute", procArgs.WorkingDirectory)
-		}
-		procArgs.Filename = path.Join(procArgs.WorkingDirectory, exe)
-		return nil
-	}
-
-	// Paths with a '/' are relative to the CWD.
-	if strings.IndexByte(exe, '/') > 0 {
-		procArgs.Filename = path.Join(procArgs.WorkingDirectory, exe)
-		return nil
-	}
-
-	// Otherwise, We must lookup the name in the paths, starting from the
-	// root directory.
-	root := procArgs.MountNamespaceVFS2.Root()
-	defer root.DecRef()
-
-	paths := fs.GetPath(procArgs.Envv)
-	creds := procArgs.Credentials
-
-	for _, p := range paths {
-		binPath := path.Join(p, exe)
-		pop := &vfs.PathOperation{
-			Root:               root,
-			Start:              root,
-			Path:               fspath.Parse(binPath),
-			FollowFinalSymlink: true,
-		}
-		opts := &vfs.OpenOptions{
-			FileExec: true,
-			Flags:    linux.O_RDONLY,
-		}
-		dentry, err := root.Mount().Filesystem().VirtualFilesystem().OpenAt(ctx, creds, pop, opts)
-		if err == syserror.ENOENT || err == syserror.EACCES {
-			// Didn't find it here.
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		dentry.DecRef()
-
-		procArgs.Filename = binPath
-		return nil
-	}
-
-	return fmt.Errorf("executable %q not found in $PATH=%q", exe, strings.Join(paths, ":"))
+	procArgs.Filename = resolved
+	return nil
 }
 
 func (c *containerMounter) setupVFS2(ctx context.Context, conf *Config, procArgs *kernel.CreateProcessArgs) (*vfs.MountNamespace, error) {
@@ -172,10 +155,6 @@ func (c *containerMounter) setupVFS2(ctx context.Context, conf *Config, procArgs
 	rootProcArgs.Umask = 0022
 	rootProcArgs.MaxSymlinkTraversals = linux.MaxSymlinkTraversals
 	rootCtx := procArgs.NewContext(c.k)
-
-	if err := registerFilesystems(rootCtx, c.k.VFS(), rootCreds); err != nil {
-		return nil, fmt.Errorf("register filesystems: %w", err)
-	}
 
 	mns, err := c.createMountNamespaceVFS2(rootCtx, conf, rootCreds)
 	if err != nil {
@@ -192,10 +171,19 @@ func (c *containerMounter) setupVFS2(ctx context.Context, conf *Config, procArgs
 
 func (c *containerMounter) createMountNamespaceVFS2(ctx context.Context, conf *Config, creds *auth.Credentials) (*vfs.MountNamespace, error) {
 	fd := c.fds.remove()
-	opts := strings.Join(p9MountOptions(fd, conf.FileAccess, true /* vfs2 */), ",")
+	opts := p9MountData(fd, conf.FileAccess, true /* vfs2 */)
+
+	if conf.OverlayfsStaleRead {
+		// We can't check for overlayfs here because sandbox is chroot'ed and gofer
+		// can only send mount options for specs.Mounts (specs.Root is missing
+		// Options field). So assume root is always on top of overlayfs.
+		opts = append(opts, "overlayfs_stale_read")
+	}
 
 	log.Infof("Mounting root over 9P, ioFD: %d", fd)
-	mns, err := c.k.VFS().NewMountNamespace(ctx, creds, "", gofer.Name, &vfs.GetFilesystemOptions{Data: opts})
+	mns, err := c.k.VFS().NewMountNamespace(ctx, creds, "", gofer.Name, &vfs.GetFilesystemOptions{
+		Data: strings.Join(opts, ","),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("setting up mount namespace: %w", err)
 	}
@@ -211,13 +199,20 @@ func (c *containerMounter) mountSubmountsVFS2(ctx context.Context, conf *Config,
 	for i := range mounts {
 		submount := &mounts[i]
 		log.Debugf("Mounting %q to %q, type: %s, options: %s", submount.Source, submount.Destination, submount.Type, submount.Options)
-		if err := c.mountSubmountVFS2(ctx, conf, mns, creds, submount); err != nil {
-			return err
+		if hint := c.hints.findMount(submount.Mount); hint != nil && hint.isSupported() {
+			if err := c.mountSharedSubmountVFS2(ctx, conf, mns, creds, submount.Mount, hint); err != nil {
+				return fmt.Errorf("mount shared mount %q to %q: %v", hint.name, submount.Destination, err)
+			}
+		} else {
+			if err := c.mountSubmountVFS2(ctx, conf, mns, creds, submount); err != nil {
+				return fmt.Errorf("mount submount %q: %w", submount.Destination, err)
+			}
 		}
 	}
 
-	// TODO(gvisor.dev/issue/1487): implement mountTmp from fs.go.
-
+	if err := c.mountTmpVFS2(ctx, conf, creds, mns); err != nil {
+		return fmt.Errorf(`mount submount "\tmp": %w`, err)
+	}
 	return nil
 }
 
@@ -235,7 +230,7 @@ func (c *containerMounter) prepareMountsVFS2() ([]mountAndFD, error) {
 		fd := -1
 		// Only bind mounts use host FDs; see
 		// containerMounter.getMountNameAndOptionsVFS2.
-		if m.Type == bind || isBindMount(m) {
+		if m.Type == bind {
 			fd = c.fds.remove()
 		}
 		mounts = append(mounts, mountAndFD{
@@ -255,8 +250,6 @@ func (c *containerMounter) prepareMountsVFS2() ([]mountAndFD, error) {
 	return mounts, nil
 }
 
-// TODO(gvisor.dev/issue/1487): Implement submount options similar to the VFS1
-// version.
 func (c *containerMounter) mountSubmountVFS2(ctx context.Context, conf *Config, mns *vfs.MountNamespace, creds *auth.Credentials, submount *mountAndFD) error {
 	root := mns.Root()
 	defer root.DecRef()
@@ -265,12 +258,11 @@ func (c *containerMounter) mountSubmountVFS2(ctx context.Context, conf *Config, 
 		Start: root,
 		Path:  fspath.Parse(submount.Destination),
 	}
-
-	fsName, options, useOverlay, err := c.getMountNameAndOptionsVFS2(conf, submount)
+	fsName, opts, err := c.getMountNameAndOptionsVFS2(conf, submount)
 	if err != nil {
 		return fmt.Errorf("mountOptions failed: %w", err)
 	}
-	if fsName == "" {
+	if len(fsName) == 0 {
 		// Filesystem is not supported (e.g. cgroup), just skip it.
 		return nil
 	}
@@ -278,17 +270,6 @@ func (c *containerMounter) mountSubmountVFS2(ctx context.Context, conf *Config, 
 	if err := c.makeSyntheticMount(ctx, submount.Destination, root, creds); err != nil {
 		return err
 	}
-
-	opts := &vfs.MountOptions{
-		GetFilesystemOptions: vfs.GetFilesystemOptions{
-			Data: strings.Join(options, ","),
-		},
-		InternalMount: true,
-	}
-
-	// All writes go to upper, be paranoid and make lower readonly.
-	opts.ReadOnly = useOverlay
-
 	if err := c.k.VFS().MountAt(ctx, creds, "", target, fsName, opts); err != nil {
 		return fmt.Errorf("failed to mount %q (type: %s): %w, opts: %v", submount.Destination, submount.Type, err, opts)
 	}
@@ -298,41 +279,66 @@ func (c *containerMounter) mountSubmountVFS2(ctx context.Context, conf *Config, 
 
 // getMountNameAndOptionsVFS2 retrieves the fsName, opts, and useOverlay values
 // used for mounts.
-func (c *containerMounter) getMountNameAndOptionsVFS2(conf *Config, m *mountAndFD) (string, []string, bool, error) {
-	var (
-		fsName     string
-		opts       []string
-		useOverlay bool
-	)
+func (c *containerMounter) getMountNameAndOptionsVFS2(conf *Config, m *mountAndFD) (string, *vfs.MountOptions, error) {
+	fsName := m.Type
+	var data []string
 
-	if isBindMount(m.Mount) {
-		m.Type = bind
-	}
-
+	// Find filesystem name and FS specific data field.
 	switch m.Type {
 	case devpts.Name, devtmpfs.Name, proc.Name, sys.Name:
-		fsName = m.Type
+		// Nothing to do.
+
 	case nonefs:
 		fsName = sys.Name
-	case tmpfs.Name:
-		fsName = m.Type
 
+	case tmpfs.Name:
 		var err error
-		opts, err = parseAndFilterOptions(m.Options, tmpfsAllowedOptions...)
+		data, err = parseAndFilterOptions(m.Options, tmpfsAllowedData...)
 		if err != nil {
-			return "", nil, false, err
+			return "", nil, err
 		}
 
 	case bind:
 		fsName = gofer.Name
-		opts = p9MountOptions(m.fd, c.getMountAccessType(m.Mount), true /* vfs2 */)
-		// If configured, add overlay to all writable mounts.
-		useOverlay = conf.Overlay && !mountFlags(m.Options).ReadOnly
+		if m.fd == 0 {
+			// Check that an FD was provided to fails fast. Technically FD=0 is valid,
+			// but unlikely to be correct in this context.
+			return "", nil, fmt.Errorf("9P mount requires a connection FD")
+		}
+		data = p9MountData(m.fd, c.getMountAccessType(m.Mount), true /* vfs2 */)
 
 	default:
 		log.Warningf("ignoring unknown filesystem type %q", m.Type)
+		return "", nil, nil
 	}
-	return fsName, opts, useOverlay, nil
+
+	opts := &vfs.MountOptions{
+		GetFilesystemOptions: vfs.GetFilesystemOptions{
+			Data: strings.Join(data, ","),
+		},
+		InternalMount: true,
+	}
+
+	for _, o := range m.Options {
+		switch o {
+		case "rw":
+			opts.ReadOnly = false
+		case "ro":
+			opts.ReadOnly = true
+		case "noatime":
+			opts.Flags.NoATime = true
+		case "noexec":
+			opts.Flags.NoExec = true
+		default:
+			log.Warningf("ignoring unknown mount option %q", o)
+		}
+	}
+
+	if conf.Overlay {
+		// All writes go to upper, be paranoid and make lower readonly.
+		opts.ReadOnly = true
+	}
+	return fsName, opts, nil
 }
 
 func (c *containerMounter) makeSyntheticMount(ctx context.Context, currentPath string, root vfs.VirtualDentry, creds *auth.Credentials) error {
@@ -343,7 +349,7 @@ func (c *containerMounter) makeSyntheticMount(ctx context.Context, currentPath s
 	}
 	_, err := c.k.VFS().StatAt(ctx, creds, target, &vfs.StatOptions{})
 	if err == nil {
-		// Mount point exists, nothing else to do.
+		log.Debugf("Mount point %q already exists", currentPath)
 		return nil
 	}
 	if err != syserror.ENOENT {
@@ -359,5 +365,138 @@ func (c *containerMounter) makeSyntheticMount(ctx context.Context, currentPath s
 	if err := c.k.VFS().MkdirAt(ctx, creds, target, mkdirOpts); err != nil {
 		return fmt.Errorf("failed to create directory %q for mount: %w", currentPath, err)
 	}
+	return nil
+}
+
+// mountTmpVFS2 mounts an internal tmpfs at '/tmp' if it's safe to do so.
+// Technically we don't have to mount tmpfs at /tmp, as we could just rely on
+// the host /tmp, but this is a nice optimization, and fixes some apps that call
+// mknod in /tmp. It's unsafe to mount tmpfs if:
+//   1. /tmp is mounted explicitly: we should not override user's wish
+//   2. /tmp is not empty: mounting tmpfs would hide existing files in /tmp
+//
+// Note that when there are submounts inside of '/tmp', directories for the
+// mount points must be present, making '/tmp' not empty anymore.
+func (c *containerMounter) mountTmpVFS2(ctx context.Context, conf *Config, creds *auth.Credentials, mns *vfs.MountNamespace) error {
+	for _, m := range c.mounts {
+		// m.Destination has been cleaned, so it's to use equality here.
+		if m.Destination == "/tmp" {
+			log.Debugf(`Explict "/tmp" mount found, skipping internal tmpfs, mount: %+v`, m)
+			return nil
+		}
+	}
+
+	root := mns.Root()
+	defer root.DecRef()
+	pop := vfs.PathOperation{
+		Root:  root,
+		Start: root,
+		Path:  fspath.Parse("/tmp"),
+	}
+	// TODO(gvisor.dev/issue/2782): Use O_PATH when available.
+	statx, err := c.k.VFS().StatAt(ctx, creds, &pop, &vfs.StatOptions{})
+	switch err {
+	case nil:
+		// Found '/tmp' in filesystem, check if it's empty.
+		if linux.FileMode(statx.Mode).FileType() != linux.ModeDirectory {
+			// Not a dir?! Leave it be.
+			return nil
+		}
+		if statx.Nlink > 2 {
+			// If more than "." and ".." is found, skip internal tmpfs to prevent
+			// hiding existing files.
+			log.Infof(`Skipping internal tmpfs mount for "/tmp" because it's not empty`)
+			return nil
+		}
+		log.Infof(`Mounting internal tmpfs on top of empty "/tmp"`)
+		fallthrough
+
+	case syserror.ENOENT:
+		// No '/tmp' found (or fallthrough from above). It's safe to mount internal
+		// tmpfs.
+		tmpMount := specs.Mount{
+			Type:        tmpfs.Name,
+			Destination: "/tmp",
+			// Sticky bit is added to prevent accidental deletion of files from
+			// another user. This is normally done for /tmp.
+			Options: []string{"mode=01777"},
+		}
+		return c.mountSubmountVFS2(ctx, conf, mns, creds, &mountAndFD{Mount: tmpMount})
+
+	default:
+		return fmt.Errorf(`stating "/tmp" inside container: %w`, err)
+	}
+}
+
+// processHintsVFS2 processes annotations that container hints about how volumes
+// should be mounted (e.g. a volume shared between containers). It must be
+// called for the root container only.
+func (c *containerMounter) processHintsVFS2(conf *Config, creds *auth.Credentials) error {
+	ctx := c.k.SupervisorContext()
+	for _, hint := range c.hints.mounts {
+		// TODO(b/142076984): Only support tmpfs for now. Bind mounts require a
+		// common gofer to mount all shared volumes.
+		if hint.mount.Type != tmpfs.Name {
+			continue
+		}
+
+		log.Infof("Mounting master of shared mount %q from %q type %q", hint.name, hint.mount.Source, hint.mount.Type)
+		mnt, err := c.mountSharedMasterVFS2(ctx, conf, hint, creds)
+		if err != nil {
+			return fmt.Errorf("mounting shared master %q: %v", hint.name, err)
+		}
+		hint.vfsMount = mnt
+	}
+	return nil
+}
+
+// mountSharedMasterVFS2 mounts the master of a volume that is shared among
+// containers in a pod.
+func (c *containerMounter) mountSharedMasterVFS2(ctx context.Context, conf *Config, hint *mountHint, creds *auth.Credentials) (*vfs.Mount, error) {
+	// Map mount type to filesystem name, and parse out the options that we are
+	// capable of dealing with.
+	mntFD := &mountAndFD{Mount: hint.mount}
+	fsName, opts, err := c.getMountNameAndOptionsVFS2(conf, mntFD)
+	if err != nil {
+		return nil, err
+	}
+	if len(fsName) == 0 {
+		return nil, fmt.Errorf("mount type not supported %q", hint.mount.Type)
+	}
+	return c.k.VFS().MountDisconnected(ctx, creds, "", fsName, opts)
+}
+
+// mountSharedSubmount binds mount to a previously mounted volume that is shared
+// among containers in the same pod.
+func (c *containerMounter) mountSharedSubmountVFS2(ctx context.Context, conf *Config, mns *vfs.MountNamespace, creds *auth.Credentials, mount specs.Mount, source *mountHint) error {
+	if err := source.checkCompatible(mount); err != nil {
+		return err
+	}
+
+	_, opts, err := c.getMountNameAndOptionsVFS2(conf, &mountAndFD{Mount: mount})
+	if err != nil {
+		return err
+	}
+	newMnt, err := c.k.VFS().NewDisconnectedMount(source.vfsMount.Filesystem(), source.vfsMount.Root(), opts)
+	if err != nil {
+		return err
+	}
+	defer newMnt.DecRef()
+
+	root := mns.Root()
+	defer root.DecRef()
+	if err := c.makeSyntheticMount(ctx, mount.Destination, root, creds); err != nil {
+		return err
+	}
+
+	target := &vfs.PathOperation{
+		Root:  root,
+		Start: root,
+		Path:  fspath.Parse(mount.Destination),
+	}
+	if err := c.k.VFS().ConnectMountAt(ctx, creds, newMnt, target); err != nil {
+		return err
+	}
+	log.Infof("Mounted %q type shared bind to %q", mount.Destination, source.name)
 	return nil
 }

@@ -31,6 +31,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
+	"gvisor.dev/gvisor/pkg/tcpip/link/nested"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
@@ -47,26 +48,22 @@ var LogPackets uint32 = 1
 // LogPacketsToPCAP must be accessed atomically.
 var LogPacketsToPCAP uint32 = 1
 
-var transportProtocolMinSizes map[tcpip.TransportProtocolNumber]int = map[tcpip.TransportProtocolNumber]int{
-	header.ICMPv4ProtocolNumber: header.IPv4MinimumSize,
-	header.ICMPv6ProtocolNumber: header.IPv6MinimumSize,
-	header.UDPProtocolNumber:    header.UDPMinimumSize,
-	header.TCPProtocolNumber:    header.TCPMinimumSize,
-}
-
 type endpoint struct {
-	dispatcher stack.NetworkDispatcher
-	lower      stack.LinkEndpoint
+	nested.Endpoint
 	writer     io.Writer
 	maxPCAPLen uint32
 }
 
+var _ stack.GSOEndpoint = (*endpoint)(nil)
+var _ stack.LinkEndpoint = (*endpoint)(nil)
+var _ stack.NetworkDispatcher = (*endpoint)(nil)
+
 // New creates a new sniffer link-layer endpoint. It wraps around another
 // endpoint and logs packets and they traverse the endpoint.
 func New(lower stack.LinkEndpoint) stack.LinkEndpoint {
-	return &endpoint{
-		lower: lower,
-	}
+	sniffer := &endpoint{}
+	sniffer.Endpoint.Init(lower, sniffer)
+	return sniffer
 }
 
 func zoneOffset() (int32, error) {
@@ -110,62 +107,25 @@ func NewWithWriter(lower stack.LinkEndpoint, writer io.Writer, snapLen uint32) (
 	if err := writePCAPHeader(writer, snapLen); err != nil {
 		return nil, err
 	}
-	return &endpoint{
-		lower:      lower,
+	sniffer := &endpoint{
 		writer:     writer,
 		maxPCAPLen: snapLen,
-	}, nil
+	}
+	sniffer.Endpoint.Init(lower, sniffer)
+	return sniffer, nil
 }
 
 // DeliverNetworkPacket implements the stack.NetworkDispatcher interface. It is
 // called by the link-layer endpoint being wrapped when a packet arrives, and
 // logs the packet before forwarding to the actual dispatcher.
-func (e *endpoint) DeliverNetworkPacket(linkEP stack.LinkEndpoint, remote, local tcpip.LinkAddress, protocol tcpip.NetworkProtocolNumber, pkt stack.PacketBuffer) {
-	e.dumpPacket("recv", nil, protocol, &pkt)
-	e.dispatcher.DeliverNetworkPacket(e, remote, local, protocol, pkt)
+func (e *endpoint) DeliverNetworkPacket(remote, local tcpip.LinkAddress, protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
+	e.dumpPacket("recv", nil, protocol, pkt)
+	e.Endpoint.DeliverNetworkPacket(remote, local, protocol, pkt)
 }
 
-// Attach implements the stack.LinkEndpoint interface. It saves the dispatcher
-// and registers with the lower endpoint as its dispatcher so that "e" is called
-// for inbound packets.
-func (e *endpoint) Attach(dispatcher stack.NetworkDispatcher) {
-	e.dispatcher = dispatcher
-	e.lower.Attach(e)
-}
-
-// IsAttached implements stack.LinkEndpoint.IsAttached.
-func (e *endpoint) IsAttached() bool {
-	return e.dispatcher != nil
-}
-
-// MTU implements stack.LinkEndpoint.MTU. It just forwards the request to the
-// lower endpoint.
-func (e *endpoint) MTU() uint32 {
-	return e.lower.MTU()
-}
-
-// Capabilities implements stack.LinkEndpoint.Capabilities. It just forwards the
-// request to the lower endpoint.
-func (e *endpoint) Capabilities() stack.LinkEndpointCapabilities {
-	return e.lower.Capabilities()
-}
-
-// MaxHeaderLength implements the stack.LinkEndpoint interface. It just forwards
-// the request to the lower endpoint.
-func (e *endpoint) MaxHeaderLength() uint16 {
-	return e.lower.MaxHeaderLength()
-}
-
-func (e *endpoint) LinkAddress() tcpip.LinkAddress {
-	return e.lower.LinkAddress()
-}
-
-// GSOMaxSize returns the maximum GSO packet size.
-func (e *endpoint) GSOMaxSize() uint32 {
-	if gso, ok := e.lower.(stack.GSOEndpoint); ok {
-		return gso.GSOMaxSize()
-	}
-	return 0
+// DeliverOutboundPacket implements stack.NetworkDispatcher.DeliverOutboundPacket.
+func (e *endpoint) DeliverOutboundPacket(remote, local tcpip.LinkAddress, protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
+	e.Endpoint.DeliverOutboundPacket(remote, local, protocol, pkt)
 }
 
 func (e *endpoint) dumpPacket(prefix string, gso *stack.GSO, protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
@@ -208,9 +168,9 @@ func (e *endpoint) dumpPacket(prefix string, gso *stack.GSO, protocol tcpip.Netw
 // WritePacket implements the stack.LinkEndpoint interface. It is called by
 // higher-level protocols to write packets; it just logs the packet and
 // forwards the request to the lower endpoint.
-func (e *endpoint) WritePacket(r *stack.Route, gso *stack.GSO, protocol tcpip.NetworkProtocolNumber, pkt stack.PacketBuffer) *tcpip.Error {
-	e.dumpPacket("send", gso, protocol, &pkt)
-	return e.lower.WritePacket(r, gso, protocol, pkt)
+func (e *endpoint) WritePacket(r *stack.Route, gso *stack.GSO, protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) *tcpip.Error {
+	e.dumpPacket("send", gso, protocol, pkt)
+	return e.Endpoint.WritePacket(r, gso, protocol, pkt)
 }
 
 // WritePackets implements the stack.LinkEndpoint interface. It is called by
@@ -220,7 +180,7 @@ func (e *endpoint) WritePackets(r *stack.Route, gso *stack.GSO, pkts stack.Packe
 	for pkt := pkts.Front(); pkt != nil; pkt = pkt.Next() {
 		e.dumpPacket("send", gso, protocol, pkt)
 	}
-	return e.lower.WritePackets(r, gso, pkts, protocol)
+	return e.Endpoint.WritePackets(r, gso, pkts, protocol)
 }
 
 // WriteRawPacket implements stack.LinkEndpoint.WriteRawPacket.
@@ -228,11 +188,8 @@ func (e *endpoint) WriteRawPacket(vv buffer.VectorisedView) *tcpip.Error {
 	e.dumpPacket("send", nil, 0, &stack.PacketBuffer{
 		Data: vv,
 	})
-	return e.lower.WriteRawPacket(vv)
+	return e.Endpoint.WriteRawPacket(vv)
 }
-
-// Wait implements stack.LinkEndpoint.Wait.
-func (e *endpoint) Wait() { e.lower.Wait() }
 
 func logPacket(prefix string, protocol tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer, gso *stack.GSO) {
 	// Figure out the network layer info.
@@ -287,7 +244,7 @@ func logPacket(prefix string, protocol tcpip.NetworkProtocolNumber, pkt *stack.P
 		vv.TrimFront(header.ARPSize)
 		arp := header.ARP(hdr)
 		log.Infof(
-			"%s arp %v (%v) -> %v (%v) valid:%v",
+			"%s arp %s (%s) -> %s (%s) valid:%t",
 			prefix,
 			tcpip.Address(arp.ProtocolAddressSender()), tcpip.LinkAddress(arp.HardwareAddressSender()),
 			tcpip.Address(arp.ProtocolAddressTarget()), tcpip.LinkAddress(arp.HardwareAddressTarget()),
@@ -296,13 +253,6 @@ func logPacket(prefix string, protocol tcpip.NetworkProtocolNumber, pkt *stack.P
 		return
 	default:
 		log.Infof("%s unknown network protocol", prefix)
-		return
-	}
-
-	// We aren't guaranteed to have a transport header - it's possible for
-	// writes via raw endpoints to contain only network headers.
-	if minSize, ok := transportProtocolMinSizes[tcpip.TransportProtocolNumber(transProto)]; ok && vv.Size() < minSize {
-		log.Infof("%s %v -> %v transport protocol: %d, but no transport header found (possible raw packet)", prefix, src, dst, transProto)
 		return
 	}
 
@@ -346,7 +296,7 @@ func logPacket(prefix string, protocol tcpip.NetworkProtocolNumber, pkt *stack.P
 				icmpType = "info reply"
 			}
 		}
-		log.Infof("%s %s %v -> %v %s len:%d id:%04x code:%d", prefix, transName, src, dst, icmpType, size, id, icmp.Code())
+		log.Infof("%s %s %s -> %s %s len:%d id:%04x code:%d", prefix, transName, src, dst, icmpType, size, id, icmp.Code())
 		return
 
 	case header.ICMPv6ProtocolNumber:
@@ -381,7 +331,7 @@ func logPacket(prefix string, protocol tcpip.NetworkProtocolNumber, pkt *stack.P
 		case header.ICMPv6RedirectMsg:
 			icmpType = "redirect message"
 		}
-		log.Infof("%s %s %v -> %v %s len:%d id:%04x code:%d", prefix, transName, src, dst, icmpType, size, id, icmp.Code())
+		log.Infof("%s %s %s -> %s %s len:%d id:%04x code:%d", prefix, transName, src, dst, icmpType, size, id, icmp.Code())
 		return
 
 	case header.UDPProtocolNumber:
@@ -428,7 +378,7 @@ func logPacket(prefix string, protocol tcpip.NetworkProtocolNumber, pkt *stack.P
 					flagsStr[i] = ' '
 				}
 			}
-			details = fmt.Sprintf("flags:0x%02x (%v) seqnum: %v ack: %v win: %v xsum:0x%x", flags, string(flagsStr), tcp.SequenceNumber(), tcp.AckNumber(), tcp.WindowSize(), tcp.Checksum())
+			details = fmt.Sprintf("flags:0x%02x (%s) seqnum: %d ack: %d win: %d xsum:0x%x", flags, string(flagsStr), tcp.SequenceNumber(), tcp.AckNumber(), tcp.WindowSize(), tcp.Checksum())
 			if flags&header.TCPFlagSyn != 0 {
 				details += fmt.Sprintf(" options: %+v", header.ParseSynOptions(tcp.Options(), flags&header.TCPFlagAck != 0))
 			} else {
@@ -437,7 +387,7 @@ func logPacket(prefix string, protocol tcpip.NetworkProtocolNumber, pkt *stack.P
 		}
 
 	default:
-		log.Infof("%s %v -> %v unknown transport protocol: %d", prefix, src, dst, transProto)
+		log.Infof("%s %s -> %s unknown transport protocol: %d", prefix, src, dst, transProto)
 		return
 	}
 
@@ -445,5 +395,5 @@ func logPacket(prefix string, protocol tcpip.NetworkProtocolNumber, pkt *stack.P
 		details += fmt.Sprintf(" gso: %+v", gso)
 	}
 
-	log.Infof("%s %s %v:%v -> %v:%v len:%d id:%04x %s", prefix, transName, src, srcPort, dst, dstPort, size, id, details)
+	log.Infof("%s %s %s:%d -> %s:%d len:%d id:%04x %s", prefix, transName, src, srcPort, dst, dstPort, size, id, details)
 }

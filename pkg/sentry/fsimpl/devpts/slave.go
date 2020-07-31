@@ -18,6 +18,7 @@ import (
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
+	fslock "gvisor.dev/gvisor/pkg/sentry/fs/lock"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/kernfs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
@@ -26,14 +27,14 @@ import (
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
-// LINT.IfChange
-
 // slaveInode is the inode for the slave end of the Terminal.
 type slaveInode struct {
 	kernfs.InodeAttrs
 	kernfs.InodeNoopRefCount
 	kernfs.InodeNotDirectory
 	kernfs.InodeNotSymlink
+
+	locks vfs.FileLocks
 
 	// Keep a reference to this inode's dentry.
 	dentry kernfs.Dentry
@@ -53,6 +54,7 @@ func (si *slaveInode) Open(ctx context.Context, rp *vfs.ResolvingPath, vfsd *vfs
 	fd := &slaveFileDescription{
 		inode: si,
 	}
+	fd.LockFD.Init(&si.locks)
 	if err := fd.vfsfd.Init(fd, opts.Flags, rp.Mount(), vfsd, &vfs.FileDescriptionOptions{}); err != nil {
 		si.DecRef()
 		return nil, err
@@ -71,8 +73,8 @@ func (si *slaveInode) Valid(context.Context) bool {
 }
 
 // Stat implements kernfs.Inode.Stat.
-func (si *slaveInode) Stat(vfsfs *vfs.Filesystem, opts vfs.StatOptions) (linux.Statx, error) {
-	statx, err := si.InodeAttrs.Stat(vfsfs, opts)
+func (si *slaveInode) Stat(ctx context.Context, vfsfs *vfs.Filesystem, opts vfs.StatOptions) (linux.Statx, error) {
+	statx, err := si.InodeAttrs.Stat(ctx, vfsfs, opts)
 	if err != nil {
 		return linux.Statx{}, err
 	}
@@ -93,6 +95,7 @@ func (si *slaveInode) SetStat(ctx context.Context, vfsfs *vfs.Filesystem, creds 
 type slaveFileDescription struct {
 	vfsfd vfs.FileDescription
 	vfs.FileDescriptionDefaultImpl
+	vfs.LockFD
 
 	inode *slaveInode
 }
@@ -129,7 +132,7 @@ func (sfd *slaveFileDescription) Write(ctx context.Context, src usermem.IOSequen
 	return sfd.inode.t.ld.outputQueueWrite(ctx, src)
 }
 
-// Ioctl implements vfs.FileDescripionImpl.Ioctl.
+// Ioctl implements vfs.FileDescriptionImpl.Ioctl.
 func (sfd *slaveFileDescription) Ioctl(ctx context.Context, io usermem.IO, args arch.SyscallArguments) (uintptr, error) {
 	switch cmd := args[1].Uint(); cmd {
 	case linux.FIONREAD: // linux.FIONREAD == linux.TIOCINQ
@@ -180,7 +183,15 @@ func (sfd *slaveFileDescription) SetStat(ctx context.Context, opts vfs.SetStatOp
 // Stat implements vfs.FileDescriptionImpl.Stat.
 func (sfd *slaveFileDescription) Stat(ctx context.Context, opts vfs.StatOptions) (linux.Statx, error) {
 	fs := sfd.vfsfd.VirtualDentry().Mount().Filesystem()
-	return sfd.inode.Stat(fs, opts)
+	return sfd.inode.Stat(ctx, fs, opts)
 }
 
-// LINT.ThenChange(../../fs/tty/slave.go)
+// LockPOSIX implements vfs.FileDescriptionImpl.LockPOSIX.
+func (sfd *slaveFileDescription) LockPOSIX(ctx context.Context, uid fslock.UniqueID, t fslock.LockType, start, length uint64, whence int16, block fslock.Blocker) error {
+	return sfd.Locks().LockPOSIX(ctx, &sfd.vfsfd, uid, t, start, length, whence, block)
+}
+
+// UnlockPOSIX implements vfs.FileDescriptionImpl.UnlockPOSIX.
+func (sfd *slaveFileDescription) UnlockPOSIX(ctx context.Context, uid fslock.UniqueID, start, length uint64, whence int16) error {
+	return sfd.Locks().UnlockPOSIX(ctx, &sfd.vfsfd, uid, start, length, whence)
+}

@@ -53,6 +53,8 @@ func taskFDExists(t *kernel.Task, fd int32) bool {
 }
 
 type fdDir struct {
+	locks vfs.FileLocks
+
 	fs   *filesystem
 	task *kernel.Task
 
@@ -62,7 +64,7 @@ type fdDir struct {
 }
 
 // IterDirents implements kernfs.inodeDynamicLookup.
-func (i *fdDir) IterDirents(ctx context.Context, cb vfs.IterDirentsCallback, absOffset, relOffset int64) (int64, error) {
+func (i *fdDir) IterDirents(ctx context.Context, cb vfs.IterDirentsCallback, offset, relOffset int64) (int64, error) {
 	var fds []int32
 	i.task.WithMuLocked(func(t *kernel.Task) {
 		if fdTable := t.FDTable(); fdTable != nil {
@@ -70,7 +72,6 @@ func (i *fdDir) IterDirents(ctx context.Context, cb vfs.IterDirentsCallback, abs
 		}
 	})
 
-	offset := absOffset + relOffset
 	typ := uint8(linux.DT_REG)
 	if i.produceSymlink {
 		typ = linux.DT_LNK
@@ -143,7 +144,7 @@ func (i *fdDirInode) Lookup(ctx context.Context, name string) (*vfs.Dentry, erro
 
 // Open implements kernfs.Inode.
 func (i *fdDirInode) Open(ctx context.Context, rp *vfs.ResolvingPath, vfsd *vfs.Dentry, opts vfs.OpenOptions) (*vfs.FileDescription, error) {
-	fd, err := kernfs.NewGenericDirectoryFD(rp.Mount(), vfsd, &i.OrderedChildren, &opts)
+	fd, err := kernfs.NewGenericDirectoryFD(rp.Mount(), vfsd, &i.OrderedChildren, &i.locks, &opts)
 	if err != nil {
 		return nil, err
 	}
@@ -270,7 +271,7 @@ func (i *fdInfoDirInode) Lookup(ctx context.Context, name string) (*vfs.Dentry, 
 
 // Open implements kernfs.Inode.
 func (i *fdInfoDirInode) Open(ctx context.Context, rp *vfs.ResolvingPath, vfsd *vfs.Dentry, opts vfs.OpenOptions) (*vfs.FileDescription, error) {
-	fd, err := kernfs.NewGenericDirectoryFD(rp.Mount(), vfsd, &i.OrderedChildren, &opts)
+	fd, err := kernfs.NewGenericDirectoryFD(rp.Mount(), vfsd, &i.OrderedChildren, &i.locks, &opts)
 	if err != nil {
 		return nil, err
 	}

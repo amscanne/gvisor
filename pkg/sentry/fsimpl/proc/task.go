@@ -38,6 +38,8 @@ type taskInode struct {
 	kernfs.InodeAttrs
 	kernfs.OrderedChildren
 
+	locks vfs.FileLocks
+
 	task *kernel.Task
 }
 
@@ -103,7 +105,7 @@ func (i *taskInode) Valid(ctx context.Context) bool {
 
 // Open implements kernfs.Inode.
 func (i *taskInode) Open(ctx context.Context, rp *vfs.ResolvingPath, vfsd *vfs.Dentry, opts vfs.OpenOptions) (*vfs.FileDescription, error) {
-	fd, err := kernfs.NewGenericDirectoryFD(rp.Mount(), vfsd, &i.OrderedChildren, &opts)
+	fd, err := kernfs.NewGenericDirectoryFD(rp.Mount(), vfsd, &i.OrderedChildren, &i.locks, &opts)
 	if err != nil {
 		return nil, err
 	}
@@ -154,8 +156,8 @@ func (fs *filesystem) newTaskOwnedDir(task *kernel.Task, ino uint64, perm linux.
 }
 
 // Stat implements kernfs.Inode.
-func (i *taskOwnedInode) Stat(fs *vfs.Filesystem, opts vfs.StatOptions) (linux.Statx, error) {
-	stat, err := i.Inode.Stat(fs, opts)
+func (i *taskOwnedInode) Stat(ctx context.Context, fs *vfs.Filesystem, opts vfs.StatOptions) (linux.Statx, error) {
+	stat, err := i.Inode.Stat(ctx, fs, opts)
 	if err != nil {
 		return linux.Statx{}, err
 	}

@@ -25,6 +25,8 @@
 package packet
 
 import (
+	"fmt"
+
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
@@ -43,6 +45,9 @@ type packet struct {
 	timestampNS int64
 	// senderAddr is the network address of the sender.
 	senderAddr tcpip.FullAddress
+	// packetInfo holds additional information like the protocol
+	// of the packet etc.
+	packetInfo tcpip.LinkPacketInfo
 }
 
 // endpoint is the packet socket implementation of tcpip.Endpoint. It is legal
@@ -71,11 +76,17 @@ type endpoint struct {
 	rcvClosed     bool
 
 	// The following fields are protected by mu.
-	mu         sync.RWMutex `state:"nosave"`
-	sndBufSize int
-	closed     bool
-	stats      tcpip.TransportEndpointStats `state:"nosave"`
-	bound      bool
+	mu            sync.RWMutex `state:"nosave"`
+	sndBufSize    int
+	sndBufSizeMax int
+	closed        bool
+	stats         tcpip.TransportEndpointStats `state:"nosave"`
+	bound         bool
+	boundNIC      tcpip.NICID
+
+	// lastErrorMu protects lastError.
+	lastErrorMu sync.Mutex   `state:"nosave"`
+	lastError   *tcpip.Error `state:".(string)"`
 }
 
 // NewEndpoint returns a new packet endpoint.
@@ -90,6 +101,17 @@ func NewEndpoint(s *stack.Stack, cooked bool, netProto tcpip.NetworkProtocolNumb
 		waiterQueue:   waiterQueue,
 		rcvBufSizeMax: 32 * 1024,
 		sndBufSize:    32 * 1024,
+	}
+
+	// Override with stack defaults.
+	var ss stack.SendBufferSizeOption
+	if err := s.Option(&ss); err == nil {
+		ep.sndBufSizeMax = ss.Default
+	}
+
+	var rs stack.ReceiveBufferSizeOption
+	if err := s.Option(&rs); err == nil {
+		ep.rcvBufSizeMax = rs.Default
 	}
 
 	if err := s.RegisterPacketEndpoint(0, netProto, ep); err != nil {
@@ -132,13 +154,8 @@ func (ep *endpoint) Close() {
 // ModerateRecvBuf implements tcpip.Endpoint.ModerateRecvBuf.
 func (ep *endpoint) ModerateRecvBuf(copied int) {}
 
-// IPTables implements tcpip.Endpoint.IPTables.
-func (ep *endpoint) IPTables() (stack.IPTables, error) {
-	return ep.stack.IPTables(), nil
-}
-
-// Read implements tcpip.Endpoint.Read.
-func (ep *endpoint) Read(addr *tcpip.FullAddress) (buffer.View, tcpip.ControlMessages, *tcpip.Error) {
+// Read implements tcpip.PacketEndpoint.ReadPacket.
+func (ep *endpoint) ReadPacket(addr *tcpip.FullAddress, info *tcpip.LinkPacketInfo) (buffer.View, tcpip.ControlMessages, *tcpip.Error) {
 	ep.rcvMu.Lock()
 
 	// If there's no data to read, return that read would block or that the
@@ -163,11 +180,20 @@ func (ep *endpoint) Read(addr *tcpip.FullAddress) (buffer.View, tcpip.ControlMes
 		*addr = packet.senderAddr
 	}
 
+	if info != nil {
+		*info = packet.packetInfo
+	}
+
 	return packet.data.ToView(), tcpip.ControlMessages{HasTimestamp: true, Timestamp: packet.timestampNS}, nil
 }
 
+// Read implements tcpip.Endpoint.Read.
+func (ep *endpoint) Read(addr *tcpip.FullAddress) (buffer.View, tcpip.ControlMessages, *tcpip.Error) {
+	return ep.ReadPacket(addr, nil)
+}
+
 func (ep *endpoint) Write(p tcpip.Payloader, opts tcpip.WriteOptions) (int64, <-chan struct{}, *tcpip.Error) {
-	// TODO(b/129292371): Implement.
+	// TODO(gvisor.dev/issue/173): Implement.
 	return 0, nil, tcpip.ErrInvalidOptionValue
 }
 
@@ -220,12 +246,14 @@ func (ep *endpoint) Bind(addr tcpip.FullAddress) *tcpip.Error {
 	ep.mu.Lock()
 	defer ep.mu.Unlock()
 
-	if ep.bound {
-		return tcpip.ErrAlreadyBound
+	if ep.bound && ep.boundNIC == addr.NIC {
+		// If the NIC being bound is the same then just return success.
+		return nil
 	}
 
 	// Unregister endpoint with all the nics.
 	ep.stack.UnregisterPacketEndpoint(0, ep.netProto, ep)
+	ep.bound = false
 
 	// Bind endpoint to receive packets from specific interface.
 	if err := ep.stack.RegisterPacketEndpoint(addr.NIC, ep.netProto, ep); err != nil {
@@ -233,6 +261,7 @@ func (ep *endpoint) Bind(addr tcpip.FullAddress) *tcpip.Error {
 	}
 
 	ep.bound = true
+	ep.boundNIC = addr.NIC
 
 	return nil
 }
@@ -269,7 +298,13 @@ func (ep *endpoint) Readiness(mask waiter.EventMask) waiter.EventMask {
 // used with SetSockOpt, and this function always returns
 // tcpip.ErrNotSupported.
 func (ep *endpoint) SetSockOpt(opt interface{}) *tcpip.Error {
-	return tcpip.ErrUnknownProtocolOption
+	switch opt.(type) {
+	case tcpip.SocketDetachFilterOption:
+		return nil
+
+	default:
+		return tcpip.ErrUnknownProtocolOption
+	}
 }
 
 // SetSockOptBool implements tcpip.Endpoint.SetSockOptBool.
@@ -279,11 +314,63 @@ func (ep *endpoint) SetSockOptBool(opt tcpip.SockOptBool, v bool) *tcpip.Error {
 
 // SetSockOptInt implements tcpip.Endpoint.SetSockOptInt.
 func (ep *endpoint) SetSockOptInt(opt tcpip.SockOptInt, v int) *tcpip.Error {
-	return tcpip.ErrUnknownProtocolOption
+	switch opt {
+	case tcpip.SendBufferSizeOption:
+		// Make sure the send buffer size is within the min and max
+		// allowed.
+		var ss stack.SendBufferSizeOption
+		if err := ep.stack.Option(&ss); err != nil {
+			panic(fmt.Sprintf("s.Option(%#v) = %s", ss, err))
+		}
+		if v > ss.Max {
+			v = ss.Max
+		}
+		if v < ss.Min {
+			v = ss.Min
+		}
+		ep.mu.Lock()
+		ep.sndBufSizeMax = v
+		ep.mu.Unlock()
+		return nil
+
+	case tcpip.ReceiveBufferSizeOption:
+		// Make sure the receive buffer size is within the min and max
+		// allowed.
+		var rs stack.ReceiveBufferSizeOption
+		if err := ep.stack.Option(&rs); err != nil {
+			panic(fmt.Sprintf("s.Option(%#v) = %s", rs, err))
+		}
+		if v > rs.Max {
+			v = rs.Max
+		}
+		if v < rs.Min {
+			v = rs.Min
+		}
+		ep.rcvMu.Lock()
+		ep.rcvBufSizeMax = v
+		ep.rcvMu.Unlock()
+		return nil
+
+	default:
+		return tcpip.ErrUnknownProtocolOption
+	}
+}
+
+func (ep *endpoint) takeLastError() *tcpip.Error {
+	ep.lastErrorMu.Lock()
+	defer ep.lastErrorMu.Unlock()
+
+	err := ep.lastError
+	ep.lastError = nil
+	return err
 }
 
 // GetSockOpt implements tcpip.Endpoint.GetSockOpt.
 func (ep *endpoint) GetSockOpt(opt interface{}) *tcpip.Error {
+	switch opt.(type) {
+	case tcpip.ErrorOption:
+		return ep.takeLastError()
+	}
 	return tcpip.ErrNotSupported
 }
 
@@ -294,11 +381,36 @@ func (ep *endpoint) GetSockOptBool(opt tcpip.SockOptBool) (bool, *tcpip.Error) {
 
 // GetSockOptInt implements tcpip.Endpoint.GetSockOptInt.
 func (ep *endpoint) GetSockOptInt(opt tcpip.SockOptInt) (int, *tcpip.Error) {
-	return 0, tcpip.ErrNotSupported
+	switch opt {
+	case tcpip.ReceiveQueueSizeOption:
+		v := 0
+		ep.rcvMu.Lock()
+		if !ep.rcvList.Empty() {
+			p := ep.rcvList.Front()
+			v = p.data.Size()
+		}
+		ep.rcvMu.Unlock()
+		return v, nil
+
+	case tcpip.SendBufferSizeOption:
+		ep.mu.Lock()
+		v := ep.sndBufSizeMax
+		ep.mu.Unlock()
+		return v, nil
+
+	case tcpip.ReceiveBufferSizeOption:
+		ep.rcvMu.Lock()
+		v := ep.rcvBufSizeMax
+		ep.rcvMu.Unlock()
+		return v, nil
+
+	default:
+		return -1, tcpip.ErrUnknownProtocolOption
+	}
 }
 
 // HandlePacket implements stack.PacketEndpoint.HandlePacket.
-func (ep *endpoint) HandlePacket(nicID tcpip.NICID, localAddr tcpip.LinkAddress, netProto tcpip.NetworkProtocolNumber, pkt stack.PacketBuffer) {
+func (ep *endpoint) HandlePacket(nicID tcpip.NICID, localAddr tcpip.LinkAddress, netProto tcpip.NetworkProtocolNumber, pkt *stack.PacketBuffer) {
 	ep.rcvMu.Lock()
 
 	// Drop the packet if our buffer is currently full.
@@ -320,7 +432,7 @@ func (ep *endpoint) HandlePacket(nicID tcpip.NICID, localAddr tcpip.LinkAddress,
 
 	// Push new packet into receive list and increment the buffer size.
 	var packet packet
-	// TODO(b/129292371): Return network protocol.
+	// TODO(gvisor.dev/issue/173): Return network protocol.
 	if len(pkt.LinkHeader) > 0 {
 		// Get info directly from the ethernet header.
 		hdr := header.Ethernet(pkt.LinkHeader)
@@ -328,40 +440,66 @@ func (ep *endpoint) HandlePacket(nicID tcpip.NICID, localAddr tcpip.LinkAddress,
 			NIC:  nicID,
 			Addr: tcpip.Address(hdr.SourceAddress()),
 		}
+		packet.packetInfo.Protocol = netProto
+		packet.packetInfo.PktType = pkt.PktType
 	} else {
 		// Guess the would-be ethernet header.
 		packet.senderAddr = tcpip.FullAddress{
 			NIC:  nicID,
 			Addr: tcpip.Address(localAddr),
 		}
+		packet.packetInfo.Protocol = netProto
+		packet.packetInfo.PktType = pkt.PktType
 	}
 
 	if ep.cooked {
 		// Cooked packets can simply be queued.
-		packet.data = pkt.Data
+		switch pkt.PktType {
+		case tcpip.PacketHost:
+			packet.data = pkt.Data
+		case tcpip.PacketOutgoing:
+			// Strip Link Header from the Header.
+			pkt.Header = buffer.NewPrependableFromView(pkt.Header.View()[len(pkt.LinkHeader):])
+			combinedVV := pkt.Header.View().ToVectorisedView()
+			combinedVV.Append(pkt.Data)
+			packet.data = combinedVV
+		default:
+			panic(fmt.Sprintf("unexpected PktType in pkt: %+v", pkt))
+		}
+
 	} else {
 		// Raw packets need their ethernet headers prepended before
 		// queueing.
 		var linkHeader buffer.View
-		if len(pkt.LinkHeader) == 0 {
-			// We weren't provided with an actual ethernet header,
-			// so fake one.
-			ethFields := header.EthernetFields{
-				SrcAddr: tcpip.LinkAddress([]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00}),
-				DstAddr: localAddr,
-				Type:    netProto,
+		var combinedVV buffer.VectorisedView
+		if pkt.PktType != tcpip.PacketOutgoing {
+			if len(pkt.LinkHeader) == 0 {
+				// We weren't provided with an actual ethernet header,
+				// so fake one.
+				ethFields := header.EthernetFields{
+					SrcAddr: tcpip.LinkAddress([]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00}),
+					DstAddr: localAddr,
+					Type:    netProto,
+				}
+				fakeHeader := make(header.Ethernet, header.EthernetMinimumSize)
+				fakeHeader.Encode(&ethFields)
+				linkHeader = buffer.View(fakeHeader)
+			} else {
+				linkHeader = append(buffer.View(nil), pkt.LinkHeader...)
 			}
-			fakeHeader := make(header.Ethernet, header.EthernetMinimumSize)
-			fakeHeader.Encode(&ethFields)
-			linkHeader = buffer.View(fakeHeader)
-		} else {
-			linkHeader = append(buffer.View(nil), pkt.LinkHeader...)
+			combinedVV = linkHeader.ToVectorisedView()
 		}
-		combinedVV := linkHeader.ToVectorisedView()
+		if pkt.PktType == tcpip.PacketOutgoing {
+			// For outgoing packets the Link, Network and Transport
+			// headers are in the pkt.Header fields normally unless
+			// a Raw socket is in use in which case pkt.Header could
+			// be nil.
+			combinedVV.AppendView(pkt.Header.View())
+		}
 		combinedVV.Append(pkt.Data)
 		packet.data = combinedVV
 	}
-	packet.timestampNS = ep.stack.NowNanoseconds()
+	packet.timestampNS = ep.stack.Clock().NowNanoseconds()
 
 	ep.rcvList.PushBack(&packet)
 	ep.rcvBufSize += packet.data.Size()

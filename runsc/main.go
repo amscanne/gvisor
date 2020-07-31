@@ -71,7 +71,9 @@ var (
 	platformName       = flag.String("platform", "ptrace", "specifies which platform to use: ptrace (default), kvm.")
 	network            = flag.String("network", "sandbox", "specifies which network to use: sandbox (default), host, none. Using network inside the sandbox is more secure because it's isolated from the host network.")
 	hardwareGSO        = flag.Bool("gso", true, "enable hardware segmentation offload if it is supported by a network device.")
-	softwareGSO        = flag.Bool("software-gso", true, "enable software segmentation offload when hardware ofload can't be enabled.")
+	softwareGSO        = flag.Bool("software-gso", true, "enable software segmentation offload when hardware offload can't be enabled.")
+	txChecksumOffload  = flag.Bool("tx-checksum-offload", false, "enable TX checksum offload.")
+	rxChecksumOffload  = flag.Bool("rx-checksum-offload", true, "enable RX checksum offload.")
 	qDisc              = flag.String("qdisc", "fifo", "specifies which queueing discipline to apply by default to the non loopback nics used by the sandbox.")
 	fileAccess         = flag.String("file-access", "exclusive", "specifies which filesystem to use for the root mount: exclusive (default), shared. Volume mounts are always shared.")
 	fsGoferHostUDS     = flag.Bool("fsgofer-host-uds", false, "allow the gofer to mount Unix Domain Sockets.")
@@ -86,6 +88,7 @@ var (
 	referenceLeakMode  = flag.String("ref-leak-mode", "disabled", "sets reference leak check mode: disabled (default), log-names, log-traces.")
 	cpuNumFromQuota    = flag.Bool("cpu-num-from-quota", false, "set cpu number to cpu quota (least integer greater or equal to quota value, but not less than 2)")
 	vfs2Enabled        = flag.Bool("vfs2", false, "TEST ONLY; use while VFSv2 is landing. This uses the new experimental VFS layer.")
+	fuseEnabled        = flag.Bool("fuse", false, "TEST ONLY; use while FUSE in VFSv2 is landing. This allows the use of the new experimental FUSE filesystem.")
 
 	// Test flags, not to be used outside tests, ever.
 	testOnlyAllowRunAsCurrentUserWithoutChroot = flag.Bool("TESTONLY-unsafe-nonroot", false, "TEST ONLY; do not ever use! This skips many security measures that isolate the host from the sandbox.")
@@ -223,6 +226,8 @@ func main() {
 		Network:            netType,
 		HardwareGSO:        *hardwareGSO,
 		SoftwareGSO:        *softwareGSO,
+		TXChecksumOffload:  *txChecksumOffload,
+		RXChecksumOffload:  *rxChecksumOffload,
 		LogPackets:         *logPackets,
 		Platform:           platformType,
 		Strace:             *strace,
@@ -238,6 +243,7 @@ func main() {
 		OverlayfsStaleRead: *overlayfsStaleRead,
 		CPUNumFromQuota:    *cpuNumFromQuota,
 		VFS2:               *vfs2Enabled,
+		FUSE:               *fuseEnabled,
 		QDisc:              queueingDiscipline,
 		TestOnlyAllowRunAsCurrentUserWithoutChroot: *testOnlyAllowRunAsCurrentUserWithoutChroot,
 		TestOnlyTestNameEnv:                        *testOnlyTestNameEnv,

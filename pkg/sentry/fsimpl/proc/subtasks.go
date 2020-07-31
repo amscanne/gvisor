@@ -37,6 +37,8 @@ type subtasksInode struct {
 	kernfs.OrderedChildren
 	kernfs.AlwaysValid
 
+	locks vfs.FileLocks
+
 	fs                *filesystem
 	task              *kernel.Task
 	pidns             *kernel.PIDNamespace
@@ -126,7 +128,7 @@ func (fd *subtasksFD) IterDirents(ctx context.Context, cb vfs.IterDirentsCallbac
 	return fd.GenericDirectoryFD.IterDirents(ctx, cb)
 }
 
-// Seek implements vfs.FileDecriptionImpl.Seek.
+// Seek implements vfs.FileDescriptionImpl.Seek.
 func (fd *subtasksFD) Seek(ctx context.Context, offset int64, whence int32) (int64, error) {
 	if fd.task.ExitState() >= kernel.TaskExitZombie {
 		return 0, syserror.ENOENT
@@ -153,7 +155,7 @@ func (fd *subtasksFD) SetStat(ctx context.Context, opts vfs.SetStatOptions) erro
 // Open implements kernfs.Inode.
 func (i *subtasksInode) Open(ctx context.Context, rp *vfs.ResolvingPath, vfsd *vfs.Dentry, opts vfs.OpenOptions) (*vfs.FileDescription, error) {
 	fd := &subtasksFD{task: i.task}
-	if err := fd.Init(&i.OrderedChildren, &opts); err != nil {
+	if err := fd.Init(&i.OrderedChildren, &i.locks, &opts); err != nil {
 		return nil, err
 	}
 	if err := fd.VFSFileDescription().Init(fd, opts.Flags, rp.Mount(), vfsd, &vfs.FileDescriptionOptions{}); err != nil {
@@ -163,8 +165,8 @@ func (i *subtasksInode) Open(ctx context.Context, rp *vfs.ResolvingPath, vfsd *v
 }
 
 // Stat implements kernfs.Inode.
-func (i *subtasksInode) Stat(vsfs *vfs.Filesystem, opts vfs.StatOptions) (linux.Statx, error) {
-	stat, err := i.InodeAttrs.Stat(vsfs, opts)
+func (i *subtasksInode) Stat(ctx context.Context, vsfs *vfs.Filesystem, opts vfs.StatOptions) (linux.Statx, error) {
+	stat, err := i.InodeAttrs.Stat(ctx, vsfs, opts)
 	if err != nil {
 		return linux.Statx{}, err
 	}

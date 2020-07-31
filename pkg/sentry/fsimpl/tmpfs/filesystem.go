@@ -79,7 +79,7 @@ afterSymlink:
 	}
 	if symlink, ok := child.inode.impl.(*symlink); ok && rp.ShouldFollowSymlink() {
 		// Symlink traversal updates access time.
-		atomic.StoreInt64(&d.inode.atime, d.inode.fs.clock.Now().Nanoseconds())
+		child.inode.touchAtime(rp.Mount())
 		if err := rp.HandleSymlink(symlink.target); err != nil {
 			return nil, err
 		}
@@ -177,6 +177,12 @@ func (fs *filesystem) doCreateAt(rp *vfs.ResolvingPath, dir bool, create func(pa
 	if err := create(parentDir, name); err != nil {
 		return err
 	}
+
+	ev := linux.IN_CREATE
+	if dir {
+		ev |= linux.IN_ISDIR
+	}
+	parentDir.inode.watches.Notify(name, uint32(ev), 0, vfs.InodeEvent, false /* unlinked */)
 	parentDir.inode.touchCMtime()
 	return nil
 }
@@ -231,17 +237,22 @@ func (fs *filesystem) LinkAt(ctx context.Context, rp *vfs.ResolvingPath, vd vfs.
 			return syserror.EXDEV
 		}
 		d := vd.Dentry().Impl().(*dentry)
-		if d.inode.isDir() {
+		i := d.inode
+		if i.isDir() {
 			return syserror.EPERM
 		}
-		if d.inode.nlink == 0 {
+		if err := vfs.MayLink(auth.CredentialsFromContext(ctx), linux.FileMode(atomic.LoadUint32(&i.mode)), auth.KUID(atomic.LoadUint32(&i.uid)), auth.KGID(atomic.LoadUint32(&i.gid))); err != nil {
+			return err
+		}
+		if i.nlink == 0 {
 			return syserror.ENOENT
 		}
-		if d.inode.nlink == maxLinks {
+		if i.nlink == maxLinks {
 			return syserror.EMLINK
 		}
-		d.inode.incLinksLocked()
-		parentDir.insertChildLocked(fs.newDentry(d.inode), name)
+		i.incLinksLocked()
+		i.watches.Notify("", linux.IN_ATTRIB, 0, vfs.InodeEvent, false /* unlinked */)
+		parentDir.insertChildLocked(fs.newDentry(i), name)
 		return nil
 	})
 }
@@ -249,11 +260,12 @@ func (fs *filesystem) LinkAt(ctx context.Context, rp *vfs.ResolvingPath, vd vfs.
 // MkdirAt implements vfs.FilesystemImpl.MkdirAt.
 func (fs *filesystem) MkdirAt(ctx context.Context, rp *vfs.ResolvingPath, opts vfs.MkdirOptions) error {
 	return fs.doCreateAt(rp, true /* dir */, func(parentDir *directory, name string) error {
+		creds := rp.Credentials()
 		if parentDir.inode.nlink == maxLinks {
 			return syserror.EMLINK
 		}
 		parentDir.inode.incLinksLocked() // from child's ".."
-		childDir := fs.newDirectory(rp.Credentials(), opts.Mode)
+		childDir := fs.newDirectory(creds.EffectiveKUID, creds.EffectiveKGID, opts.Mode)
 		parentDir.insertChildLocked(&childDir.dentry, name)
 		return nil
 	})
@@ -262,18 +274,19 @@ func (fs *filesystem) MkdirAt(ctx context.Context, rp *vfs.ResolvingPath, opts v
 // MknodAt implements vfs.FilesystemImpl.MknodAt.
 func (fs *filesystem) MknodAt(ctx context.Context, rp *vfs.ResolvingPath, opts vfs.MknodOptions) error {
 	return fs.doCreateAt(rp, false /* dir */, func(parentDir *directory, name string) error {
+		creds := rp.Credentials()
 		var childInode *inode
 		switch opts.Mode.FileType() {
-		case 0, linux.S_IFREG:
-			childInode = fs.newRegularFile(rp.Credentials(), opts.Mode)
+		case linux.S_IFREG:
+			childInode = fs.newRegularFile(creds.EffectiveKUID, creds.EffectiveKGID, opts.Mode)
 		case linux.S_IFIFO:
-			childInode = fs.newNamedPipe(rp.Credentials(), opts.Mode)
+			childInode = fs.newNamedPipe(creds.EffectiveKUID, creds.EffectiveKGID, opts.Mode)
 		case linux.S_IFBLK:
-			childInode = fs.newDeviceFile(rp.Credentials(), opts.Mode, vfs.BlockDevice, opts.DevMajor, opts.DevMinor)
+			childInode = fs.newDeviceFile(creds.EffectiveKUID, creds.EffectiveKGID, opts.Mode, vfs.BlockDevice, opts.DevMajor, opts.DevMinor)
 		case linux.S_IFCHR:
-			childInode = fs.newDeviceFile(rp.Credentials(), opts.Mode, vfs.CharDevice, opts.DevMajor, opts.DevMinor)
+			childInode = fs.newDeviceFile(creds.EffectiveKUID, creds.EffectiveKGID, opts.Mode, vfs.CharDevice, opts.DevMajor, opts.DevMinor)
 		case linux.S_IFSOCK:
-			childInode = fs.newSocketFile(rp.Credentials(), opts.Mode, opts.Endpoint)
+			childInode = fs.newSocketFile(creds.EffectiveKUID, creds.EffectiveKGID, opts.Mode, opts.Endpoint)
 		default:
 			return syserror.EINVAL
 		}
@@ -348,14 +361,19 @@ afterTrailingSymlink:
 		}
 		defer rp.Mount().EndWrite()
 		// Create and open the child.
-		child := fs.newDentry(fs.newRegularFile(rp.Credentials(), opts.Mode))
+		creds := rp.Credentials()
+		child := fs.newDentry(fs.newRegularFile(creds.EffectiveKUID, creds.EffectiveKGID, opts.Mode))
 		parentDir.insertChildLocked(child, name)
 		fd, err := child.open(ctx, rp, &opts, true)
 		if err != nil {
 			return nil, err
 		}
+		parentDir.inode.watches.Notify(name, linux.IN_CREATE, 0, vfs.PathEvent, false /* unlinked */)
 		parentDir.inode.touchCMtime()
 		return fd, nil
+	}
+	if mustCreate {
+		return nil, syserror.EEXIST
 	}
 	// Is the file mounted over?
 	if err := rp.CheckMount(&child.vfsd); err != nil {
@@ -364,7 +382,7 @@ afterTrailingSymlink:
 	// Do we need to resolve a trailing symlink?
 	if symlink, ok := child.inode.impl.(*symlink); ok && rp.ShouldFollowSymlink() {
 		// Symlink traversal updates access time.
-		atomic.StoreInt64(&child.inode.atime, child.inode.fs.clock.Now().Nanoseconds())
+		child.inode.touchAtime(rp.Mount())
 		if err := rp.HandleSymlink(symlink.target); err != nil {
 			return nil, err
 		}
@@ -388,10 +406,11 @@ func (d *dentry) open(ctx context.Context, rp *vfs.ResolvingPath, opts *vfs.Open
 	switch impl := d.inode.impl.(type) {
 	case *regularFile:
 		var fd regularFileFD
-		if err := fd.vfsfd.Init(&fd, opts.Flags, rp.Mount(), &d.vfsd, &vfs.FileDescriptionOptions{}); err != nil {
+		fd.LockFD.Init(&d.inode.locks)
+		if err := fd.vfsfd.Init(&fd, opts.Flags, rp.Mount(), &d.vfsd, &vfs.FileDescriptionOptions{AllowDirectIO: true}); err != nil {
 			return nil, err
 		}
-		if opts.Flags&linux.O_TRUNC != 0 {
+		if !afterCreate && opts.Flags&linux.O_TRUNC != 0 {
 			if _, err := impl.truncate(0); err != nil {
 				return nil, err
 			}
@@ -403,15 +422,16 @@ func (d *dentry) open(ctx context.Context, rp *vfs.ResolvingPath, opts *vfs.Open
 			return nil, syserror.EISDIR
 		}
 		var fd directoryFD
-		if err := fd.vfsfd.Init(&fd, opts.Flags, rp.Mount(), &d.vfsd, &vfs.FileDescriptionOptions{}); err != nil {
+		fd.LockFD.Init(&d.inode.locks)
+		if err := fd.vfsfd.Init(&fd, opts.Flags, rp.Mount(), &d.vfsd, &vfs.FileDescriptionOptions{AllowDirectIO: true}); err != nil {
 			return nil, err
 		}
 		return &fd.vfsfd, nil
 	case *symlink:
-		// Can't open symlinks without O_PATH (which is unimplemented).
+		// TODO(gvisor.dev/issue/2782): Can't open symlinks without O_PATH.
 		return nil, syserror.ELOOP
 	case *namedPipe:
-		return impl.pipe.Open(ctx, rp.Mount(), &d.vfsd, opts.Flags)
+		return impl.pipe.Open(ctx, rp.Mount(), &d.vfsd, opts.Flags, &d.inode.locks)
 	case *deviceFile:
 		return rp.VirtualFilesystem().OpenDeviceSpecialFile(ctx, rp.Mount(), &d.vfsd, impl.kind, impl.major, impl.minor, opts)
 	case *socketFile:
@@ -471,6 +491,9 @@ func (fs *filesystem) RenameAt(ctx context.Context, rp *vfs.ResolvingPath, oldPa
 	renamed, ok := oldParentDir.childMap[oldName]
 	if !ok {
 		return syserror.ENOENT
+	}
+	if err := oldParentDir.mayDelete(rp.Credentials(), renamed); err != nil {
+		return err
 	}
 	// Note that we don't need to call rp.CheckMount(), since if renamed is a
 	// mount point then we want to rename the mount point, not anything in the
@@ -559,6 +582,8 @@ func (fs *filesystem) RenameAt(ctx context.Context, rp *vfs.ResolvingPath, oldPa
 		newParentDir.inode.touchCMtime()
 	}
 	renamed.inode.touchCtime()
+
+	vfs.InotifyRename(ctx, &renamed.inode.watches, &oldParentDir.inode.watches, &newParentDir.inode.watches, oldName, newName, renamed.inode.isDir())
 	return nil
 }
 
@@ -584,6 +609,9 @@ func (fs *filesystem) RmdirAt(ctx context.Context, rp *vfs.ResolvingPath) error 
 	if !ok {
 		return syserror.ENOENT
 	}
+	if err := parentDir.mayDelete(rp.Credentials(), child); err != nil {
+		return err
+	}
 	childDir, ok := child.inode.impl.(*directory)
 	if !ok {
 		return syserror.ENOTDIR
@@ -603,8 +631,11 @@ func (fs *filesystem) RmdirAt(ctx context.Context, rp *vfs.ResolvingPath) error 
 		return err
 	}
 	parentDir.removeChildLocked(child)
-	parentDir.inode.decLinksLocked() // from child's ".."
+	parentDir.inode.watches.Notify(name, linux.IN_DELETE|linux.IN_ISDIR, 0, vfs.InodeEvent, true /* unlinked */)
+	// Remove links for child, child/., and child/..
 	child.inode.decLinksLocked()
+	child.inode.decLinksLocked()
+	parentDir.inode.decLinksLocked()
 	vfsObj.CommitDeleteDentry(&child.vfsd)
 	parentDir.inode.touchCMtime()
 	return nil
@@ -613,12 +644,21 @@ func (fs *filesystem) RmdirAt(ctx context.Context, rp *vfs.ResolvingPath) error 
 // SetStatAt implements vfs.FilesystemImpl.SetStatAt.
 func (fs *filesystem) SetStatAt(ctx context.Context, rp *vfs.ResolvingPath, opts vfs.SetStatOptions) error {
 	fs.mu.RLock()
-	defer fs.mu.RUnlock()
 	d, err := resolveLocked(rp)
 	if err != nil {
+		fs.mu.RUnlock()
 		return err
 	}
-	return d.inode.setStat(ctx, rp.Credentials(), &opts.Stat)
+	if err := d.inode.setStat(ctx, rp.Credentials(), &opts); err != nil {
+		fs.mu.RUnlock()
+		return err
+	}
+	fs.mu.RUnlock()
+
+	if ev := vfs.InotifyEventFromStatMask(opts.Stat.Mask); ev != 0 {
+		d.InotifyWithParent(ev, 0, vfs.InodeEvent)
+	}
+	return nil
 }
 
 // StatAt implements vfs.FilesystemImpl.StatAt.
@@ -656,7 +696,8 @@ func (fs *filesystem) StatFSAt(ctx context.Context, rp *vfs.ResolvingPath) (linu
 // SymlinkAt implements vfs.FilesystemImpl.SymlinkAt.
 func (fs *filesystem) SymlinkAt(ctx context.Context, rp *vfs.ResolvingPath, target string) error {
 	return fs.doCreateAt(rp, false /* dir */, func(parentDir *directory, name string) error {
-		child := fs.newDentry(fs.newSymlink(rp.Credentials(), target))
+		creds := rp.Credentials()
+		child := fs.newDentry(fs.newSymlink(creds.EffectiveKUID, creds.EffectiveKGID, 0777, target))
 		parentDir.insertChildLocked(child, name)
 		return nil
 	})
@@ -681,6 +722,9 @@ func (fs *filesystem) UnlinkAt(ctx context.Context, rp *vfs.ResolvingPath) error
 	if !ok {
 		return syserror.ENOENT
 	}
+	if err := parentDir.mayDelete(rp.Credentials(), child); err != nil {
+		return err
+	}
 	if child.inode.isDir() {
 		return syserror.EISDIR
 	}
@@ -698,6 +742,12 @@ func (fs *filesystem) UnlinkAt(ctx context.Context, rp *vfs.ResolvingPath) error
 	if err := vfsObj.PrepareDeleteDentry(mntns, &child.vfsd); err != nil {
 		return err
 	}
+
+	// Generate inotify events. Note that this must take place before the link
+	// count of the child is decremented, or else the watches may be dropped
+	// before these events are added.
+	vfs.InotifyRemoveChild(&child.inode.watches, &parentDir.inode.watches, name)
+
 	parentDir.removeChildLocked(child)
 	child.inode.decLinksLocked()
 	vfsObj.CommitDeleteDentry(&child.vfsd)
@@ -749,28 +799,61 @@ func (fs *filesystem) GetxattrAt(ctx context.Context, rp *vfs.ResolvingPath, opt
 // SetxattrAt implements vfs.FilesystemImpl.SetxattrAt.
 func (fs *filesystem) SetxattrAt(ctx context.Context, rp *vfs.ResolvingPath, opts vfs.SetxattrOptions) error {
 	fs.mu.RLock()
-	defer fs.mu.RUnlock()
 	d, err := resolveLocked(rp)
 	if err != nil {
+		fs.mu.RUnlock()
 		return err
 	}
-	return d.inode.setxattr(rp.Credentials(), &opts)
+	if err := d.inode.setxattr(rp.Credentials(), &opts); err != nil {
+		fs.mu.RUnlock()
+		return err
+	}
+	fs.mu.RUnlock()
+
+	d.InotifyWithParent(linux.IN_ATTRIB, 0, vfs.InodeEvent)
+	return nil
 }
 
 // RemovexattrAt implements vfs.FilesystemImpl.RemovexattrAt.
 func (fs *filesystem) RemovexattrAt(ctx context.Context, rp *vfs.ResolvingPath, name string) error {
 	fs.mu.RLock()
-	defer fs.mu.RUnlock()
 	d, err := resolveLocked(rp)
 	if err != nil {
+		fs.mu.RUnlock()
 		return err
 	}
-	return d.inode.removexattr(rp.Credentials(), name)
+	if err := d.inode.removexattr(rp.Credentials(), name); err != nil {
+		fs.mu.RUnlock()
+		return err
+	}
+	fs.mu.RUnlock()
+
+	d.InotifyWithParent(linux.IN_ATTRIB, 0, vfs.InodeEvent)
+	return nil
 }
 
 // PrependPath implements vfs.FilesystemImpl.PrependPath.
 func (fs *filesystem) PrependPath(ctx context.Context, vfsroot, vd vfs.VirtualDentry, b *fspath.Builder) error {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
-	return genericPrependPath(vfsroot, vd.Mount(), vd.Dentry().Impl().(*dentry), b)
+	mnt := vd.Mount()
+	d := vd.Dentry().Impl().(*dentry)
+	for {
+		if mnt == vfsroot.Mount() && &d.vfsd == vfsroot.Dentry() {
+			return vfs.PrependPathAtVFSRootError{}
+		}
+		if &d.vfsd == mnt.Root() {
+			return nil
+		}
+		if d.parent == nil {
+			if d.name != "" {
+				// This must be an anonymous memfd file.
+				b.PrependComponent("/" + d.name)
+				return vfs.PrependPathSyntheticError{}
+			}
+			return vfs.PrependPathAtNonMountRootError{}
+		}
+		b.PrependComponent(d.name)
+		d = d.parent
+	}
 }

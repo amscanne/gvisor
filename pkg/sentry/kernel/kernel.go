@@ -34,7 +34,6 @@ package kernel
 import (
 	"errors"
 	"fmt"
-	"io"
 	"path/filepath"
 	"sync/atomic"
 	"time"
@@ -53,6 +52,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/pipefs"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/sockfs"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/timerfd"
+	"gvisor.dev/gvisor/pkg/sentry/fsimpl/tmpfs"
 	"gvisor.dev/gvisor/pkg/sentry/hostcpu"
 	"gvisor.dev/gvisor/pkg/sentry/inet"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
@@ -72,6 +72,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/uniqueid"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/state"
+	"gvisor.dev/gvisor/pkg/state/wire"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 )
@@ -79,6 +80,10 @@ import (
 // VFS2Enabled is set to true when VFS2 is enabled. Added as a global for allow
 // easy access everywhere. To be removed once VFS2 becomes the default.
 var VFS2Enabled = false
+
+// FUSEEnabled is set to true when FUSE is enabled. Added as a global for allow
+// easy access everywhere. To be removed once FUSE is completed.
+var FUSEEnabled = false
 
 // Kernel represents an emulated Linux kernel. It must be initialized by calling
 // Init() or LoadFrom().
@@ -193,11 +198,6 @@ type Kernel struct {
 	// cpuClockTickerSetting is protected by runningTasksMu.
 	cpuClockTickerSetting ktime.Setting
 
-	// fdMapUids is an ever-increasing counter for generating FDTable uids.
-	//
-	// fdMapUids is mutable, and is accessed using atomic memory operations.
-	fdMapUids uint64
-
 	// uniqueID is used to generate unique identifiers.
 	//
 	// uniqueID is mutable, and is accessed using atomic memory operations.
@@ -258,6 +258,10 @@ type Kernel struct {
 	// pipeMount is the Mount used for pipes created by the pipe() and pipe2()
 	// syscalls (as opposed to named pipes created by mknod()).
 	pipeMount *vfs.Mount
+
+	// shmMount is the Mount used for anonymous files created by the
+	// memfd_create() syscalls. It is analagous to Linux's shm_mnt.
+	shmMount *vfs.Mount
 
 	// socketMount is the Mount used for sockets created by the socket() and
 	// socketpair() syscalls. There are several cases where a socket dentry will
@@ -330,6 +334,9 @@ func (k *Kernel) Init(args InitKernelArgs) error {
 	if args.Timekeeper == nil {
 		return fmt.Errorf("Timekeeper is nil")
 	}
+	if args.Timekeeper.clocks == nil {
+		return fmt.Errorf("Must call Timekeeper.SetClocks() before Kernel.Init()")
+	}
 	if args.RootUserNamespace == nil {
 		return fmt.Errorf("RootUserNamespace is nil")
 	}
@@ -384,6 +391,18 @@ func (k *Kernel) Init(args InitKernelArgs) error {
 		}
 		k.pipeMount = pipeMount
 
+		tmpfsFilesystem, tmpfsRoot, err := tmpfs.NewFilesystem(k.SupervisorContext(), &k.vfs, auth.NewRootCredentials(k.rootUserNamespace))
+		if err != nil {
+			return fmt.Errorf("failed to create tmpfs filesystem: %v", err)
+		}
+		defer tmpfsFilesystem.DecRef()
+		defer tmpfsRoot.DecRef()
+		shmMount, err := k.vfs.NewDisconnectedMount(tmpfsFilesystem, tmpfsRoot, &vfs.MountOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to create tmpfs mount: %v", err)
+		}
+		k.shmMount = shmMount
+
 		socketFilesystem, err := sockfs.NewFilesystem(&k.vfs)
 		if err != nil {
 			return fmt.Errorf("failed to create sockfs filesystem: %v", err)
@@ -402,7 +421,7 @@ func (k *Kernel) Init(args InitKernelArgs) error {
 // SaveTo saves the state of k to w.
 //
 // Preconditions: The kernel must be paused throughout the call to SaveTo.
-func (k *Kernel) SaveTo(w io.Writer) error {
+func (k *Kernel) SaveTo(w wire.Writer) error {
 	saveStart := time.Now()
 	ctx := k.SupervisorContext()
 
@@ -437,9 +456,7 @@ func (k *Kernel) SaveTo(w io.Writer) error {
 		return err
 	}
 
-	// Ensure that all pending asynchronous work is complete:
-	//   - inode and mount release
-	//   - asynchronuous IO
+	// Ensure that all inode and mount release operations have completed.
 	fs.AsyncBarrier()
 
 	// Once all fs work has completed (flushed references have all been released),
@@ -460,18 +477,18 @@ func (k *Kernel) SaveTo(w io.Writer) error {
 	//
 	// N.B. This will also be saved along with the full kernel save below.
 	cpuidStart := time.Now()
-	if err := state.Save(k.SupervisorContext(), w, k.FeatureSet(), nil); err != nil {
+	if _, err := state.Save(k.SupervisorContext(), w, k.FeatureSet()); err != nil {
 		return err
 	}
 	log.Infof("CPUID save took [%s].", time.Since(cpuidStart))
 
 	// Save the kernel state.
 	kernelStart := time.Now()
-	var stats state.Stats
-	if err := state.Save(k.SupervisorContext(), w, k, &stats); err != nil {
+	stats, err := state.Save(k.SupervisorContext(), w, k)
+	if err != nil {
 		return err
 	}
-	log.Infof("Kernel save stats: %s", &stats)
+	log.Infof("Kernel save stats: %s", stats.String())
 	log.Infof("Kernel save took [%s].", time.Since(kernelStart))
 
 	// Save the memory file's state.
@@ -616,7 +633,7 @@ func (ts *TaskSet) unregisterEpollWaiters() {
 }
 
 // LoadFrom returns a new Kernel loaded from args.
-func (k *Kernel) LoadFrom(r io.Reader, net inet.Stack, clocks sentrytime.Clocks) error {
+func (k *Kernel) LoadFrom(r wire.Reader, net inet.Stack, clocks sentrytime.Clocks) error {
 	loadStart := time.Now()
 
 	initAppCores := k.applicationCores
@@ -627,7 +644,7 @@ func (k *Kernel) LoadFrom(r io.Reader, net inet.Stack, clocks sentrytime.Clocks)
 	// don't need to explicitly install it in the Kernel.
 	cpuidStart := time.Now()
 	var features cpuid.FeatureSet
-	if err := state.Load(k.SupervisorContext(), r, &features, nil); err != nil {
+	if _, err := state.Load(k.SupervisorContext(), r, &features); err != nil {
 		return err
 	}
 	log.Infof("CPUID load took [%s].", time.Since(cpuidStart))
@@ -642,11 +659,11 @@ func (k *Kernel) LoadFrom(r io.Reader, net inet.Stack, clocks sentrytime.Clocks)
 
 	// Load the kernel state.
 	kernelStart := time.Now()
-	var stats state.Stats
-	if err := state.Load(k.SupervisorContext(), r, k, &stats); err != nil {
+	stats, err := state.Load(k.SupervisorContext(), r, k)
+	if err != nil {
 		return err
 	}
-	log.Infof("Kernel load stats: %s", &stats)
+	log.Infof("Kernel load stats: %s", stats.String())
 	log.Infof("Kernel load took [%s].", time.Since(kernelStart))
 
 	// rootNetworkNamespace should be populated after loading the state file.
@@ -877,7 +894,7 @@ func (k *Kernel) CreateProcess(args CreateProcessArgs) (*ThreadGroup, ThreadID, 
 		if mntnsVFS2 == nil {
 			// MountNamespaceVFS2 adds a reference to the namespace, which is
 			// transferred to the new process.
-			mntnsVFS2 = k.GlobalInit().Leader().MountNamespaceVFS2()
+			mntnsVFS2 = k.globalInit.Leader().MountNamespaceVFS2()
 		}
 		// Get the root directory from the MountNamespace.
 		root := args.MountNamespaceVFS2.Root()
@@ -1234,13 +1251,15 @@ func (k *Kernel) Kill(es ExitStatus) {
 }
 
 // Pause requests that all tasks in k temporarily stop executing, and blocks
-// until all tasks in k have stopped. Multiple calls to Pause nest and require
-// an equal number of calls to Unpause to resume execution.
+// until all tasks and asynchronous I/O operations in k have stopped. Multiple
+// calls to Pause nest and require an equal number of calls to Unpause to
+// resume execution.
 func (k *Kernel) Pause() {
 	k.extMu.Lock()
 	k.tasks.BeginExternalStop()
 	k.extMu.Unlock()
 	k.tasks.runningGoroutines.Wait()
+	k.tasks.aioGoroutines.Wait()
 }
 
 // Unpause ends the effect of a previous call to Pause. If Unpause is called
@@ -1450,6 +1469,11 @@ func (k *Kernel) NowMonotonic() int64 {
 	return now
 }
 
+// AfterFunc implements tcpip.Clock.AfterFunc.
+func (k *Kernel) AfterFunc(d time.Duration, f func()) tcpip.Timer {
+	return ktime.TcpipAfterFunc(k.realtimeClock, d, f)
+}
+
 // SetMemoryFile sets Kernel.mf. SetMemoryFile must be called before Init or
 // LoadFrom.
 func (k *Kernel) SetMemoryFile(mf *pgalloc.MemoryFile) {
@@ -1654,6 +1678,11 @@ func (k *Kernel) HostMount() *vfs.Mount {
 // PipeMount returns the pipefs mount.
 func (k *Kernel) PipeMount() *vfs.Mount {
 	return k.pipeMount
+}
+
+// ShmMount returns the tmpfs mount.
+func (k *Kernel) ShmMount() *vfs.Mount {
+	return k.shmMount
 }
 
 // SocketMount returns the sockfs mount.

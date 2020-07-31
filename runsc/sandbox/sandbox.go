@@ -30,6 +30,7 @@ import (
 	"github.com/cenkalti/backoff"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/syndtr/gocapability/capability"
+	"gvisor.dev/gvisor/pkg/cleanup"
 	"gvisor.dev/gvisor/pkg/control/client"
 	"gvisor.dev/gvisor/pkg/control/server"
 	"gvisor.dev/gvisor/pkg/log"
@@ -119,7 +120,7 @@ func New(conf *boot.Config, args *Args) (*Sandbox, error) {
 	s := &Sandbox{ID: args.ID, Cgroup: args.Cgroup}
 	// The Cleanup object cleans up partially created sandboxes when an error
 	// occurs. Any errors occurring during cleanup itself are ignored.
-	c := specutils.MakeCleanup(func() {
+	c := cleanup.Make(func() {
 		err := s.destroy()
 		log.Warningf("error destroying sandbox: %v", err)
 	})
@@ -477,9 +478,7 @@ func (s *Sandbox) createSandboxProcess(conf *boot.Config, args *Args, startSyncF
 
 	// If the console control socket file is provided, then create a new
 	// pty master/slave pair and set the TTY on the sandbox process.
-	if args.ConsoleSocket != "" {
-		cmd.Args = append(cmd.Args, "--console=true")
-
+	if args.Spec.Process.Terminal && args.ConsoleSocket != "" {
 		// console.NewWithSocket will send the master on the given
 		// socket, and return the slave.
 		tty, err := console.NewWithSocket(args.ConsoleSocket)

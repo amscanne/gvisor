@@ -16,7 +16,6 @@ package linux
 
 import (
 	"gvisor.dev/gvisor/pkg/abi/linux"
-	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
@@ -26,7 +25,6 @@ import (
 
 // doSplice implements a blocking splice operation.
 func doSplice(t *kernel.Task, outFile, inFile *fs.File, opts fs.SpliceOpts, nonBlocking bool) (int64, error) {
-	log.Infof("NLAC: doSplice opts: %+v", opts)
 	if opts.Length < 0 || opts.SrcStart < 0 || opts.DstStart < 0 || (opts.SrcStart+opts.Length < 0) {
 		return 0, syserror.EINVAL
 	}
@@ -82,6 +80,12 @@ func doSplice(t *kernel.Task, outFile, inFile *fs.File, opts fs.SpliceOpts, nonB
 		}
 	}
 
+	if total > 0 {
+		// On Linux, inotify behavior is not very consistent with splice(2). We try
+		// our best to emulate Linux for very basic calls to splice, where for some
+		// reason, events are generated for output files, but not input files.
+		outFile.Dirent.InotifyEvent(linux.IN_MODIFY, 0)
+	}
 	return total, err
 }
 

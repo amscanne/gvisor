@@ -139,13 +139,13 @@ func (d *readVDispatcher) dispatch() (bool, *tcpip.Error) {
 	}
 
 	used := d.capViews(n, BufConfig)
-	pkt := stack.PacketBuffer{
+	pkt := &stack.PacketBuffer{
 		Data:       buffer.NewVectorisedView(n, append([]buffer.View(nil), d.views[:used]...)),
 		LinkHeader: buffer.View(eth),
 	}
 	pkt.Data.TrimFront(d.e.hdrSize)
 
-	d.e.dispatcher.DeliverNetworkPacket(d.e, remote, local, p, pkt)
+	d.e.dispatcher.DeliverNetworkPacket(remote, local, p, pkt)
 
 	// Prepare e.views for another packet: release used views.
 	for i := 0; i < used; i++ {
@@ -169,7 +169,7 @@ type recvMMsgDispatcher struct {
 
 	// iovecs is an array of array of iovec records where each iovec base
 	// pointer and length are initialzed to the corresponding view above,
-	// except when GSO is neabled then the first iovec in each array of
+	// except when GSO is enabled then the first iovec in each array of
 	// iovecs points to a buffer for the vnet header which is stripped
 	// before the views are passed up the stack for further processing.
 	iovecs [][]syscall.Iovec
@@ -278,7 +278,7 @@ func (d *recvMMsgDispatcher) dispatch() (bool, *tcpip.Error) {
 			eth           header.Ethernet
 		)
 		if d.e.hdrSize > 0 {
-			eth = header.Ethernet(d.views[k][0])
+			eth = header.Ethernet(d.views[k][0][:header.EthernetMinimumSize])
 			p = eth.Type()
 			remote = eth.SourceAddress()
 			local = eth.DestinationAddress()
@@ -296,12 +296,12 @@ func (d *recvMMsgDispatcher) dispatch() (bool, *tcpip.Error) {
 		}
 
 		used := d.capViews(k, int(n), BufConfig)
-		pkt := stack.PacketBuffer{
+		pkt := &stack.PacketBuffer{
 			Data:       buffer.NewVectorisedView(int(n), append([]buffer.View(nil), d.views[k][:used]...)),
 			LinkHeader: buffer.View(eth),
 		}
 		pkt.Data.TrimFront(d.e.hdrSize)
-		d.e.dispatcher.DeliverNetworkPacket(d.e, remote, local, p, pkt)
+		d.e.dispatcher.DeliverNetworkPacket(remote, local, p, pkt)
 
 		// Prepare e.views for another packet: release used views.
 		for i := 0; i < used; i++ {

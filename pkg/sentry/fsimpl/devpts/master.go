@@ -18,6 +18,7 @@ import (
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
+	fslock "gvisor.dev/gvisor/pkg/sentry/fs/lock"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/kernfs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/unimpl"
@@ -27,14 +28,14 @@ import (
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
-// LINT.IfChange
-
 // masterInode is the inode for the master end of the Terminal.
 type masterInode struct {
 	kernfs.InodeAttrs
 	kernfs.InodeNoopRefCount
 	kernfs.InodeNotDirectory
 	kernfs.InodeNotSymlink
+
+	locks vfs.FileLocks
 
 	// Keep a reference to this inode's dentry.
 	dentry kernfs.Dentry
@@ -57,6 +58,7 @@ func (mi *masterInode) Open(ctx context.Context, rp *vfs.ResolvingPath, vfsd *vf
 		inode: mi,
 		t:     t,
 	}
+	fd.LockFD.Init(&mi.locks)
 	if err := fd.vfsfd.Init(fd, opts.Flags, rp.Mount(), vfsd, &vfs.FileDescriptionOptions{}); err != nil {
 		mi.DecRef()
 		return nil, err
@@ -65,8 +67,8 @@ func (mi *masterInode) Open(ctx context.Context, rp *vfs.ResolvingPath, vfsd *vf
 }
 
 // Stat implements kernfs.Inode.Stat.
-func (mi *masterInode) Stat(vfsfs *vfs.Filesystem, opts vfs.StatOptions) (linux.Statx, error) {
-	statx, err := mi.InodeAttrs.Stat(vfsfs, opts)
+func (mi *masterInode) Stat(ctx context.Context, vfsfs *vfs.Filesystem, opts vfs.StatOptions) (linux.Statx, error) {
+	statx, err := mi.InodeAttrs.Stat(ctx, vfsfs, opts)
 	if err != nil {
 		return linux.Statx{}, err
 	}
@@ -87,6 +89,7 @@ func (mi *masterInode) SetStat(ctx context.Context, vfsfs *vfs.Filesystem, creds
 type masterFileDescription struct {
 	vfsfd vfs.FileDescription
 	vfs.FileDescriptionDefaultImpl
+	vfs.LockFD
 
 	inode *masterInode
 	t     *Terminal
@@ -183,7 +186,17 @@ func (mfd *masterFileDescription) SetStat(ctx context.Context, opts vfs.SetStatO
 // Stat implements vfs.FileDescriptionImpl.Stat.
 func (mfd *masterFileDescription) Stat(ctx context.Context, opts vfs.StatOptions) (linux.Statx, error) {
 	fs := mfd.vfsfd.VirtualDentry().Mount().Filesystem()
-	return mfd.inode.Stat(fs, opts)
+	return mfd.inode.Stat(ctx, fs, opts)
+}
+
+// LockPOSIX implements vfs.FileDescriptionImpl.LockPOSIX.
+func (mfd *masterFileDescription) LockPOSIX(ctx context.Context, uid fslock.UniqueID, t fslock.LockType, start, length uint64, whence int16, block fslock.Blocker) error {
+	return mfd.Locks().LockPOSIX(ctx, &mfd.vfsfd, uid, t, start, length, whence, block)
+}
+
+// UnlockPOSIX implements vfs.FileDescriptionImpl.UnlockPOSIX.
+func (mfd *masterFileDescription) UnlockPOSIX(ctx context.Context, uid fslock.UniqueID, start, length uint64, whence int16) error {
+	return mfd.Locks().UnlockPOSIX(ctx, &mfd.vfsfd, uid, start, length, whence)
 }
 
 // maybeEmitUnimplementedEvent emits unimplemented event if cmd is valid.
@@ -222,5 +235,3 @@ func maybeEmitUnimplementedEvent(ctx context.Context, cmd uint32) {
 		unimpl.EmitUnimplementedEvent(ctx)
 	}
 }
-
-// LINT.ThenChange(../../fs/tty/master.go)

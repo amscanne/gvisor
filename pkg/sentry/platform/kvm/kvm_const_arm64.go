@@ -116,6 +116,17 @@ const (
 
 // Arm64: Exception Syndrome Register EL1.
 const (
+	_ESR_ELx_EC_SHIFT = 26
+	_ESR_ELx_EC_MASK  = 0x3F << _ESR_ELx_EC_SHIFT
+
+	_ESR_ELx_EC_IMP_DEF  = 0x1f
+	_ESR_ELx_EC_IABT_LOW = 0x20
+	_ESR_ELx_EC_IABT_CUR = 0x21
+	_ESR_ELx_EC_PC_ALIGN = 0x22
+
+	_ESR_ELx_CM  = 1 << 8
+	_ESR_ELx_WNR = 1 << 6
+
 	_ESR_ELx_FSC = 0x3F
 
 	_ESR_SEGV_MAPERR_L0 = 0x4
@@ -130,4 +141,11 @@ const (
 	_ESR_SEGV_PEMERR_L1 = 0xd
 	_ESR_SEGV_PEMERR_L2 = 0xe
 	_ESR_SEGV_PEMERR_L3 = 0xf
+)
+
+// Arm64: MMIO base address used to dispatch hypercalls.
+const (
+	// on Arm64, the MMIO address must be 64-bit aligned.
+	// Currently, we only need 1 hypercall: hypercall_vmexit.
+	_AARCH64_HYPERCALL_MMIO_SIZE = 1 << 3
 )

@@ -40,6 +40,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/usermem"
 	"gvisor.dev/gvisor/pkg/waiter"
+	"gvisor.dev/gvisor/tools/go_marshal/marshal"
 )
 
 // SocketOperations is a Unix socket. It is similar to a netstack socket,
@@ -184,7 +185,7 @@ func (s *SocketOperations) Ioctl(ctx context.Context, _ *fs.File, io usermem.IO,
 
 // GetSockOpt implements the linux syscall getsockopt(2) for sockets backed by
 // a transport.Endpoint.
-func (s *SocketOperations) GetSockOpt(t *kernel.Task, level, name int, outPtr usermem.Addr, outLen int) (interface{}, *syserr.Error) {
+func (s *SocketOperations) GetSockOpt(t *kernel.Task, level, name int, outPtr usermem.Addr, outLen int) (marshal.Marshallable, *syserr.Error) {
 	return netstack.GetSockOpt(t, s, s.ep, linux.AF_UNIX, s.ep.Type(), level, name, outLen)
 }
 
@@ -417,7 +418,18 @@ func (s *socketOpsCommon) Connect(t *kernel.Task, sockaddr []byte, blocking bool
 	defer ep.Release()
 
 	// Connect the server endpoint.
-	return s.ep.Connect(t, ep)
+	err = s.ep.Connect(t, ep)
+
+	if err == syserr.ErrWrongProtocolForSocket {
+		// Linux for abstract sockets returns ErrConnectionRefused
+		// instead of ErrWrongProtocolForSocket.
+		path, _ := extractPath(sockaddr)
+		if len(path) > 0 && path[0] == 0 {
+			err = syserr.ErrConnectionRefused
+		}
+	}
+
+	return err
 }
 
 // Write implements fs.FileOperations.Write.
@@ -448,15 +460,25 @@ func (s *socketOpsCommon) SendMsg(t *kernel.Task, src usermem.IOSequence, to []b
 		To:       nil,
 	}
 	if len(to) > 0 {
-		ep, err := extractEndpoint(t, to)
-		if err != nil {
-			return 0, err
-		}
-		defer ep.Release()
-		w.To = ep
+		switch s.stype {
+		case linux.SOCK_SEQPACKET:
+			to = nil
+		case linux.SOCK_STREAM:
+			if s.State() == linux.SS_CONNECTED {
+				return 0, syserr.ErrAlreadyConnected
+			}
+			return 0, syserr.ErrNotSupported
+		default:
+			ep, err := extractEndpoint(t, to)
+			if err != nil {
+				return 0, err
+			}
+			defer ep.Release()
+			w.To = ep
 
-		if ep.Passcred() && w.Control.Credentials == nil {
-			w.Control.Credentials = control.MakeCreds(t)
+			if ep.Passcred() && w.Control.Credentials == nil {
+				w.Control.Credentials = control.MakeCreds(t)
+			}
 		}
 	}
 

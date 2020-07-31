@@ -243,7 +243,7 @@ func (a *InodeAttrs) Mode() linux.FileMode {
 // Stat partially implements Inode.Stat. Note that this function doesn't provide
 // all the stat fields, and the embedder should consider extending the result
 // with filesystem-specific fields.
-func (a *InodeAttrs) Stat(*vfs.Filesystem, vfs.StatOptions) (linux.Statx, error) {
+func (a *InodeAttrs) Stat(context.Context, *vfs.Filesystem, vfs.StatOptions) (linux.Statx, error) {
 	var stat linux.Statx
 	stat.Mask = linux.STATX_TYPE | linux.STATX_MODE | linux.STATX_UID | linux.STATX_GID | linux.STATX_INO | linux.STATX_NLINK
 	stat.DevMajor = a.devMajor
@@ -267,7 +267,7 @@ func (a *InodeAttrs) SetStat(ctx context.Context, fs *vfs.Filesystem, creds *aut
 	if opts.Stat.Mask&^(linux.STATX_MODE|linux.STATX_UID|linux.STATX_GID) != 0 {
 		return syserror.EPERM
 	}
-	if err := vfs.CheckSetStat(ctx, creds, &opts.Stat, a.Mode(), auth.KUID(atomic.LoadUint32(&a.uid)), auth.KGID(atomic.LoadUint32(&a.gid))); err != nil {
+	if err := vfs.CheckSetStat(ctx, creds, &opts, a.Mode(), auth.KUID(atomic.LoadUint32(&a.uid)), auth.KGID(atomic.LoadUint32(&a.gid))); err != nil {
 		return err
 	}
 
@@ -293,6 +293,8 @@ func (a *InodeAttrs) SetStat(ctx context.Context, fs *vfs.Filesystem, creds *aut
 	// inode numbers are immutable after node creation.
 
 	// TODO(gvisor.dev/issue/1193): Implement other stat fields like timestamps.
+	// Also, STATX_SIZE will need some special handling, because read-only static
+	// files should return EIO for truncate operations.
 
 	return nil
 }
@@ -469,6 +471,8 @@ func (o *OrderedChildren) Unlink(ctx context.Context, name string, child *vfs.De
 	if err := o.checkExistingLocked(name, child); err != nil {
 		return err
 	}
+
+	// TODO(gvisor.dev/issue/3027): Check sticky bit before removing.
 	o.removeLocked(name)
 	return nil
 }
@@ -516,6 +520,8 @@ func (o *OrderedChildren) Rename(ctx context.Context, oldname, newname string, c
 	if err := o.checkExistingLocked(oldname, child); err != nil {
 		return nil, err
 	}
+
+	// TODO(gvisor.dev/issue/3027): Check sticky bit before removing.
 	replaced := dst.replaceChildLocked(newname, child)
 	return replaced, nil
 }
@@ -555,6 +561,8 @@ type StaticDirectory struct {
 	InodeAttrs
 	InodeNoDynamicLookup
 	OrderedChildren
+
+	locks vfs.FileLocks
 }
 
 var _ Inode = (*StaticDirectory)(nil)
@@ -584,7 +592,7 @@ func (s *StaticDirectory) Init(creds *auth.Credentials, devMajor, devMinor uint3
 
 // Open implements kernfs.Inode.
 func (s *StaticDirectory) Open(ctx context.Context, rp *vfs.ResolvingPath, vfsd *vfs.Dentry, opts vfs.OpenOptions) (*vfs.FileDescription, error) {
-	fd, err := NewGenericDirectoryFD(rp.Mount(), vfsd, &s.OrderedChildren, &opts)
+	fd, err := NewGenericDirectoryFD(rp.Mount(), vfsd, &s.OrderedChildren, &s.locks, &opts)
 	if err != nil {
 		return nil, err
 	}

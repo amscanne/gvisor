@@ -252,7 +252,7 @@ func (e *connectionedEndpoint) Close() {
 // BidirectionalConnect implements BoundEndpoint.BidirectionalConnect.
 func (e *connectionedEndpoint) BidirectionalConnect(ctx context.Context, ce ConnectingEndpoint, returnConnect func(Receiver, ConnectedEndpoint)) *syserr.Error {
 	if ce.Type() != e.stype {
-		return syserr.ErrConnectionRefused
+		return syserr.ErrWrongProtocolForSocket
 	}
 
 	// Check if ce is e to avoid a deadlock.
@@ -476,6 +476,9 @@ func (e *connectionedEndpoint) Readiness(mask waiter.EventMask) waiter.EventMask
 
 // State implements socket.Socket.State.
 func (e *connectionedEndpoint) State() uint32 {
+	e.Lock()
+	defer e.Unlock()
+
 	if e.Connected() {
 		return linux.SS_CONNECTED
 	}

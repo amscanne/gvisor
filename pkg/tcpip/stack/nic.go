@@ -16,6 +16,7 @@ package stack
 
 import (
 	"fmt"
+	"math/rand"
 	"reflect"
 	"sort"
 	"strings"
@@ -45,6 +46,7 @@ type NIC struct {
 	context NICContext
 
 	stats NICStats
+	neigh *neighborCache
 
 	mu struct {
 		sync.RWMutex
@@ -141,6 +143,16 @@ func newNIC(stack *Stack, id tcpip.NICID, name string, ep LinkEndpoint, ctx NICC
 		nic.mu.packetEPs[netProto.Number()] = []PacketEndpoint{}
 	}
 
+	// Check for Neighbor Unreachability Detection support.
+	if ep.Capabilities()&CapabilityResolutionRequired != 0 && len(stack.linkAddrResolvers) != 0 {
+		rng := rand.New(rand.NewSource(stack.clock.NowNanoseconds()))
+		nic.neigh = &neighborCache{
+			nic:   nic,
+			state: NewNUDState(stack.nudConfigs, rng),
+			cache: make(map[tcpip.Address]*neighborEntry, neighborCacheSize),
+		}
+	}
+
 	nic.linkEP.Attach(nic)
 
 	return nic
@@ -181,7 +193,7 @@ func (n *NIC) disableLocked() *tcpip.Error {
 		return nil
 	}
 
-	// TODO(b/147015577): Should Routes that are currently bound to n be
+	// TODO(gvisor.dev/issue/1491): Should Routes that are currently bound to n be
 	// invalidated? Currently, Routes will continue to work when a NIC is enabled
 	// again, and applications may not know that the underlying NIC was ever
 	// disabled.
@@ -457,8 +469,20 @@ type ipv6AddrCandidate struct {
 // remoteAddr must be a valid IPv6 address.
 func (n *NIC) primaryIPv6Endpoint(remoteAddr tcpip.Address) *referencedNetworkEndpoint {
 	n.mu.RLock()
-	defer n.mu.RUnlock()
+	ref := n.primaryIPv6EndpointRLocked(remoteAddr)
+	n.mu.RUnlock()
+	return ref
+}
 
+// primaryIPv6EndpointLocked returns an IPv6 endpoint following Source Address
+// Selection (RFC 6724 section 5).
+//
+// Note, only rules 1-3 and 7 are followed.
+//
+// remoteAddr must be a valid IPv6 address.
+//
+// n.mu MUST be read locked.
+func (n *NIC) primaryIPv6EndpointRLocked(remoteAddr tcpip.Address) *referencedNetworkEndpoint {
 	primaryAddrs := n.mu.primary[header.IPv6ProtocolNumber]
 
 	if len(primaryAddrs) == 0 {
@@ -568,11 +592,6 @@ const (
 	// promiscuous indicates that the NIC's promiscuous flag should be observed
 	// when getting a NIC's referenced network endpoint.
 	promiscuous
-
-	// forceSpoofing indicates that the NIC should be assumed to be spoofing,
-	// regardless of what the NIC's spoofing flag is when getting a NIC's
-	// referenced network endpoint.
-	forceSpoofing
 )
 
 func (n *NIC) getRef(protocol tcpip.NetworkProtocolNumber, dst tcpip.Address) *referencedNetworkEndpoint {
@@ -591,8 +610,6 @@ func (n *NIC) findEndpoint(protocol tcpip.NetworkProtocolNumber, address tcpip.A
 // or spoofing. Promiscuous mode will only be checked if promiscuous is true.
 // Similarly, spoofing will only be checked if spoofing is true.
 func (n *NIC) getRefOrCreateTemp(protocol tcpip.NetworkProtocolNumber, address tcpip.Address, peb PrimaryEndpointBehavior, tempRef getRefBehaviour) *referencedNetworkEndpoint {
-	id := NetworkEndpointID{address}
-
 	n.mu.RLock()
 
 	var spoofingOrPromiscuous bool
@@ -601,24 +618,18 @@ func (n *NIC) getRefOrCreateTemp(protocol tcpip.NetworkProtocolNumber, address t
 		spoofingOrPromiscuous = n.mu.spoofing
 	case promiscuous:
 		spoofingOrPromiscuous = n.mu.promiscuous
-	case forceSpoofing:
-		spoofingOrPromiscuous = true
 	}
 
-	if ref, ok := n.mu.endpoints[id]; ok {
+	if ref, ok := n.mu.endpoints[NetworkEndpointID{address}]; ok {
 		// An endpoint with this id exists, check if it can be used and return it.
-		switch ref.getKind() {
-		case permanentExpired:
-			if !spoofingOrPromiscuous {
-				n.mu.RUnlock()
-				return nil
-			}
-			fallthrough
-		case temporary, permanent:
-			if ref.tryIncRef() {
-				n.mu.RUnlock()
-				return ref
-			}
+		if !ref.isAssignedRLocked(spoofingOrPromiscuous) {
+			n.mu.RUnlock()
+			return nil
+		}
+
+		if ref.tryIncRef() {
+			n.mu.RUnlock()
+			return ref
 		}
 	}
 
@@ -654,11 +665,18 @@ func (n *NIC) getRefOrCreateTemp(protocol tcpip.NetworkProtocolNumber, address t
 	// endpoint, create a new "temporary" endpoint. It will only exist while
 	// there's a route through it.
 	n.mu.Lock()
-	if ref, ok := n.mu.endpoints[id]; ok {
+	ref := n.getRefOrCreateTempLocked(protocol, address, peb)
+	n.mu.Unlock()
+	return ref
+}
+
+/// getRefOrCreateTempLocked returns an existing endpoint for address or creates
+/// and returns a temporary endpoint.
+func (n *NIC) getRefOrCreateTempLocked(protocol tcpip.NetworkProtocolNumber, address tcpip.Address, peb PrimaryEndpointBehavior) *referencedNetworkEndpoint {
+	if ref, ok := n.mu.endpoints[NetworkEndpointID{address}]; ok {
 		// No need to check the type as we are ok with expired endpoints at this
 		// point.
 		if ref.tryIncRef() {
-			n.mu.Unlock()
 			return ref
 		}
 		// tryIncRef failing means the endpoint is scheduled to be removed once the
@@ -670,7 +688,6 @@ func (n *NIC) getRefOrCreateTemp(protocol tcpip.NetworkProtocolNumber, address t
 	// Add a new temporary endpoint.
 	netProto, ok := n.stack.networkProtocols[protocol]
 	if !ok {
-		n.mu.Unlock()
 		return nil
 	}
 	ref, _ := n.addAddressLocked(tcpip.ProtocolAddress{
@@ -680,8 +697,6 @@ func (n *NIC) getRefOrCreateTemp(protocol tcpip.NetworkProtocolNumber, address t
 			PrefixLen: netProto.DefaultPrefixLen(),
 		},
 	}, peb, temporary, static, false)
-
-	n.mu.Unlock()
 	return ref
 }
 
@@ -1153,7 +1168,7 @@ func (n *NIC) isInGroup(addr tcpip.Address) bool {
 	return joins != 0
 }
 
-func handlePacket(protocol tcpip.NetworkProtocolNumber, dst, src tcpip.Address, localLinkAddr, remotelinkAddr tcpip.LinkAddress, ref *referencedNetworkEndpoint, pkt PacketBuffer) {
+func handlePacket(protocol tcpip.NetworkProtocolNumber, dst, src tcpip.Address, localLinkAddr, remotelinkAddr tcpip.LinkAddress, ref *referencedNetworkEndpoint, pkt *PacketBuffer) {
 	r := makeRoute(protocol, dst, src, localLinkAddr, ref, false /* handleLocal */, false /* multicastLoop */)
 	r.RemoteLinkAddress = remotelinkAddr
 
@@ -1167,7 +1182,7 @@ func handlePacket(protocol tcpip.NetworkProtocolNumber, dst, src tcpip.Address, 
 // Note that the ownership of the slice backing vv is retained by the caller.
 // This rule applies only to the slice itself, not to the items of the slice;
 // the ownership of the items is not retained by the caller.
-func (n *NIC) DeliverNetworkPacket(linkEP LinkEndpoint, remote, local tcpip.LinkAddress, protocol tcpip.NetworkProtocolNumber, pkt PacketBuffer) {
+func (n *NIC) DeliverNetworkPacket(remote, local tcpip.LinkAddress, protocol tcpip.NetworkProtocolNumber, pkt *PacketBuffer) {
 	n.mu.RLock()
 	enabled := n.mu.enabled
 	// If the NIC is not yet enabled, don't receive any packets.
@@ -1197,27 +1212,34 @@ func (n *NIC) DeliverNetworkPacket(linkEP LinkEndpoint, remote, local tcpip.Link
 
 	// Are any packet sockets listening for this network protocol?
 	packetEPs := n.mu.packetEPs[protocol]
-	// Check whether there are packet sockets listening for every protocol.
-	// If we received a packet with protocol EthernetProtocolAll, then the
-	// previous for loop will have handled it.
-	if protocol != header.EthernetProtocolAll {
-		packetEPs = append(packetEPs, n.mu.packetEPs[header.EthernetProtocolAll]...)
-	}
+	// Add any other packet sockets that maybe listening for all protocols.
+	packetEPs = append(packetEPs, n.mu.packetEPs[header.EthernetProtocolAll]...)
 	n.mu.RUnlock()
 	for _, ep := range packetEPs {
-		ep.HandlePacket(n.id, local, protocol, pkt.Clone())
+		p := pkt.Clone()
+		p.PktType = tcpip.PacketHost
+		ep.HandlePacket(n.id, local, protocol, p)
 	}
 
 	if netProto.Number() == header.IPv4ProtocolNumber || netProto.Number() == header.IPv6ProtocolNumber {
 		n.stack.stats.IP.PacketsReceived.Increment()
 	}
 
-	netHeader, ok := pkt.Data.PullUp(netProto.MinimumPacketSize())
+	// Parse headers.
+	transProtoNum, hasTransportHdr, ok := netProto.Parse(pkt)
 	if !ok {
+		// The packet is too small to contain a network header.
 		n.stack.stats.MalformedRcvdPackets.Increment()
 		return
 	}
-	src, dst := netProto.ParseAddresses(netHeader)
+	if hasTransportHdr {
+		// Parse the transport header if present.
+		if state, ok := n.stack.transportProtocols[transProtoNum]; ok {
+			state.proto.Parse(pkt)
+		}
+	}
+
+	src, dst := netProto.ParseAddresses(pkt.NetworkHeader)
 
 	if n.stack.handleLocal && !n.isLoopback() && n.getRef(protocol, src) != nil {
 		// The source address is one of our own, so we never should have gotten a
@@ -1229,18 +1251,19 @@ func (n *NIC) DeliverNetworkPacket(linkEP LinkEndpoint, remote, local tcpip.Link
 	}
 
 	// TODO(gvisor.dev/issue/170): Not supporting iptables for IPv6 yet.
-	if protocol == header.IPv4ProtocolNumber {
+	// Loopback traffic skips the prerouting chain.
+	if protocol == header.IPv4ProtocolNumber && !n.isLoopback() {
 		// iptables filtering.
 		ipt := n.stack.IPTables()
 		address := n.primaryAddress(protocol)
-		if ok := ipt.Check(Prerouting, &pkt, nil, nil, address.Address, ""); !ok {
+		if ok := ipt.Check(Prerouting, pkt, nil, nil, address.Address, ""); !ok {
 			// iptables is telling us to drop the packet.
 			return
 		}
 	}
 
 	if ref := n.getRef(protocol, dst); ref != nil {
-		handlePacket(protocol, dst, src, linkEP.LinkAddress(), remote, ref, pkt)
+		handlePacket(protocol, dst, src, n.linkEP.LinkAddress(), remote, ref, pkt)
 		return
 	}
 
@@ -1298,11 +1321,42 @@ func (n *NIC) DeliverNetworkPacket(linkEP LinkEndpoint, remote, local tcpip.Link
 	}
 }
 
-func (n *NIC) forwardPacket(r *Route, protocol tcpip.NetworkProtocolNumber, pkt PacketBuffer) {
-	// TODO(b/143425874) Decrease the TTL field in forwarded packets.
-	if linkHeaderLen := int(n.linkEP.MaxHeaderLength()); linkHeaderLen != 0 {
-		pkt.Header = buffer.NewPrependable(linkHeaderLen)
+// DeliverOutboundPacket implements NetworkDispatcher.DeliverOutboundPacket.
+func (n *NIC) DeliverOutboundPacket(remote, local tcpip.LinkAddress, protocol tcpip.NetworkProtocolNumber, pkt *PacketBuffer) {
+	n.mu.RLock()
+	// We do not deliver to protocol specific packet endpoints as on Linux
+	// only ETH_P_ALL endpoints get outbound packets.
+	// Add any other packet sockets that maybe listening for all protocols.
+	packetEPs := n.mu.packetEPs[header.EthernetProtocolAll]
+	n.mu.RUnlock()
+	for _, ep := range packetEPs {
+		p := pkt.Clone()
+		p.PktType = tcpip.PacketOutgoing
+		// Add the link layer header as outgoing packets are intercepted
+		// before the link layer header is created.
+		n.linkEP.AddHeader(local, remote, protocol, p)
+		ep.HandlePacket(n.id, local, protocol, p)
 	}
+}
+
+func (n *NIC) forwardPacket(r *Route, protocol tcpip.NetworkProtocolNumber, pkt *PacketBuffer) {
+	// TODO(b/143425874) Decrease the TTL field in forwarded packets.
+	// TODO(b/151227689): Avoid copying the packet when forwarding. We can do this
+	// by having lower layers explicity write each header instead of just
+	// pkt.Header.
+
+	// pkt may have set its NetworkHeader and TransportHeader. If we're
+	// forwarding, we'll have to copy them into pkt.Header.
+	pkt.Header = buffer.NewPrependable(int(n.linkEP.MaxHeaderLength()) + len(pkt.NetworkHeader) + len(pkt.TransportHeader))
+	if n := copy(pkt.Header.Prepend(len(pkt.TransportHeader)), pkt.TransportHeader); n != len(pkt.TransportHeader) {
+		panic(fmt.Sprintf("copied %d bytes, expected %d", n, len(pkt.TransportHeader)))
+	}
+	if n := copy(pkt.Header.Prepend(len(pkt.NetworkHeader)), pkt.NetworkHeader); n != len(pkt.NetworkHeader) {
+		panic(fmt.Sprintf("copied %d bytes, expected %d", n, len(pkt.NetworkHeader)))
+	}
+
+	// WritePacket takes ownership of pkt, calculate numBytes first.
+	numBytes := pkt.Header.UsedLength() + pkt.Data.Size()
 
 	if err := n.linkEP.WritePacket(r, nil /* gso */, protocol, pkt); err != nil {
 		r.Stats().IP.OutgoingPacketErrors.Increment()
@@ -1310,12 +1364,12 @@ func (n *NIC) forwardPacket(r *Route, protocol tcpip.NetworkProtocolNumber, pkt 
 	}
 
 	n.stats.Tx.Packets.Increment()
-	n.stats.Tx.Bytes.IncrementBy(uint64(pkt.Header.UsedLength() + pkt.Data.Size()))
+	n.stats.Tx.Bytes.IncrementBy(uint64(numBytes))
 }
 
 // DeliverTransportPacket delivers the packets to the appropriate transport
 // protocol endpoint.
-func (n *NIC) DeliverTransportPacket(r *Route, protocol tcpip.TransportProtocolNumber, pkt PacketBuffer) {
+func (n *NIC) DeliverTransportPacket(r *Route, protocol tcpip.TransportProtocolNumber, pkt *PacketBuffer) {
 	state, ok := n.stack.transportProtocols[protocol]
 	if !ok {
 		n.stack.stats.UnknownProtocolRcvdPackets.Increment()
@@ -1329,13 +1383,34 @@ func (n *NIC) DeliverTransportPacket(r *Route, protocol tcpip.TransportProtocolN
 	// validly formed.
 	n.stack.demux.deliverRawPacket(r, protocol, pkt)
 
-	transHeader, ok := pkt.Data.PullUp(transProto.MinimumPacketSize())
-	if !ok {
+	// TransportHeader is nil only when pkt is an ICMP packet or was reassembled
+	// from fragments.
+	if pkt.TransportHeader == nil {
+		// TODO(gvisor.dev/issue/170): ICMP packets don't have their TransportHeader
+		// fields set yet, parse it here. See icmp/protocol.go:protocol.Parse for a
+		// full explanation.
+		if protocol == header.ICMPv4ProtocolNumber || protocol == header.ICMPv6ProtocolNumber {
+			// ICMP packets may be longer, but until icmp.Parse is implemented, here
+			// we parse it using the minimum size.
+			transHeader, ok := pkt.Data.PullUp(transProto.MinimumPacketSize())
+			if !ok {
+				n.stack.stats.MalformedRcvdPackets.Increment()
+				return
+			}
+			pkt.TransportHeader = transHeader
+			pkt.Data.TrimFront(len(pkt.TransportHeader))
+		} else {
+			// This is either a bad packet or was re-assembled from fragments.
+			transProto.Parse(pkt)
+		}
+	}
+
+	if len(pkt.TransportHeader) < transProto.MinimumPacketSize() {
 		n.stack.stats.MalformedRcvdPackets.Increment()
 		return
 	}
 
-	srcPort, dstPort, err := transProto.ParsePorts(transHeader)
+	srcPort, dstPort, err := transProto.ParsePorts(pkt.TransportHeader)
 	if err != nil {
 		n.stack.stats.MalformedRcvdPackets.Increment()
 		return
@@ -1362,7 +1437,7 @@ func (n *NIC) DeliverTransportPacket(r *Route, protocol tcpip.TransportProtocolN
 
 // DeliverTransportControlPacket delivers control packets to the appropriate
 // transport protocol endpoint.
-func (n *NIC) DeliverTransportControlPacket(local, remote tcpip.Address, net tcpip.NetworkProtocolNumber, trans tcpip.TransportProtocolNumber, typ ControlType, extra uint32, pkt PacketBuffer) {
+func (n *NIC) DeliverTransportControlPacket(local, remote tcpip.Address, net tcpip.NetworkProtocolNumber, trans tcpip.TransportProtocolNumber, typ ControlType, extra uint32, pkt *PacketBuffer) {
 	state, ok := n.stack.transportProtocols[trans]
 	if !ok {
 		return
@@ -1475,6 +1550,27 @@ func (n *NIC) setNDPConfigs(c NDPConfigurations) {
 	n.mu.Lock()
 	n.mu.ndp.configs = c
 	n.mu.Unlock()
+}
+
+// NUDConfigs gets the NUD configurations for n.
+func (n *NIC) NUDConfigs() (NUDConfigurations, *tcpip.Error) {
+	if n.neigh == nil {
+		return NUDConfigurations{}, tcpip.ErrNotSupported
+	}
+	return n.neigh.config(), nil
+}
+
+// setNUDConfigs sets the NUD configurations for n.
+//
+// Note, if c contains invalid NUD configuration values, it will be fixed to
+// use default values for the erroneous values.
+func (n *NIC) setNUDConfigs(c NUDConfigurations) *tcpip.Error {
+	if n.neigh == nil {
+		return tcpip.ErrNotSupported
+	}
+	c.resetInvalidFields()
+	n.neigh.setConfig(c)
+	return nil
 }
 
 // handleNDPRA handles an NDP Router Advertisement message that arrived on n.
@@ -1611,8 +1707,8 @@ func (r *referencedNetworkEndpoint) setKind(kind networkEndpointKind) {
 }
 
 // isValidForOutgoing returns true if the endpoint can be used to send out a
-// packet. It requires the endpoint to not be marked expired (i.e., its address
-// has been removed), or the NIC to be in spoofing mode.
+// packet. It requires the endpoint to not be marked expired (i.e., its address)
+// has been removed) unless the NIC is in spoofing mode, or temporary.
 func (r *referencedNetworkEndpoint) isValidForOutgoing() bool {
 	r.nic.mu.RLock()
 	defer r.nic.mu.RUnlock()
@@ -1620,13 +1716,28 @@ func (r *referencedNetworkEndpoint) isValidForOutgoing() bool {
 	return r.isValidForOutgoingRLocked()
 }
 
-// isValidForOutgoingRLocked returns true if the endpoint can be used to send
-// out a packet. It requires the endpoint to not be marked expired (i.e., its
-// address has been removed), or the NIC to be in spoofing mode.
-//
-// r's NIC must be read locked.
+// isValidForOutgoingRLocked is the same as isValidForOutgoing but requires
+// r.nic.mu to be read locked.
 func (r *referencedNetworkEndpoint) isValidForOutgoingRLocked() bool {
-	return r.nic.mu.enabled && (r.getKind() != permanentExpired || r.nic.mu.spoofing)
+	if !r.nic.mu.enabled {
+		return false
+	}
+
+	return r.isAssignedRLocked(r.nic.mu.spoofing)
+}
+
+// isAssignedRLocked returns true if r is considered to be assigned to the NIC.
+//
+// r.nic.mu must be read locked.
+func (r *referencedNetworkEndpoint) isAssignedRLocked(spoofingOrPromiscuous bool) bool {
+	switch r.getKind() {
+	case permanentTentative:
+		return false
+	case permanentExpired:
+		return spoofingOrPromiscuous
+	default:
+		return true
+	}
 }
 
 // expireLocked decrements the reference count and marks the permanent endpoint

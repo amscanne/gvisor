@@ -288,6 +288,14 @@ var allowedSyscalls = seccomp.SyscallRules{
 	syscall.SYS_SIGALTSTACK:     {},
 	unix.SYS_STATX:              {},
 	syscall.SYS_SYNC_FILE_RANGE: {},
+	syscall.SYS_TEE: []seccomp.Rule{
+		{
+			seccomp.AllowAny{},
+			seccomp.AllowAny{},
+			seccomp.AllowValue(1),                      /* len */
+			seccomp.AllowValue(unix.SPLICE_F_NONBLOCK), /* flags */
+		},
+	},
 	syscall.SYS_TGKILL: []seccomp.Rule{
 		{
 			seccomp.AllowValue(uint64(os.Getpid())),
@@ -302,19 +310,12 @@ var allowedSyscalls = seccomp.SyscallRules{
 		},
 	},
 	syscall.SYS_WRITE: {},
-	// The only user in rawfile.NonBlockingWrite3 always passes iovcnt with
-	// values 2 or 3. Three iovec-s are passed, when the PACKET_VNET_HDR
-	// option is enabled for a packet socket.
+	// For rawfile.NonBlockingWriteIovec.
 	syscall.SYS_WRITEV: []seccomp.Rule{
 		{
 			seccomp.AllowAny{},
 			seccomp.AllowAny{},
-			seccomp.AllowValue(2),
-		},
-		{
-			seccomp.AllowAny{},
-			seccomp.AllowAny{},
-			seccomp.AllowValue(3),
+			seccomp.GreaterThan(0),
 		},
 	},
 }

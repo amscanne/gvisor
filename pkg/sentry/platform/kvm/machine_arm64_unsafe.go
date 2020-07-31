@@ -26,6 +26,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/platform"
 	"gvisor.dev/gvisor/pkg/sentry/platform/ring0"
+	"gvisor.dev/gvisor/pkg/sentry/platform/ring0/pagetables"
 	"gvisor.dev/gvisor/pkg/usermem"
 )
 
@@ -74,19 +75,6 @@ func (c *vCPU) initArchState() error {
 	reg.id = _KVM_ARM64_REGS_CPACR_EL1
 	// It is off by default, and it is turned on only when in use.
 	data = 0 // Disable fpsimd.
-	if err := c.setOneRegister(&reg); err != nil {
-		return err
-	}
-
-	// sctlr_el1
-	regGet.id = _KVM_ARM64_REGS_SCTLR_EL1
-	if err := c.getOneRegister(&regGet); err != nil {
-		return err
-	}
-
-	dataGet |= (_SCTLR_M | _SCTLR_C | _SCTLR_I)
-	data = dataGet
-	reg.id = _KVM_ARM64_REGS_SCTLR_EL1
 	if err := c.setOneRegister(&reg); err != nil {
 		return err
 	}
@@ -159,10 +147,22 @@ func (c *vCPU) initArchState() error {
 		return err
 	}
 
+	// Use the address of the exception vector table as
+	// the MMIO address base.
+	arm64HypercallMMIOBase = toLocation
+
 	data = ring0.PsrDefaultSet | ring0.KernelFlagsSet
 	reg.id = _KVM_ARM64_REGS_PSTATE
 	if err := c.setOneRegister(&reg); err != nil {
 		return err
+	}
+
+	// Initialize the PCID database.
+	if hasGuestPCID {
+		// Note that NewPCIDs may return a nil table here, in which
+		// case we simply don't use PCID support (see below). In
+		// practice, this should not happen, however.
+		c.PCIDs = pagetables.NewPCIDs(fixedKernelPCID+1, poolPCIDs)
 	}
 
 	c.floatingPointState = arch.NewFloatingPointData()
@@ -243,6 +243,13 @@ func (c *vCPU) SwitchToUser(switchOpts ring0.SwitchOpts, info *arch.SignalInfo) 
 		return nonCanonical(regs.Sp, int32(syscall.SIGBUS), info)
 	}
 
+	// Assign PCIDs.
+	if c.PCIDs != nil {
+		var requireFlushPCID bool // Force a flush?
+		switchOpts.UserASID, requireFlushPCID = c.PCIDs.Assign(switchOpts.PageTables)
+		switchOpts.Flush = switchOpts.Flush || requireFlushPCID
+	}
+
 	var vector ring0.Vector
 	ttbr0App := switchOpts.PageTables.TTBR0_EL1(false, 0)
 	c.SetTtbr0App(uintptr(ttbr0App))
@@ -269,8 +276,8 @@ func (c *vCPU) SwitchToUser(switchOpts ring0.SwitchOpts, info *arch.SignalInfo) 
 
 	case ring0.PageFault:
 		return c.fault(int32(syscall.SIGSEGV), info)
-	case 0xaa:
-		return usermem.NoAccess, nil
+	case ring0.Vector(bounce): // ring0.VirtualizationException
+		return usermem.NoAccess, platform.ErrContextInterrupt
 	default:
 		return usermem.NoAccess, platform.ErrContextSignal
 	}

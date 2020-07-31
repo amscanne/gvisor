@@ -29,6 +29,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/limits"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/sync"
+	"gvisor.dev/gvisor/pkg/syserror"
 )
 
 // FDFlags define flags for an individual descriptor.
@@ -80,9 +81,6 @@ type FDTable struct {
 	refs.AtomicRefCount
 	k *Kernel
 
-	// uid is a unique identifier.
-	uid uint64
-
 	// mu protects below.
 	mu sync.Mutex `state:"nosave"`
 
@@ -130,7 +128,7 @@ func (f *FDTable) loadDescriptorTable(m map[int32]descriptor) {
 // drop drops the table reference.
 func (f *FDTable) drop(file *fs.File) {
 	// Release locks.
-	file.Dirent.Inode.LockCtx.Posix.UnlockRegion(lock.UniqueID(f.uid), lock.LockRange{0, lock.LockEOF})
+	file.Dirent.Inode.LockCtx.Posix.UnlockRegion(f, lock.LockRange{0, lock.LockEOF})
 
 	// Send inotify events.
 	d := file.Dirent
@@ -151,24 +149,27 @@ func (f *FDTable) drop(file *fs.File) {
 
 // dropVFS2 drops the table reference.
 func (f *FDTable) dropVFS2(file *vfs.FileDescription) {
-	// TODO(gvisor.dev/issue/1480): Release locks.
-	// TODO(gvisor.dev/issue/1479): Send inotify events.
+	// Release any POSIX lock possibly held by the FDTable. Range {0, 0} means the
+	// entire file.
+	err := file.UnlockPOSIX(context.Background(), f, 0, 0, linux.SEEK_SET)
+	if err != nil && err != syserror.ENOLCK {
+		panic(fmt.Sprintf("UnlockPOSIX failed: %v", err))
+	}
 
-	// Drop the table reference.
+	// Generate inotify events.
+	ev := uint32(linux.IN_CLOSE_NOWRITE)
+	if file.IsWritable() {
+		ev = linux.IN_CLOSE_WRITE
+	}
+	file.Dentry().InotifyWithParent(ev, 0, vfs.PathEvent)
+
+	// Drop the table's reference.
 	file.DecRef()
-}
-
-// ID returns a unique identifier for this FDTable.
-func (f *FDTable) ID() uint64 {
-	return f.uid
 }
 
 // NewFDTable allocates a new FDTable that may be used by tasks in k.
 func (k *Kernel) NewFDTable() *FDTable {
-	f := &FDTable{
-		k:   k,
-		uid: atomic.AddUint64(&k.fdMapUids, 1),
-	}
+	f := &FDTable{k: k}
 	f.init()
 	return f
 }
@@ -460,6 +461,29 @@ func (f *FDTable) SetFlags(fd int32, flags FDFlags) error {
 
 	// Update the flags.
 	f.set(fd, file, flags)
+	return nil
+}
+
+// SetFlagsVFS2 sets the flags for the given file descriptor.
+//
+// True is returned iff flags were changed.
+func (f *FDTable) SetFlagsVFS2(fd int32, flags FDFlags) error {
+	if fd < 0 {
+		// Don't accept negative FDs.
+		return syscall.EBADF
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	file, _, _ := f.getVFS2(fd)
+	if file == nil {
+		// No file found.
+		return syscall.EBADF
+	}
+
+	// Update the flags.
+	f.setVFS2(fd, file, flags)
 	return nil
 }
 

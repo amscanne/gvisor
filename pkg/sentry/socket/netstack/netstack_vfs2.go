@@ -19,6 +19,7 @@ import (
 	"gvisor.dev/gvisor/pkg/amutex"
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
+	fslock "gvisor.dev/gvisor/pkg/sentry/fs/lock"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/sockfs"
 	"gvisor.dev/gvisor/pkg/sentry/inet"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
@@ -30,6 +31,8 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/usermem"
 	"gvisor.dev/gvisor/pkg/waiter"
+	"gvisor.dev/gvisor/tools/go_marshal/marshal"
+	"gvisor.dev/gvisor/tools/go_marshal/primitive"
 )
 
 // SocketVFS2 encapsulates all the state needed to represent a network stack
@@ -38,6 +41,7 @@ type SocketVFS2 struct {
 	vfsfd vfs.FileDescription
 	vfs.FileDescriptionDefaultImpl
 	vfs.DentryMetadataFileDescriptionImpl
+	vfs.LockFD
 
 	socketOpsCommon
 }
@@ -64,6 +68,7 @@ func NewVFS2(t *kernel.Task, family int, skType linux.SockType, protocol int, qu
 			protocol: protocol,
 		},
 	}
+	s.LockFD.Init(&vfs.FileLocks{})
 	vfsfd := &s.vfsfd
 	if err := vfsfd.Init(s, linux.O_RDWR, mnt, d, &vfs.FileDescriptionOptions{
 		DenyPRead:         true,
@@ -197,7 +202,7 @@ func (s *SocketVFS2) Ioctl(ctx context.Context, uio usermem.IO, args arch.Syscal
 
 // GetSockOpt implements the linux syscall getsockopt(2) for sockets backed by
 // tcpip.Endpoint.
-func (s *SocketVFS2) GetSockOpt(t *kernel.Task, level, name int, outPtr usermem.Addr, outLen int) (interface{}, *syserr.Error) {
+func (s *SocketVFS2) GetSockOpt(t *kernel.Task, level, name int, outPtr usermem.Addr, outLen int) (marshal.Marshallable, *syserr.Error) {
 	// TODO(b/78348848): Unlike other socket options, SO_TIMESTAMP is
 	// implemented specifically for netstack.SocketVFS2 rather than
 	// commonEndpoint. commonEndpoint should be extended to support socket
@@ -207,25 +212,25 @@ func (s *SocketVFS2) GetSockOpt(t *kernel.Task, level, name int, outPtr usermem.
 		if outLen < sizeOfInt32 {
 			return nil, syserr.ErrInvalidArgument
 		}
-		val := int32(0)
+		val := primitive.Int32(0)
 		s.readMu.Lock()
 		defer s.readMu.Unlock()
 		if s.sockOptTimestamp {
 			val = 1
 		}
-		return val, nil
+		return &val, nil
 	}
 	if level == linux.SOL_TCP && name == linux.TCP_INQ {
 		if outLen < sizeOfInt32 {
 			return nil, syserr.ErrInvalidArgument
 		}
-		val := int32(0)
+		val := primitive.Int32(0)
 		s.readMu.Lock()
 		defer s.readMu.Unlock()
 		if s.sockOptInq {
 			val = 1
 		}
-		return val, nil
+		return &val, nil
 	}
 
 	if s.skType == linux.SOCK_RAW && level == linux.IPPROTO_IP {
@@ -243,7 +248,7 @@ func (s *SocketVFS2) GetSockOpt(t *kernel.Task, level, name int, outPtr usermem.
 			if err != nil {
 				return nil, err
 			}
-			return info, nil
+			return &info, nil
 
 		case linux.IPT_SO_GET_ENTRIES:
 			if outLen < linux.SizeOfIPTGetEntries {
@@ -258,7 +263,7 @@ func (s *SocketVFS2) GetSockOpt(t *kernel.Task, level, name int, outPtr usermem.
 			if err != nil {
 				return nil, err
 			}
-			return entries, nil
+			return &entries, nil
 
 		}
 	}
@@ -314,4 +319,14 @@ func (s *SocketVFS2) SetSockOpt(t *kernel.Task, level int, name int, optVal []by
 	}
 
 	return SetSockOpt(t, s, s.Endpoint, level, name, optVal)
+}
+
+// LockPOSIX implements vfs.FileDescriptionImpl.LockPOSIX.
+func (s *SocketVFS2) LockPOSIX(ctx context.Context, uid fslock.UniqueID, t fslock.LockType, start, length uint64, whence int16, block fslock.Blocker) error {
+	return s.Locks().LockPOSIX(ctx, &s.vfsfd, uid, t, start, length, whence, block)
+}
+
+// UnlockPOSIX implements vfs.FileDescriptionImpl.UnlockPOSIX.
+func (s *SocketVFS2) UnlockPOSIX(ctx context.Context, uid fslock.UniqueID, start, length uint64, whence int16) error {
+	return s.Locks().UnlockPOSIX(ctx, &s.vfsfd, uid, start, length, whence)
 }

@@ -28,9 +28,6 @@ import (
 	"gvisor.dev/gvisor/pkg/syserror"
 )
 
-// lastMountID is used to allocate mount ids. Must be accessed atomically.
-var lastMountID uint64
-
 // A Mount is a replacement of a Dentry (Mount.key.point) from one Filesystem
 // (Mount.key.parent.fs) with a Dentry (Mount.root) from another Filesystem
 // (Mount.fs), which applies to path resolution in the context of a particular
@@ -58,6 +55,10 @@ type Mount struct {
 	// ID is the immutable mount ID.
 	ID uint64
 
+	// Flags contains settings as specified for mount(2), e.g. MS_NOEXEC, except
+	// for MS_RDONLY which is tracked in "writers". Immutable.
+	Flags MountFlags
+
 	// key is protected by VirtualFilesystem.mountMu and
 	// VirtualFilesystem.mounts.seq, and may be nil. References are held on
 	// key.parent and key.point if they are not nil.
@@ -84,10 +85,6 @@ type Mount struct {
 	// umounted is true. umounted is protected by VirtualFilesystem.mountMu.
 	umounted bool
 
-	// flags contains settings as specified for mount(2), e.g. MS_NOEXEC, except
-	// for MS_RDONLY which is tracked in "writers".
-	flags MountFlags
-
 	// The lower 63 bits of writers is the number of calls to
 	// Mount.CheckBeginWrite() that have not yet been paired with a call to
 	// Mount.EndWrite(). The MSB of writers is set if MS_RDONLY is in effect.
@@ -97,11 +94,11 @@ type Mount struct {
 
 func newMount(vfs *VirtualFilesystem, fs *Filesystem, root *Dentry, mntns *MountNamespace, opts *MountOptions) *Mount {
 	mnt := &Mount{
-		ID:    atomic.AddUint64(&lastMountID, 1),
+		ID:    atomic.AddUint64(&vfs.lastMountID, 1),
+		Flags: opts.Flags,
 		vfs:   vfs,
 		fs:    fs,
 		root:  root,
-		flags: opts.Flags,
 		ns:    mntns,
 		refs:  1,
 	}
@@ -111,8 +108,17 @@ func newMount(vfs *VirtualFilesystem, fs *Filesystem, root *Dentry, mntns *Mount
 	return mnt
 }
 
-// A MountNamespace is a collection of Mounts.
-//
+// Options returns a copy of the MountOptions currently applicable to mnt.
+func (mnt *Mount) Options() MountOptions {
+	mnt.vfs.mountMu.Lock()
+	defer mnt.vfs.mountMu.Unlock()
+	return MountOptions{
+		Flags:    mnt.Flags,
+		ReadOnly: mnt.readOnly(),
+	}
+}
+
+// A MountNamespace is a collection of Mounts.//
 // MountNamespaces are reference-counted. Unless otherwise specified, all
 // MountNamespace methods require that a reference is held.
 //
@@ -120,6 +126,9 @@ func newMount(vfs *VirtualFilesystem, fs *Filesystem, root *Dentry, mntns *Mount
 //
 // +stateify savable
 type MountNamespace struct {
+	// Owner is the usernamespace that owns this mount namespace.
+	Owner *auth.UserNamespace
+
 	// root is the MountNamespace's root mount. root is immutable.
 	root *Mount
 
@@ -148,7 +157,7 @@ type MountNamespace struct {
 func (vfs *VirtualFilesystem) NewMountNamespace(ctx context.Context, creds *auth.Credentials, source, fsTypeName string, opts *GetFilesystemOptions) (*MountNamespace, error) {
 	rft := vfs.getFilesystemType(fsTypeName)
 	if rft == nil {
-		ctx.Warningf("Unknown filesystem: %s", fsTypeName)
+		ctx.Warningf("Unknown filesystem type: %s", fsTypeName)
 		return nil, syserror.ENODEV
 	}
 	fs, root, err := rft.fsType.GetFilesystem(ctx, vfs, creds, source, *opts)
@@ -156,6 +165,7 @@ func (vfs *VirtualFilesystem) NewMountNamespace(ctx context.Context, creds *auth
 		return nil, err
 	}
 	mntns := &MountNamespace{
+		Owner:       creds.UserNamespace,
 		refs:        1,
 		mountpoints: make(map[*Dentry]uint32),
 	}
@@ -175,26 +185,34 @@ func (vfs *VirtualFilesystem) NewDisconnectedMount(fs *Filesystem, root *Dentry,
 	return newMount(vfs, fs, root, nil /* mntns */, opts), nil
 }
 
-// MountAt creates and mounts a Filesystem configured by the given arguments.
-func (vfs *VirtualFilesystem) MountAt(ctx context.Context, creds *auth.Credentials, source string, target *PathOperation, fsTypeName string, opts *MountOptions) error {
+// MountDisconnected creates a Filesystem configured by the given arguments,
+// then returns a Mount representing it. The new Mount is not associated with
+// any MountNamespace and is not connected to any other Mounts.
+func (vfs *VirtualFilesystem) MountDisconnected(ctx context.Context, creds *auth.Credentials, source string, fsTypeName string, opts *MountOptions) (*Mount, error) {
 	rft := vfs.getFilesystemType(fsTypeName)
 	if rft == nil {
-		return syserror.ENODEV
+		return nil, syserror.ENODEV
 	}
 	if !opts.InternalMount && !rft.opts.AllowUserMount {
-		return syserror.ENODEV
+		return nil, syserror.ENODEV
 	}
 	fs, root, err := rft.fsType.GetFilesystem(ctx, vfs, creds, source, opts.GetFilesystemOptions)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	defer root.DecRef()
+	defer fs.DecRef()
+	return vfs.NewDisconnectedMount(fs, root, opts)
+}
 
+// ConnectMountAt connects mnt at the path represented by target.
+//
+// Preconditions: mnt must be disconnected.
+func (vfs *VirtualFilesystem) ConnectMountAt(ctx context.Context, creds *auth.Credentials, mnt *Mount, target *PathOperation) error {
 	// We can't hold vfs.mountMu while calling FilesystemImpl methods due to
 	// lock ordering.
 	vd, err := vfs.GetDentryAt(ctx, creds, target, &GetDentryOptions{})
 	if err != nil {
-		root.DecRef()
-		fs.DecRef()
 		return err
 	}
 	vfs.mountMu.Lock()
@@ -204,8 +222,6 @@ func (vfs *VirtualFilesystem) MountAt(ctx context.Context, creds *auth.Credentia
 			vd.dentry.mu.Unlock()
 			vfs.mountMu.Unlock()
 			vd.DecRef()
-			root.DecRef()
-			fs.DecRef()
 			return syserror.ENOENT
 		}
 		// vd might have been mounted over between vfs.GetDentryAt() and
@@ -238,12 +254,24 @@ func (vfs *VirtualFilesystem) MountAt(ctx context.Context, creds *auth.Credentia
 	// point and the mount root are directories, or neither are, and returns
 	// ENOTDIR if this is not the case.
 	mntns := vd.mount.ns
-	mnt := newMount(vfs, fs, root, mntns, opts)
 	vfs.mounts.seq.BeginWrite()
 	vfs.connectLocked(mnt, vd, mntns)
 	vfs.mounts.seq.EndWrite()
 	vd.dentry.mu.Unlock()
 	vfs.mountMu.Unlock()
+	return nil
+}
+
+// MountAt creates and mounts a Filesystem configured by the given arguments.
+func (vfs *VirtualFilesystem) MountAt(ctx context.Context, creds *auth.Credentials, source string, target *PathOperation, fsTypeName string, opts *MountOptions) error {
+	mnt, err := vfs.MountDisconnected(ctx, creds, source, fsTypeName, opts)
+	if err != nil {
+		return err
+	}
+	defer mnt.DecRef()
+	if err := vfs.ConnectMountAt(ctx, creds, mnt, target); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -254,6 +282,9 @@ func (vfs *VirtualFilesystem) UmountAt(ctx context.Context, creds *auth.Credenti
 	}
 
 	// MNT_FORCE is currently unimplemented except for the permission check.
+	// Force unmounting specifically requires CAP_SYS_ADMIN in the root user
+	// namespace, and not in the owner user namespace for the target mount. See
+	// fs/namespace.c:SYSCALL_DEFINE2(umount, ...)
 	if opts.Flags&linux.MNT_FORCE != 0 && creds.HasCapabilityIn(linux.CAP_SYS_ADMIN, creds.UserNamespace.Root()) {
 		return syserror.EPERM
 	}
@@ -369,14 +400,22 @@ func (vfs *VirtualFilesystem) umountRecursiveLocked(mnt *Mount, opts *umountRecu
 // references held by vd.
 //
 // Preconditions: vfs.mountMu must be locked. vfs.mounts.seq must be in a
-// writer critical section. d.mu must be locked. mnt.parent() == nil.
+// writer critical section. d.mu must be locked. mnt.parent() == nil, i.e. mnt
+// must not already be connected.
 func (vfs *VirtualFilesystem) connectLocked(mnt *Mount, vd VirtualDentry, mntns *MountNamespace) {
+	if checkInvariants {
+		if mnt.parent() != nil {
+			panic("VFS.connectLocked called on connected mount")
+		}
+	}
+	mnt.IncRef() // dropped by callers of umountRecursiveLocked
 	mnt.storeKey(vd)
 	if vd.mount.children == nil {
 		vd.mount.children = make(map[*Mount]struct{})
 	}
 	vd.mount.children[mnt] = struct{}{}
 	atomic.AddUint32(&vd.dentry.mounts, 1)
+	mnt.ns = mntns
 	mntns.mountpoints[vd.dentry]++
 	vfs.mounts.insertSeqed(mnt)
 	vfsmpmounts, ok := vfs.mountpoints[vd.dentry]
@@ -394,6 +433,11 @@ func (vfs *VirtualFilesystem) connectLocked(mnt *Mount, vd VirtualDentry, mntns 
 // writer critical section. mnt.parent() != nil.
 func (vfs *VirtualFilesystem) disconnectLocked(mnt *Mount) VirtualDentry {
 	vd := mnt.loadKey()
+	if checkInvariants {
+		if vd.mount != nil {
+			panic("VFS.disconnectLocked called on disconnected mount")
+		}
+	}
 	mnt.storeKey(VirtualDentry{})
 	delete(vd.mount.children, mnt)
 	atomic.AddUint32(&vd.dentry.mounts, math.MaxUint32) // -1
@@ -715,7 +759,10 @@ func (vfs *VirtualFilesystem) GenerateProcMounts(ctx context.Context, taskRootDi
 		if mnt.readOnly() {
 			opts = "ro"
 		}
-		if mnt.flags.NoExec {
+		if mnt.Flags.NoATime {
+			opts = ",noatime"
+		}
+		if mnt.Flags.NoExec {
 			opts += ",noexec"
 		}
 
@@ -800,11 +847,12 @@ func (vfs *VirtualFilesystem) GenerateProcMountInfo(ctx context.Context, taskRoo
 		if mnt.readOnly() {
 			opts = "ro"
 		}
-		if mnt.flags.NoExec {
+		if mnt.Flags.NoATime {
+			opts = ",noatime"
+		}
+		if mnt.Flags.NoExec {
 			opts += ",noexec"
 		}
-		// TODO(gvisor.dev/issue/1193): Add "noatime" if MS_NOATIME is
-		// set.
 		fmt.Fprintf(buf, "%s ", opts)
 
 		// (7) Optional fields: zero or more fields of the form "tag[:value]".

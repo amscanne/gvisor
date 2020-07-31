@@ -198,10 +198,17 @@ func (r *runSyscallAfterExecStop) execute(t *Task) taskRunState {
 	t.tg.oldRSeqCritical.Store(&OldRSeqCriticalRegion{})
 	t.tg.pidns.owner.mu.Unlock()
 
+	oldFDTable := t.fdTable
+	t.fdTable = t.fdTable.Fork()
+	oldFDTable.DecRef()
+
 	// Remove FDs with the CloseOnExec flag set.
 	t.fdTable.RemoveIf(func(_ *fs.File, _ *vfs.FileDescription, flags FDFlags) bool {
 		return flags.CloseOnExec
 	})
+
+	// Handle the robust futex list.
+	t.exitRobustList()
 
 	// NOTE(b/30815691): We currently do not implement privileged
 	// executables (set-user/group-ID bits and file capabilities). This

@@ -24,11 +24,11 @@ import (
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/log"
+	"gvisor.dev/gvisor/pkg/p9"
 	"gvisor.dev/gvisor/pkg/safemem"
 	"gvisor.dev/gvisor/pkg/sentry/fs/fsutil"
 	"gvisor.dev/gvisor/pkg/sentry/memmap"
 	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
-	"gvisor.dev/gvisor/pkg/sentry/platform"
 	"gvisor.dev/gvisor/pkg/sentry/usage"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/syserror"
@@ -67,12 +67,46 @@ func (fd *regularFileFD) OnClose(ctx context.Context) error {
 	return d.handle.file.flush(ctx)
 }
 
+// Allocate implements vfs.FileDescriptionImpl.Allocate.
+func (fd *regularFileFD) Allocate(ctx context.Context, mode, offset, length uint64) error {
+
+	d := fd.dentry()
+	d.metadataMu.Lock()
+	defer d.metadataMu.Unlock()
+
+	size := offset + length
+
+	// Allocating a smaller size is a noop.
+	if size <= d.size {
+		return nil
+	}
+
+	d.handleMu.Lock()
+	defer d.handleMu.Unlock()
+
+	err := d.handle.file.allocate(ctx, p9.ToAllocateMode(mode), offset, length)
+	if err != nil {
+		return err
+	}
+	d.dataMu.Lock()
+	atomic.StoreUint64(&d.size, size)
+	d.dataMu.Unlock()
+	if !d.cachedMetadataAuthoritative() {
+		d.touchCMtimeLocked()
+	}
+	return nil
+}
+
 // PRead implements vfs.FileDescriptionImpl.PRead.
 func (fd *regularFileFD) PRead(ctx context.Context, dst usermem.IOSequence, offset int64, opts vfs.ReadOptions) (int64, error) {
 	if offset < 0 {
 		return 0, syserror.EINVAL
 	}
-	if opts.Flags != 0 {
+
+	// Check that flags are supported.
+	//
+	// TODO(gvisor.dev/issue/2601): Support select preadv2 flags.
+	if opts.Flags&^linux.RWF_HIPRI != 0 {
 		return 0, syserror.EOPNOTSUPP
 	}
 
@@ -120,21 +154,53 @@ func (fd *regularFileFD) Read(ctx context.Context, dst usermem.IOSequence, opts 
 
 // PWrite implements vfs.FileDescriptionImpl.PWrite.
 func (fd *regularFileFD) PWrite(ctx context.Context, src usermem.IOSequence, offset int64, opts vfs.WriteOptions) (int64, error) {
+	n, _, err := fd.pwrite(ctx, src, offset, opts)
+	return n, err
+}
+
+// pwrite returns the number of bytes written, final offset, error. The final
+// offset should be ignored by PWrite.
+func (fd *regularFileFD) pwrite(ctx context.Context, src usermem.IOSequence, offset int64, opts vfs.WriteOptions) (written, finalOff int64, err error) {
 	if offset < 0 {
-		return 0, syserror.EINVAL
+		return 0, offset, syserror.EINVAL
 	}
-	if opts.Flags != 0 {
-		return 0, syserror.EOPNOTSUPP
+
+	// Check that flags are supported.
+	//
+	// TODO(gvisor.dev/issue/2601): Support select pwritev2 flags.
+	if opts.Flags&^linux.RWF_HIPRI != 0 {
+		return 0, offset, syserror.EOPNOTSUPP
+	}
+
+	d := fd.dentry()
+	// If the fd was opened with O_APPEND, make sure the file size is updated.
+	// There is a possible race here if size is modified externally after
+	// metadata cache is updated.
+	if fd.vfsfd.StatusFlags()&linux.O_APPEND != 0 && !d.cachedMetadataAuthoritative() {
+		if err := d.updateFromGetattr(ctx); err != nil {
+			return 0, offset, err
+		}
+	}
+
+	d.metadataMu.Lock()
+	defer d.metadataMu.Unlock()
+	// Set offset to file size if the fd was opened with O_APPEND.
+	if fd.vfsfd.StatusFlags()&linux.O_APPEND != 0 {
+		// Holding d.metadataMu is sufficient for reading d.size.
+		offset = int64(d.size)
 	}
 	limit, err := vfs.CheckLimit(ctx, offset, src.NumBytes())
 	if err != nil {
-		return 0, err
+		return 0, offset, err
 	}
 	src = src.TakeFirst64(limit)
+	n, err := fd.pwriteLocked(ctx, src, offset, opts)
+	return n, offset + n, err
+}
 
+// Preconditions: fd.dentry().metatdataMu must be locked.
+func (fd *regularFileFD) pwriteLocked(ctx context.Context, src usermem.IOSequence, offset int64, opts vfs.WriteOptions) (int64, error) {
 	d := fd.dentry()
-	d.metadataMu.Lock()
-	defer d.metadataMu.Unlock()
 	if d.fs.opts.interop != InteropModeShared {
 		// Compare Linux's mm/filemap.c:__generic_file_write_iter() =>
 		// file_update_time(). This is d.touchCMtime(), but without locking
@@ -148,18 +214,18 @@ func (fd *regularFileFD) PWrite(ctx context.Context, src usermem.IOSequence, off
 			return 0, err
 		}
 		// Remove touched pages from the cache.
-		pgstart := pageRoundDown(uint64(offset))
-		pgend := pageRoundUp(uint64(offset + src.NumBytes()))
-		if pgend < pgstart {
+		pgstart := usermem.PageRoundDown(uint64(offset))
+		pgend, ok := usermem.PageRoundUp(uint64(offset + src.NumBytes()))
+		if !ok {
 			return 0, syserror.EINVAL
 		}
 		mr := memmap.MappableRange{pgstart, pgend}
-		var freed []platform.FileRange
+		var freed []memmap.FileRange
 		d.dataMu.Lock()
 		cseg := d.cache.LowerBoundSegment(mr.Start)
 		for cseg.Ok() && cseg.Start() < mr.End {
 			cseg = d.cache.Isolate(cseg, mr)
-			freed = append(freed, platform.FileRange{cseg.Value(), cseg.Value() + cseg.Range().Length()})
+			freed = append(freed, memmap.FileRange{cseg.Value(), cseg.Value() + cseg.Range().Length()})
 			cseg = d.cache.Remove(cseg).NextSegment()
 		}
 		d.dataMu.Unlock()
@@ -197,8 +263,8 @@ func (fd *regularFileFD) PWrite(ctx context.Context, src usermem.IOSequence, off
 // Write implements vfs.FileDescriptionImpl.Write.
 func (fd *regularFileFD) Write(ctx context.Context, src usermem.IOSequence, opts vfs.WriteOptions) (int64, error) {
 	fd.mu.Lock()
-	n, err := fd.PWrite(ctx, src, fd.off, opts)
-	fd.off += n
+	n, off, err := fd.pwrite(ctx, src, fd.off, opts)
+	fd.off = off
 	fd.mu.Unlock()
 	return n, err
 }
@@ -306,9 +372,10 @@ func (rw *dentryReadWriter) ReadToBlocks(dsts safemem.BlockSeq) (uint64, error) 
 			if fillCache {
 				// Read into the cache, then re-enter the loop to read from the
 				// cache.
+				gapEnd, _ := usermem.PageRoundUp(gapMR.End)
 				reqMR := memmap.MappableRange{
-					Start: pageRoundDown(gapMR.Start),
-					End:   pageRoundUp(gapMR.End),
+					Start: usermem.PageRoundDown(gapMR.Start),
+					End:   gapEnd,
 				}
 				optMR := gap.Range()
 				err := rw.d.cache.Fill(rw.ctx, reqMR, maxFillRange(reqMR, optMR), mf, usage.PageCache, rw.d.handle.readToBlocksAt)
@@ -488,15 +555,24 @@ func (d *dentry) writeback(ctx context.Context, offset, size int64) error {
 func (fd *regularFileFD) Seek(ctx context.Context, offset int64, whence int32) (int64, error) {
 	fd.mu.Lock()
 	defer fd.mu.Unlock()
+	newOffset, err := regularFileSeekLocked(ctx, fd.dentry(), fd.off, offset, whence)
+	if err != nil {
+		return 0, err
+	}
+	fd.off = newOffset
+	return newOffset, nil
+}
+
+// Calculate the new offset for a seek operation on a regular file.
+func regularFileSeekLocked(ctx context.Context, d *dentry, fdOffset, offset int64, whence int32) (int64, error) {
 	switch whence {
 	case linux.SEEK_SET:
 		// Use offset as specified.
 	case linux.SEEK_CUR:
-		offset += fd.off
+		offset += fdOffset
 	case linux.SEEK_END, linux.SEEK_DATA, linux.SEEK_HOLE:
 		// Ensure file size is up to date.
-		d := fd.dentry()
-		if fd.filesystem().opts.interop == InteropModeShared {
+		if !d.cachedMetadataAuthoritative() {
 			if err := d.updateFromGetattr(ctx); err != nil {
 				return 0, err
 			}
@@ -524,7 +600,6 @@ func (fd *regularFileFD) Seek(ctx context.Context, offset int64, whence int32) (
 	if offset < 0 {
 		return 0, syserror.EINVAL
 	}
-	fd.off = offset
 	return offset, nil
 }
 
@@ -535,20 +610,19 @@ func (fd *regularFileFD) Sync(ctx context.Context) error {
 
 func (d *dentry) syncSharedHandle(ctx context.Context) error {
 	d.handleMu.RLock()
-	if !d.handleWritable {
-		d.handleMu.RUnlock()
-		return nil
+	defer d.handleMu.RUnlock()
+
+	if d.handleWritable {
+		d.dataMu.Lock()
+		// Write dirty cached data to the remote file.
+		err := fsutil.SyncDirtyAll(ctx, &d.cache, &d.dirty, d.size, d.fs.mfp.MemoryFile(), d.handle.writeFromBlocksAt)
+		d.dataMu.Unlock()
+		if err != nil {
+			return err
+		}
 	}
-	d.dataMu.Lock()
-	// Write dirty cached data to the remote file.
-	err := fsutil.SyncDirtyAll(ctx, &d.cache, &d.dirty, d.size, d.fs.mfp.MemoryFile(), d.handle.writeFromBlocksAt)
-	d.dataMu.Unlock()
-	if err == nil {
-		// Sync the remote file.
-		err = d.handle.sync(ctx)
-	}
-	d.handleMu.RUnlock()
-	return err
+	// Sync the remote file.
+	return d.handle.sync(ctx)
 }
 
 // ConfigureMMap implements vfs.FileDescriptionImpl.ConfigureMMap.
@@ -671,7 +745,7 @@ func (d *dentry) Translate(ctx context.Context, required, optional memmap.Mappab
 
 	// Constrain translations to d.size (rounded up) to prevent translation to
 	// pages that may be concurrently truncated.
-	pgend := pageRoundUp(d.size)
+	pgend, _ := usermem.PageRoundUp(d.size)
 	var beyondEOF bool
 	if required.End > pgend {
 		if required.Start >= pgend {
@@ -746,7 +820,7 @@ func maxFillRange(required, optional memmap.MappableRange) memmap.MappableRange 
 
 // InvalidateUnsavable implements memmap.Mappable.InvalidateUnsavable.
 func (d *dentry) InvalidateUnsavable(ctx context.Context) error {
-	// Whether we have a host fd (and consequently what platform.File is
+	// Whether we have a host fd (and consequently what memmap.File is
 	// mapped) can change across save/restore, so invalidate all translations
 	// unconditionally.
 	d.mapsMu.Lock()
@@ -794,8 +868,8 @@ func (d *dentry) Evict(ctx context.Context, er pgalloc.EvictableRange) {
 	}
 }
 
-// dentryPlatformFile implements platform.File. It exists solely because dentry
-// cannot implement both vfs.DentryImpl.IncRef and platform.File.IncRef.
+// dentryPlatformFile implements memmap.File. It exists solely because dentry
+// cannot implement both vfs.DentryImpl.IncRef and memmap.File.IncRef.
 //
 // dentryPlatformFile is only used when a host FD representing the remote file
 // is available (i.e. dentry.handle.fd >= 0), and that FD is used for
@@ -803,7 +877,7 @@ func (d *dentry) Evict(ctx context.Context, er pgalloc.EvictableRange) {
 type dentryPlatformFile struct {
 	*dentry
 
-	// fdRefs counts references on platform.File offsets. fdRefs is protected
+	// fdRefs counts references on memmap.File offsets. fdRefs is protected
 	// by dentry.dataMu.
 	fdRefs fsutil.FrameRefSet
 
@@ -815,57 +889,29 @@ type dentryPlatformFile struct {
 	hostFileMapperInitOnce sync.Once
 }
 
-// IncRef implements platform.File.IncRef.
-func (d *dentryPlatformFile) IncRef(fr platform.FileRange) {
+// IncRef implements memmap.File.IncRef.
+func (d *dentryPlatformFile) IncRef(fr memmap.FileRange) {
 	d.dataMu.Lock()
-	seg, gap := d.fdRefs.Find(fr.Start)
-	for {
-		switch {
-		case seg.Ok() && seg.Start() < fr.End:
-			seg = d.fdRefs.Isolate(seg, fr)
-			seg.SetValue(seg.Value() + 1)
-			seg, gap = seg.NextNonEmpty()
-		case gap.Ok() && gap.Start() < fr.End:
-			newRange := gap.Range().Intersect(fr)
-			usage.MemoryAccounting.Inc(newRange.Length(), usage.Mapped)
-			seg, gap = d.fdRefs.InsertWithoutMerging(gap, newRange, 1).NextNonEmpty()
-		default:
-			d.fdRefs.MergeAdjacent(fr)
-			d.dataMu.Unlock()
-			return
-		}
-	}
-}
-
-// DecRef implements platform.File.DecRef.
-func (d *dentryPlatformFile) DecRef(fr platform.FileRange) {
-	d.dataMu.Lock()
-	seg := d.fdRefs.FindSegment(fr.Start)
-
-	for seg.Ok() && seg.Start() < fr.End {
-		seg = d.fdRefs.Isolate(seg, fr)
-		if old := seg.Value(); old == 1 {
-			usage.MemoryAccounting.Dec(seg.Range().Length(), usage.Mapped)
-			seg = d.fdRefs.Remove(seg).NextSegment()
-		} else {
-			seg.SetValue(old - 1)
-			seg = seg.NextSegment()
-		}
-	}
-	d.fdRefs.MergeAdjacent(fr)
+	d.fdRefs.IncRefAndAccount(fr)
 	d.dataMu.Unlock()
-
 }
 
-// MapInternal implements platform.File.MapInternal.
-func (d *dentryPlatformFile) MapInternal(fr platform.FileRange, at usermem.AccessType) (safemem.BlockSeq, error) {
+// DecRef implements memmap.File.DecRef.
+func (d *dentryPlatformFile) DecRef(fr memmap.FileRange) {
+	d.dataMu.Lock()
+	d.fdRefs.DecRefAndAccount(fr)
+	d.dataMu.Unlock()
+}
+
+// MapInternal implements memmap.File.MapInternal.
+func (d *dentryPlatformFile) MapInternal(fr memmap.FileRange, at usermem.AccessType) (safemem.BlockSeq, error) {
 	d.handleMu.RLock()
 	bs, err := d.hostFileMapper.MapInternal(fr, int(d.handle.fd), at.Write)
 	d.handleMu.RUnlock()
 	return bs, err
 }
 
-// FD implements platform.File.FD.
+// FD implements memmap.File.FD.
 func (d *dentryPlatformFile) FD() int {
 	d.handleMu.RLock()
 	fd := d.handle.fd

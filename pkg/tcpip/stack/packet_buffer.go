@@ -14,6 +14,7 @@
 package stack
 
 import (
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/buffer"
 )
@@ -24,6 +25,8 @@ import (
 // multiple endpoints. Clone() should be called in such cases so that
 // modifications to the Data field do not affect other copies.
 type PacketBuffer struct {
+	_ sync.NoCopy
+
 	// PacketBufferEntry is used to build an intrusive list of
 	// PacketBuffers.
 	PacketBufferEntry
@@ -76,13 +79,31 @@ type PacketBuffer struct {
 	// NatDone indicates if the packet has been manipulated as per NAT
 	// iptables rule.
 	NatDone bool
+
+	// PktType indicates the SockAddrLink.PacketType of the packet as defined in
+	// https://www.man7.org/linux/man-pages/man7/packet.7.html.
+	PktType tcpip.PacketType
 }
 
 // Clone makes a copy of pk. It clones the Data field, which creates a new
 // VectorisedView but does not deep copy the underlying bytes.
 //
 // Clone also does not deep copy any of its other fields.
-func (pk PacketBuffer) Clone() PacketBuffer {
-	pk.Data = pk.Data.Clone(nil)
-	return pk
+//
+// FIXME(b/153685824): Data gets copied but not other header references.
+func (pk *PacketBuffer) Clone() *PacketBuffer {
+	return &PacketBuffer{
+		PacketBufferEntry:     pk.PacketBufferEntry,
+		Data:                  pk.Data.Clone(nil),
+		Header:                pk.Header,
+		LinkHeader:            pk.LinkHeader,
+		NetworkHeader:         pk.NetworkHeader,
+		TransportHeader:       pk.TransportHeader,
+		Hash:                  pk.Hash,
+		Owner:                 pk.Owner,
+		EgressRoute:           pk.EgressRoute,
+		GSOOptions:            pk.GSOOptions,
+		NetworkProtocolNumber: pk.NetworkProtocolNumber,
+		NatDone:               pk.NatDone,
+	}
 }

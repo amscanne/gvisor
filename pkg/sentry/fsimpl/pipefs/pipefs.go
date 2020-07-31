@@ -81,7 +81,8 @@ type inode struct {
 	kernfs.InodeNotSymlink
 	kernfs.InodeNoopRefCount
 
-	pipe *pipe.VFSPipe
+	locks vfs.FileLocks
+	pipe  *pipe.VFSPipe
 
 	ino uint64
 	uid auth.KUID
@@ -114,7 +115,7 @@ func (i *inode) Mode() linux.FileMode {
 }
 
 // Stat implements kernfs.Inode.Stat.
-func (i *inode) Stat(vfsfs *vfs.Filesystem, opts vfs.StatOptions) (linux.Statx, error) {
+func (i *inode) Stat(_ context.Context, vfsfs *vfs.Filesystem, opts vfs.StatOptions) (linux.Statx, error) {
 	ts := linux.NsecToStatxTimestamp(i.ctime.Nanoseconds())
 	return linux.Statx{
 		Mask:     linux.STATX_TYPE | linux.STATX_MODE | linux.STATX_NLINK | linux.STATX_UID | linux.STATX_GID | linux.STATX_ATIME | linux.STATX_MTIME | linux.STATX_CTIME | linux.STATX_INO | linux.STATX_SIZE | linux.STATX_BLOCKS,
@@ -147,7 +148,7 @@ func (i *inode) SetStat(ctx context.Context, vfsfs *vfs.Filesystem, creds *auth.
 
 // Open implements kernfs.Inode.Open.
 func (i *inode) Open(ctx context.Context, rp *vfs.ResolvingPath, vfsd *vfs.Dentry, opts vfs.OpenOptions) (*vfs.FileDescription, error) {
-	return i.pipe.Open(ctx, rp.Mount(), vfsd, opts.Flags)
+	return i.pipe.Open(ctx, rp.Mount(), vfsd, opts.Flags, &i.locks)
 }
 
 // NewConnectedPipeFDs returns a pair of FileDescriptions representing the read

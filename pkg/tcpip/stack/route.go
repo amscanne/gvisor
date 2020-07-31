@@ -48,6 +48,10 @@ type Route struct {
 
 	// Loop controls where WritePacket should send packets.
 	Loop PacketLooping
+
+	// directedBroadcast indicates whether this route is sending a directed
+	// broadcast packet.
+	directedBroadcast bool
 }
 
 // makeRoute initializes a new route. It takes ownership of the provided
@@ -113,6 +117,8 @@ func (r *Route) GSOMaxSize() uint32 {
 // If address resolution is required, ErrNoLinkAddress and a notification channel is
 // returned for the top level caller to block. Channel is closed once address resolution
 // is complete (success or not).
+//
+// The NIC r uses must not be locked.
 func (r *Route) Resolve(waker *sleep.Waker) (<-chan struct{}, *tcpip.Error) {
 	if !r.IsResolutionRequired() {
 		// Nothing to do if there is no cache (which does the resolution on cache miss) or
@@ -148,22 +154,27 @@ func (r *Route) RemoveWaker(waker *sleep.Waker) {
 
 // IsResolutionRequired returns true if Resolve() must be called to resolve
 // the link address before the this route can be written to.
+//
+// The NIC r uses must not be locked.
 func (r *Route) IsResolutionRequired() bool {
 	return r.ref.isValidForOutgoing() && r.ref.linkCache != nil && r.RemoteLinkAddress == ""
 }
 
 // WritePacket writes the packet through the given route.
-func (r *Route) WritePacket(gso *GSO, params NetworkHeaderParams, pkt PacketBuffer) *tcpip.Error {
+func (r *Route) WritePacket(gso *GSO, params NetworkHeaderParams, pkt *PacketBuffer) *tcpip.Error {
 	if !r.ref.isValidForOutgoing() {
 		return tcpip.ErrInvalidEndpointState
 	}
+
+	// WritePacket takes ownership of pkt, calculate numBytes first.
+	numBytes := pkt.Header.UsedLength() + pkt.Data.Size()
 
 	err := r.ref.ep.WritePacket(r, gso, params, pkt)
 	if err != nil {
 		r.Stats().IP.OutgoingPacketErrors.Increment()
 	} else {
 		r.ref.nic.stats.Tx.Packets.Increment()
-		r.ref.nic.stats.Tx.Bytes.IncrementBy(uint64(pkt.Header.UsedLength() + pkt.Data.Size()))
+		r.ref.nic.stats.Tx.Bytes.IncrementBy(uint64(numBytes))
 	}
 	return err
 }
@@ -175,9 +186,12 @@ func (r *Route) WritePackets(gso *GSO, pkts PacketBufferList, params NetworkHead
 		return 0, tcpip.ErrInvalidEndpointState
 	}
 
+	// WritePackets takes ownership of pkt, calculate length first.
+	numPkts := pkts.Len()
+
 	n, err := r.ref.ep.WritePackets(r, gso, pkts, params)
 	if err != nil {
-		r.Stats().IP.OutgoingPacketErrors.IncrementBy(uint64(pkts.Len() - n))
+		r.Stats().IP.OutgoingPacketErrors.IncrementBy(uint64(numPkts - n))
 	}
 	r.ref.nic.stats.Tx.Packets.IncrementBy(uint64(n))
 
@@ -193,17 +207,20 @@ func (r *Route) WritePackets(gso *GSO, pkts PacketBufferList, params NetworkHead
 
 // WriteHeaderIncludedPacket writes a packet already containing a network
 // header through the given route.
-func (r *Route) WriteHeaderIncludedPacket(pkt PacketBuffer) *tcpip.Error {
+func (r *Route) WriteHeaderIncludedPacket(pkt *PacketBuffer) *tcpip.Error {
 	if !r.ref.isValidForOutgoing() {
 		return tcpip.ErrInvalidEndpointState
 	}
+
+	// WriteHeaderIncludedPacket takes ownership of pkt, calculate numBytes first.
+	numBytes := pkt.Data.Size()
 
 	if err := r.ref.ep.WriteHeaderIncludedPacket(r, pkt); err != nil {
 		r.Stats().IP.OutgoingPacketErrors.Increment()
 		return err
 	}
 	r.ref.nic.stats.Tx.Packets.Increment()
-	r.ref.nic.stats.Tx.Bytes.IncrementBy(uint64(pkt.Data.Size()))
+	r.ref.nic.stats.Tx.Bytes.IncrementBy(uint64(numBytes))
 	return nil
 }
 
@@ -260,6 +277,12 @@ func (r *Route) MakeLoopedRoute() Route {
 // Stack returns the instance of the Stack that owns this route.
 func (r *Route) Stack() *Stack {
 	return r.ref.stack()
+}
+
+// IsBroadcast returns true if the route is to send a broadcast packet.
+func (r *Route) IsBroadcast() bool {
+	// Only IPv4 has a notion of broadcast.
+	return r.directedBroadcast || r.RemoteAddress == header.IPv4Broadcast
 }
 
 // ReverseRoute returns new route with given source and destination address.

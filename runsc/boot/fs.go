@@ -29,6 +29,7 @@ import (
 	_ "gvisor.dev/gvisor/pkg/sentry/fs/sys"
 	_ "gvisor.dev/gvisor/pkg/sentry/fs/tmpfs"
 	_ "gvisor.dev/gvisor/pkg/sentry/fs/tty"
+	"gvisor.dev/gvisor/pkg/sentry/vfs"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"gvisor.dev/gvisor/pkg/abi/linux"
@@ -37,6 +38,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/fs"
 	"gvisor.dev/gvisor/pkg/sentry/fs/gofer"
 	"gvisor.dev/gvisor/pkg/sentry/fs/ramfs"
+	"gvisor.dev/gvisor/pkg/sentry/fs/user"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/devpts"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/devtmpfs"
 	gofervfs2 "gvisor.dev/gvisor/pkg/sentry/fsimpl/gofer"
@@ -62,7 +64,7 @@ const (
 )
 
 // tmpfs has some extra supported options that we must pass through.
-var tmpfsAllowedOptions = []string{"mode", "uid", "gid"}
+var tmpfsAllowedData = []string{"mode", "uid", "gid"}
 
 func addOverlay(ctx context.Context, conf *Config, lower *fs.Inode, name string, lowerFlags fs.MountSourceFlags) (*fs.Inode, error) {
 	// Upper layer uses the same flags as lower, but it must be read-write.
@@ -153,8 +155,8 @@ func compileMounts(spec *specs.Spec) []specs.Mount {
 	return mounts
 }
 
-// p9MountOptions creates a slice of options for a p9 mount.
-func p9MountOptions(fd int, fa FileAccessType, vfs2 bool) []string {
+// p9MountData creates a slice of p9 mount data.
+func p9MountData(fd int, fa FileAccessType, vfs2 bool) []string {
 	opts := []string{
 		"trans=fd",
 		"rfdno=" + strconv.Itoa(fd),
@@ -221,9 +223,6 @@ func mountFlags(opts []string) fs.MountSourceFlags {
 			mf.NoAtime = true
 		case "noexec":
 			mf.NoExec = true
-		case "bind", "rbind":
-			// When options include either "bind" or "rbind",
-			// it's converted to a 9P mount.
 		default:
 			log.Warningf("ignoring unknown mount option %q", o)
 		}
@@ -237,7 +236,7 @@ func isSupportedMountFlag(fstype, opt string) bool {
 		return true
 	}
 	if fstype == tmpfsvfs2.Name {
-		ok, err := parseMountOption(opt, tmpfsAllowedOptions...)
+		ok, err := parseMountOption(opt, tmpfsAllowedData...)
 		return ok && err == nil
 	}
 	return false
@@ -294,19 +293,12 @@ func setupContainerFS(ctx context.Context, conf *Config, mntr *containerMounter,
 	// Set namespace here so that it can be found in ctx.
 	procArgs.MountNamespace = mns
 
-	return setExecutablePath(ctx, procArgs)
-}
-
-// setExecutablePath sets the procArgs.Filename by searching the PATH for an
-// executable matching the procArgs.Argv[0].
-func setExecutablePath(ctx context.Context, procArgs *kernel.CreateProcessArgs) error {
-	paths := fs.GetPath(procArgs.Envv)
-	exe := procArgs.Argv[0]
-	f, err := procArgs.MountNamespace.ResolveExecutablePath(ctx, procArgs.WorkingDirectory, exe, paths)
+	// Resolve the executable path from working dir and environment.
+	resolved, err := user.ResolveExecutablePath(ctx, procArgs)
 	if err != nil {
-		return fmt.Errorf("searching for executable %q, cwd: %q, $PATH=%q: %v", exe, procArgs.WorkingDirectory, strings.Join(paths, ":"), err)
+		return err
 	}
-	procArgs.Filename = f
+	procArgs.Filename = resolved
 	return nil
 }
 
@@ -399,6 +391,10 @@ type mountHint struct {
 	// root is the inode where the volume is mounted. For mounts with 'pod' share
 	// the volume is mounted once and then bind mounted inside the containers.
 	root *fs.Inode
+
+	// vfsMount is the master mount for the volume. For mounts with 'pod' share
+	// the master volume is bind mounted inside the containers.
+	vfsMount *vfs.Mount
 }
 
 func (m *mountHint) setField(key, val string) error {
@@ -580,9 +576,9 @@ func newContainerMounter(spec *specs.Spec, goferFDs []int, k *kernel.Kernel, hin
 // processHints processes annotations that container hints about how volumes
 // should be mounted (e.g. a volume shared between containers). It must be
 // called for the root container only.
-func (c *containerMounter) processHints(conf *Config) error {
+func (c *containerMounter) processHints(conf *Config, creds *auth.Credentials) error {
 	if conf.VFS2 {
-		return nil
+		return c.processHintsVFS2(conf, creds)
 	}
 	ctx := c.k.SupervisorContext()
 	for _, hint := range c.hints.mounts {
@@ -725,7 +721,7 @@ func (c *containerMounter) createRootMount(ctx context.Context, conf *Config) (*
 	fd := c.fds.remove()
 	log.Infof("Mounting root over 9P, ioFD: %d", fd)
 	p9FS := mustFindFilesystem("9p")
-	opts := p9MountOptions(fd, conf.FileAccess, false /* vfs2 */)
+	opts := p9MountData(fd, conf.FileAccess, false /* vfs2 */)
 
 	if conf.OverlayfsStaleRead {
 		// We can't check for overlayfs here because sandbox is chroot'ed and gofer
@@ -770,10 +766,6 @@ func (c *containerMounter) getMountNameAndOptions(conf *Config, m specs.Mount) (
 		useOverlay bool
 	)
 
-	if isBindMount(m) {
-		m.Type = bind
-	}
-
 	switch m.Type {
 	case devpts.Name, devtmpfs.Name, procvfs2.Name, sysvfs2.Name:
 		fsName = m.Type
@@ -783,7 +775,7 @@ func (c *containerMounter) getMountNameAndOptions(conf *Config, m specs.Mount) (
 		fsName = m.Type
 
 		var err error
-		opts, err = parseAndFilterOptions(m.Options, tmpfsAllowedOptions...)
+		opts, err = parseAndFilterOptions(m.Options, tmpfsAllowedData...)
 		if err != nil {
 			return "", nil, false, err
 		}
@@ -791,7 +783,7 @@ func (c *containerMounter) getMountNameAndOptions(conf *Config, m specs.Mount) (
 	case bind:
 		fd := c.fds.remove()
 		fsName = gofervfs2.Name
-		opts = p9MountOptions(fd, c.getMountAccessType(m), conf.VFS2)
+		opts = p9MountData(fd, c.getMountAccessType(m), conf.VFS2)
 		// If configured, add overlay to all writable mounts.
 		useOverlay = conf.Overlay && !mountFlags(m.Options).ReadOnly
 
@@ -799,18 +791,6 @@ func (c *containerMounter) getMountNameAndOptions(conf *Config, m specs.Mount) (
 		log.Warningf("ignoring unknown filesystem type %q", m.Type)
 	}
 	return fsName, opts, useOverlay, nil
-}
-
-func isBindMount(m specs.Mount) bool {
-	for _, opt := range m.Options {
-		// When options include either "bind" or "rbind", this behaves as
-		// bind mount even if the mount type is equal to a filesystem supported
-		// on runsc.
-		if opt == "bind" || opt == "rbind" {
-			return true
-		}
-	}
-	return false
 }
 
 func (c *containerMounter) getMountAccessType(mount specs.Mount) FileAccessType {
@@ -956,7 +936,7 @@ func (c *containerMounter) createRestoreEnvironment(conf *Config) (*fs.RestoreEn
 
 	// Add root mount.
 	fd := c.fds.remove()
-	opts := p9MountOptions(fd, conf.FileAccess, false /* vfs2 */)
+	opts := p9MountData(fd, conf.FileAccess, false /* vfs2 */)
 
 	mf := fs.MountSourceFlags{}
 	if c.root.Readonly || conf.Overlay {
@@ -1044,7 +1024,7 @@ func (c *containerMounter) mountTmp(ctx context.Context, conf *Config, mns *fs.M
 			Destination: "/tmp",
 			// Sticky bit is added to prevent accidental deletion of files from
 			// another user. This is normally done for /tmp.
-			Options: []string{"mode=1777"},
+			Options: []string{"mode=01777"},
 		}
 		return c.mountSubmount(ctx, conf, mns, root, tmpMount)
 

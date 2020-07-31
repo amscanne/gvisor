@@ -18,6 +18,7 @@ import (
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
+	fslock "gvisor.dev/gvisor/pkg/sentry/fs/lock"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/unimpl"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
@@ -325,9 +326,9 @@ func (t *TTYFileDescription) checkChange(ctx context.Context, sig linux.Signal) 
 	task := kernel.TaskFromContext(ctx)
 	if task == nil {
 		// No task? Linux does not have an analog for this case, but
-		// tty_check_change is more of a blacklist of cases than a
-		// whitelist, and is surprisingly permissive. Allowing the
-		// change seems most appropriate.
+		// tty_check_change only blocks specific cases and is
+		// surprisingly permissive. Allowing the change seems
+		// appropriate.
 		return nil
 	}
 
@@ -376,4 +377,14 @@ func (t *TTYFileDescription) checkChange(ctx context.Context, sig linux.Signal) 
 	// Linux ignores the result of kill_pgrp().
 	_ = pg.SendSignal(kernel.SignalInfoPriv(sig))
 	return kernel.ERESTARTSYS
+}
+
+// LockPOSIX implements vfs.FileDescriptionImpl.LockPOSIX.
+func (t *TTYFileDescription) LockPOSIX(ctx context.Context, uid fslock.UniqueID, typ fslock.LockType, start, length uint64, whence int16, block fslock.Blocker) error {
+	return t.Locks().LockPOSIX(ctx, &t.vfsfd, uid, typ, start, length, whence, block)
+}
+
+// UnlockPOSIX implements vfs.FileDescriptionImpl.UnlockPOSIX.
+func (t *TTYFileDescription) UnlockPOSIX(ctx context.Context, uid fslock.UniqueID, start, length uint64, whence int16) error {
+	return t.Locks().UnlockPOSIX(ctx, &t.vfsfd, uid, start, length, whence)
 }
