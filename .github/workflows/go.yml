@@ -21,6 +21,9 @@ jobs:
     - run: |
         echo "${{ steps.setup.outputs.has_token }}"
     - run: |
+        echo "matches without literal"
+      if: steps.setup.outputs.has_token
+    - run: |
         jq -nc '{"state": "pending", "context": "go tests"}' | \
         curl -sL -X POST -d @- \
             -H "Content-Type: application/json" \
