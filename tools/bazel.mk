@@ -143,7 +143,7 @@ bazel-server: ## Ensures that the server exists. Used as an internal target.
 	@docker exec $(FULL_DOCKER_EXEC_OPTIONS) $(DOCKER_NAME) true || $(MAKE) bazel-server-start
 .PHONY: bazel-server
 
-build_cmd = docker exec $(FULL_DOCKER_EXEC_OPTIONS) $(DOCKER_NAME) sh -o pipefail -c '$(BAZEL) build $(OPTIONS) $(TARGETS)'
+build_cmd = docker exec $(FULL_DOCKER_EXEC_OPTIONS) $(DOCKER_NAME) sh -o pipefail -c '$(BAZEL) build --curses=no --color=no $(OPTIONS) $(TARGETS)'
 
 build_paths = $(build_cmd) 2>&1 \
 		| tee /proc/self/fd/2 \
@@ -159,7 +159,7 @@ copy: bazel-server
 ifeq (,$(DESTINATION))
 	$(error Destination not provided.)
 endif
-	@$(call build_paths,cp -fa {} $(DESTINATION))
+	$(call build_paths,cp -fa {} $(DESTINATION))
 
 run: bazel-server
 	@$(call build_paths,{} $(ARGS))

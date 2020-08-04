@@ -21,9 +21,14 @@ import (
 	"net"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
+)
 
-	"gvisor.dev/gvisor/pkg/test/testutil"
+const (
+	udpDuration = 3 * time.Second
+	tcpDuration = 3 * time.Second
+	chainName   = "foochain"
 )
 
 // filterTable calls `ip{6}tables -t filter` with the given args.
@@ -69,48 +74,51 @@ func tableRules(ipv6 bool, table string, argsList [][]string) error {
 }
 
 // listenUDP listens on a UDP port and returns the value of net.Conn.Read() for
-// the first read on that port.
-func listenUDP(port int, timeout time.Duration) error {
+// the first read on that port. This means that success is defined as having
+// received at least one packet, and failure is defined as having received
+// none (or some other error occuring).
+//
+// The bound port will be Sent on the Exchanger.
+func listenUDP(e Exchanger) error {
 	localAddr := net.UDPAddr{
-		Port: port,
+		Port: 0,
 	}
 	conn, err := net.ListenUDP("udp", &localAddr)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(timeout))
+
+	// Send the port to the remote side.
+	if err := e.Send(conn.LocalAddr().(*net.UDPAddr).Port); err != nil {
+		return err
+	}
+
+	// Accept to read at least one packet.
+	conn.SetDeadline(time.Now().Add(udpDuration))
 	_, err = conn.Read([]byte{0})
 	return err
 }
 
-// sendUDPLoop sends 1 byte UDP packets repeatedly to the IP and port specified
+// sendUDP sends 1 byte UDP packets repeatedly to the IP and port specified
 // over a duration.
-func sendUDPLoop(ip net.IP, port int, duration time.Duration) error {
-	conn, err := connectUDP(ip, port)
+//
+// The destination is read from the Exchanger.
+func sendUDP(e Exchanger) error {
+	conn, err := connectUDP(e)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	loopUDP(conn, duration)
+	loopUDP(conn)
 	return nil
 }
 
-// spawnUDPLoop works like sendUDPLoop, but returns immediately and sends
-// packets in another goroutine.
-func spawnUDPLoop(ip net.IP, port int, duration time.Duration) error {
-	conn, err := connectUDP(ip, port)
+func connectUDP(e Exchanger) (net.Conn, error) {
+	ip, port, err := e.Recv()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	go func() {
-		defer conn.Close()
-		loopUDP(conn, duration)
-	}()
-	return nil
-}
-
-func connectUDP(ip net.IP, port int) (net.Conn, error) {
 	remote := net.UDPAddr{
 		IP:   ip,
 		Port: port,
@@ -122,8 +130,8 @@ func connectUDP(ip net.IP, port int) (net.Conn, error) {
 	return conn, nil
 }
 
-func loopUDP(conn net.Conn, duration time.Duration) {
-	to := time.After(duration)
+func loopUDP(conn net.Conn) {
+	to := time.After(udpDuration)
 	for timedOut := false; !timedOut; {
 		// This may return an error (connection refused) if the remote
 		// hasn't started listening yet or they're dropping our
@@ -140,9 +148,11 @@ func loopUDP(conn net.Conn, duration time.Duration) {
 }
 
 // listenTCP listens for connections on a TCP port.
-func listenTCP(port int, timeout time.Duration) error {
+//
+// The bound port will be Sent on the Exchanger.
+func listenTCP(e Exchanger) error {
 	localAddr := net.TCPAddr{
-		Port: port,
+		Port: 0,
 	}
 
 	// Starts listening on port.
@@ -152,36 +162,111 @@ func listenTCP(port int, timeout time.Duration) error {
 	}
 	defer lConn.Close()
 
+	// Send the port.
+	if err := e.Send(lConn.Addr().(*net.TCPAddr).Port); err != nil {
+		return err
+	}
+
 	// Accept connections on port.
-	lConn.SetDeadline(time.Now().Add(timeout))
+	lConn.SetDeadline(time.Now().Add(tcpDuration))
 	conn, err := lConn.AcceptTCP()
 	if err != nil {
 		return err
 	}
-	conn.Close()
+	defer conn.Close()
+
 	return nil
 }
 
-// connectTCP connects to the given IP and port from an ephemeral local address.
-func connectTCP(ip net.IP, port int, timeout time.Duration) error {
-	contAddr := net.TCPAddr{
-		IP:   ip,
-		Port: port,
+// rawTCPSocket returns a raw FD for a TCP socket, along with it's port.
+func rawTCPSocket(ipv6 bool) (sockfd int, port int, err error) {
+	// The net package doesn't give guarantee access to the connection's
+	// underlying FD, and thus we cannot call getsockopt. We have to use
+	// traditional syscalls for SO_ORIGINAL_DST.
+	family := syscall.AF_INET
+	if ipv6 {
+		family = syscall.AF_INET6
 	}
-	// The container may not be listening when we first connect, so retry
-	// upon error.
-	callback := func() error {
-		conn, err := net.DialTimeout("tcp", contAddr.String(), timeout)
-		if conn != nil {
-			conn.Close()
+	sockfd, err = syscall.Socket(family, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer syscall.Close(sockfd)
+
+	var bindAddr syscall.Sockaddr
+	if ipv6 {
+		bindAddr = &syscall.SockaddrInet6{
+			Port: 0,
+			Addr: [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, // IN6ADDR_ANY
 		}
-		return err
+	} else {
+		bindAddr = &syscall.SockaddrInet4{
+			Port: 0,
+			Addr: [4]byte{0, 0, 0, 0}, // INADDR_ANY
+		}
 	}
-	if err := testutil.Poll(callback, timeout); err != nil {
-		return fmt.Errorf("timed out waiting to connect IP on port %v, most recent error: %v", port, err)
+	if err := syscall.Bind(sockfd, bindAddr); err != nil {
+		return 0, 0, err
 	}
 
-	return nil
+	// Extract the bound port.
+	sa, err := syscall.Getsockname(sockfd)
+	if err != nil {
+		return 0, 0, err
+	}
+	switch v := sa.(type) {
+	case *syscall.SockaddrInet4:
+		port = v.Port
+	case *syscall.SockaddrInet6:
+		port = v.Port
+	default:
+		return 0, 0, fmt.Errorf("unknown sockaddr type %T", sa)
+	}
+
+	// Success.
+	return sockfd, port, nil
+}
+
+// connectTCP connects to the given IP and port from an ephemeral local address.
+//
+// If send is true, then the bound port is sent *before* receiving the port
+// from the remote end. This is useful for testing source port-based filtering.
+//
+// The address is received from the Exchanger.
+func connectTCP(e Exchanger, sendPort bool, ipv6 bool) error {
+	sockfd, port, err := rawTCPSocket(ipv6)
+	if sendPort {
+		// Send the port if required.
+		if err := e.Send(port); err != nil {
+			return err
+		}
+	}
+
+	// Pull the remote address.
+	ip, port, err := e.Recv()
+	if err != nil {
+		return err
+	}
+
+	// Connect to the remote end.
+	var connectAddr syscall.Sockaddr
+	if ipv6 {
+		connectAddr = &syscall.SockaddrInet6{
+			Port: port,
+		}
+		copy(connectAddr.(*syscall.SockaddrInet6).Addr[:], ip)
+	} else {
+		connectAddr = &syscall.SockaddrInet4{
+			Port: port,
+		}
+		copy(connectAddr.(*syscall.SockaddrInet4).Addr[:], ip)
+	}
+	if err := syscall.Connect(sockfd, connectAddr); err != nil {
+		return err
+	}
+
+	// Done.
+	return syscall.Close(sockfd)
 }
 
 // localAddrs returns a list of local network interface addresses. When ipv6 is
@@ -286,4 +371,14 @@ func nowhereIP(ipv6 bool) string {
 		return "2001:db8::1"
 	}
 	return "192.0.2.1"
+}
+
+// portAlt returns a distinct port from the given one. This is useful for
+// redirection rules, or rules where we want to check that an action on a
+// different port does not have an effect.
+func portAlt(port int) int {
+	if port%2 == 1 {
+		return port - 1
+	}
+	return port + 1
 }

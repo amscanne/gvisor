@@ -17,7 +17,6 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"log"
 	"net"
 
@@ -39,38 +38,35 @@ func main() {
 	}
 	log.Printf("Running test %q", *name)
 
-	// Get the IP of the local process.
-	ip, err := getIP()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// Run the test.
-	if err := test.ContainerAction(ip, *ipv6); err != nil {
-		log.Fatalf("Failed running test %q: %v", *name, err)
-	}
-
-	// Emit the final line.
-	log.Printf("%s", iptables.TerminalStatement)
-}
-
-// getIP listens for a connection from the local process and returns the source
-// IP of that connection.
-func getIP() (net.IP, error) {
+	// Bind to the local exchanger port.
 	localAddr := net.TCPAddr{
 		Port: iptables.IPExchangePort,
 	}
 	listener, err := net.ListenTCP("tcp", &localAddr)
 	if err != nil {
-		return net.IP{}, fmt.Errorf("failed listening for IP: %v", err)
+		log.Fatalf("failed listening for IP: %v", err)
 	}
 	defer listener.Close()
+
+	// Emit the first line. After this point, the external runner may
+	// connect to the exchanger for synchronization.
+	log.Printf("%s", iptables.HelloStatement)
+
+	// Accept a connection from the host.
 	conn, err := listener.AcceptTCP()
 	if err != nil {
-		return net.IP{}, fmt.Errorf("failed accepting IP: %v", err)
+		log.Fatalf("failed accepting IP: %v", err)
 	}
 	defer conn.Close()
-	log.Printf("Connected to %v", conn.RemoteAddr())
 
-	return conn.RemoteAddr().(*net.TCPAddr).IP, nil
+	// Create our exchanger.
+	e := iptables.NewExchanger(conn)
+
+	// Run the test.
+	if err := test.ContainerAction(e, *ipv6); err != nil {
+		log.Fatalf("Failed running test %q: %v", *name, err)
+	}
+
+	// Emit the final line.
+	log.Printf("%s", iptables.TerminalStatement)
 }

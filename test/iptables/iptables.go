@@ -12,24 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package iptables contains a set of iptables tests implemented as TestCases
+// Package iptables contains a set of iptables tests implemented as TestCases.
 package iptables
 
 import (
 	"fmt"
-	"net"
 	"time"
 )
 
-// IPExchangePort is the port the container listens on to receive the IP
-// address of the local process.
-const IPExchangePort = 2349
+const (
+	// HelloStatement is emitted when the container starts.
+	HelloStatement = "Hello!"
 
-// TerminalStatement is the last statement in the test runner.
-const TerminalStatement = "Finished!"
+	// TerminalStatement is the last statement in the test runner.
+	TerminalStatement = "Finished!"
+)
 
-// TestTimeout is the timeout used for all tests.
-const TestTimeout = 10 * time.Minute
+const (
+	// HelloTimeout is the timeout to come up.
+	HelloTimeout = time.Minute
+
+	// TerminalTimeout is the timeout used for completion.
+	TerminalTimeout = time.Minute
+)
 
 // A TestCase contains one action to run in the container and one to run
 // locally. The actions run concurrently and each must succeed for the test
@@ -39,11 +44,12 @@ type TestCase interface {
 	Name() string
 
 	// ContainerAction runs inside the container. It receives the IP of the
-	// local process.
-	ContainerAction(ip net.IP, ipv6 bool) error
+	// local process. Should should be called when the LocalAction can be
+	// executed outside the container.
+	ContainerAction(e Exchanger, ipv6 bool) error
 
 	// LocalAction runs locally. It receives the IP of the container.
-	LocalAction(ip net.IP, ipv6 bool) error
+	LocalAction(e Exchanger, ipv6 bool) error
 }
 
 // Tests maps test names to TestCase.

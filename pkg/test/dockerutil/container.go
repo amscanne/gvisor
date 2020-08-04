@@ -366,14 +366,15 @@ func (c *Container) FindIP(ctx context.Context, ipv6 bool) (net.IP, error) {
 		return nil, err
 	}
 
-	var ip net.IP
+	var src string
 	if ipv6 {
-		ip = net.ParseIP(resp.NetworkSettings.DefaultNetworkSettings.GlobalIPv6Address)
+		src = resp.NetworkSettings.DefaultNetworkSettings.GlobalIPv6Address
 	} else {
-		ip = net.ParseIP(resp.NetworkSettings.DefaultNetworkSettings.IPAddress)
+		src = resp.NetworkSettings.DefaultNetworkSettings.IPAddress
 	}
+	ip := net.ParseIP(src)
 	if ip == nil {
-		return net.IP{}, fmt.Errorf("invalid IP: %q", ip)
+		return net.IP{}, fmt.Errorf("invalid IP: %s", src)
 	}
 	return ip, nil
 }
@@ -497,8 +498,14 @@ func (c *Container) WaitForOutputSubmatch(ctx context.Context, pattern string, t
 		default:
 		}
 
+		before := c.streamBuf.Len()
 		c.streams.Conn.SetDeadline(time.Now().Add(50 * time.Millisecond))
 		_, err := stdcopy.StdCopy(&c.streamBuf, &c.streamBuf, c.streams.Reader)
+		after := c.streamBuf.Len()
+		if before != after {
+			// Emit helpful debugging output.
+			c.logger.Logf("output:\n%s", string(c.streamBuf.Bytes()[before:]))
+		}
 
 		if err != nil {
 			// check that it wasn't a timeout

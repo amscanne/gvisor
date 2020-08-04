@@ -14,15 +14,13 @@
 
 package iptables
 
+/*
 import (
 	"errors"
 	"fmt"
 	"net"
 	"syscall"
-	"time"
 )
-
-const redirectPort = 42
 
 func init() {
 	RegisterTestCase(NATPreRedirectUDPPort{})
@@ -54,21 +52,23 @@ func (NATPreRedirectUDPPort) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (NATPreRedirectUDPPort) ContainerAction(ip net.IP, ipv6 bool) error {
-	if err := natTable(ipv6, "-A", "PREROUTING", "-p", "udp", "-j", "REDIRECT", "--to-ports", fmt.Sprintf("%d", redirectPort)); err != nil {
-		return err
+func (NATPreRedirectUDPPort) ContainerAction(e Exchanger, ipv6 bool) error {
+	if err := listenUDP(localSend(func(port int) error {
+		// Redirect all traffic to the bound port.
+		if err := natTable(ipv6, "-A", "PREROUTING", "-p", "udp", "-j", "REDIRECT", "--to-ports", fmt.Sprintf("%d", port)); err != nil {
+			return err
+		}
+		// Return the portAlt; not bound, but should redirect.
+		return e.Send(portAlt(port))
+	})); err != nil {
+		return fmt.Errorf("packets should be reidrected, but encountered an error: %v", err)
 	}
-
-	if err := listenUDP(redirectPort, sendloopDuration); err != nil {
-		return fmt.Errorf("packets on port %d should be allowed, but encountered an error: %v", redirectPort, err)
-	}
-
 	return nil
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (NATPreRedirectUDPPort) LocalAction(ip net.IP, ipv6 bool) error {
-	return spawnUDPLoop(ip, acceptPort, sendloopDuration)
+func (NATPreRedirectUDPPort) LocalAction(e Exchanger, ipv6 bool) error {
+	return sendUDP(e) // Should succeed.
 }
 
 // NATPreRedirectTCPPort tests that connections are redirected on specified ports.
@@ -80,18 +80,24 @@ func (NATPreRedirectTCPPort) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (NATPreRedirectTCPPort) ContainerAction(ip net.IP, ipv6 bool) error {
-	if err := natTable(ipv6, "-A", "PREROUTING", "-p", "tcp", "-m", "tcp", "--dport", fmt.Sprintf("%d", dropPort), "-j", "REDIRECT", "--to-ports", fmt.Sprintf("%d", acceptPort)); err != nil {
-		return err
-	}
-
+func (NATPreRedirectTCPPort) ContainerAction(e Exchanger, ipv6 bool) error {
 	// Listen for TCP packets on redirect port.
-	return listenTCP(acceptPort, sendloopDuration)
+	if err := listenTCP(localSend(func(port int) error {
+		// Redirect from port to portAlt.
+		if err := natTable(ipv6, "-A", "PREROUTING", "-p", "tcp", "-m", "tcp", "--dport", fmt.Sprintf("%d", portAlt(port)), "-j", "REDIRECT", "--to-ports", fmt.Sprintf("%d", port)); err != nil {
+			return err
+		}
+		// Return the portAlt; not bound, but should redirect.
+		return e.Send(portAlt(port))
+	})); err != nil {
+		return fmt.Errorf("packets should be redirected, but encountered an error: %v", err)
+	}
+	return nil
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (NATPreRedirectTCPPort) LocalAction(ip net.IP, ipv6 bool) error {
-	return connectTCP(ip, dropPort, sendloopDuration)
+func (NATPreRedirectTCPPort) LocalAction(e Exchanger, ipv6 bool) error {
+	return connectTCP(e, ipv6) // Should succeed.
 }
 
 // NATPreRedirectTCPOutgoing verifies that outgoing TCP connections aren't
@@ -104,19 +110,20 @@ func (NATPreRedirectTCPOutgoing) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (NATPreRedirectTCPOutgoing) ContainerAction(ip net.IP, ipv6 bool) error {
-	// Redirect all incoming TCP traffic to a closed port.
-	if err := natTable(ipv6, "-A", "PREROUTING", "-p", "tcp", "-j", "REDIRECT", "--to-ports", fmt.Sprintf("%d", dropPort)); err != nil {
-		return err
-	}
-
+func (NATPreRedirectTCPOutgoing) ContainerAction(e Exchanger, ipv6 bool) error {
 	// Establish a connection to the host process.
-	return connectTCP(ip, acceptPort, sendloopDuration)
+	return connectTCP(localRecv(func() (net.IP, int, error) {
+		// Redirect all incoming TCP traffic to a closed port.
+		if err := natTable(ipv6, "-A", "PREROUTING", "-p", "tcp", "-j", "REDIRECT", "--to-ports", fmt.Sprintf("%d", portAlt(port))); err != nil {
+			return net.IP{}, 0, err
+		}
+		return
+	}), ipv6)
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (NATPreRedirectTCPOutgoing) LocalAction(ip net.IP, ipv6 bool) error {
-	return listenTCP(acceptPort, sendloopDuration)
+func (NATPreRedirectTCPOutgoing) LocalAction(e Exchanger, ipv6 bool) error {
+	return listenTCP(e)
 }
 
 // NATOutRedirectTCPIncoming verifies that incoming TCP connections aren't
@@ -129,19 +136,19 @@ func (NATOutRedirectTCPIncoming) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (NATOutRedirectTCPIncoming) ContainerAction(ip net.IP, ipv6 bool) error {
+func (NATOutRedirectTCPIncoming) ContainerAction(e Exchanger, ipv6 bool) error {
 	// Redirect all outgoing TCP traffic to a closed port.
 	if err := natTable(ipv6, "-A", "OUTPUT", "-p", "tcp", "-j", "REDIRECT", "--to-ports", fmt.Sprintf("%d", dropPort)); err != nil {
 		return err
 	}
 
 	// Establish a connection to the host process.
-	return listenTCP(acceptPort, sendloopDuration)
+	return listenTCP(e)
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (NATOutRedirectTCPIncoming) LocalAction(ip net.IP, ipv6 bool) error {
-	return connectTCP(ip, acceptPort, sendloopDuration)
+func (NATOutRedirectTCPIncoming) LocalAction(e Exchanger, ipv6 bool) error {
+	return connectTCP(e, false)
 }
 
 // NATOutRedirectUDPPort tests that packets are redirected to different port.
@@ -153,13 +160,19 @@ func (NATOutRedirectUDPPort) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (NATOutRedirectUDPPort) ContainerAction(ip net.IP, ipv6 bool) error {
-	return loopbackTest(ipv6, net.ParseIP(nowhereIP(ipv6)), "-A", "OUTPUT", "-p", "udp", "-j", "REDIRECT", "--to-ports", fmt.Sprintf("%d", acceptPort))
+func (NATOutRedirectUDPPort) ContainerAction(_ Exchanger, ipv6 bool) error {
+	return loopbackTest(ipv6, net.ParseIP(nowhereIP(ipv6)), func(boundPort, unboundPort int) []string {
+		return []string{
+			"-A", "OUTPUT",
+			"-p", "udp",
+			"-j", "REDIRECT",
+			"--to-ports", fmt.Sprintf("%d", boundPort),
+		}
+	})
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (NATOutRedirectUDPPort) LocalAction(ip net.IP, ipv6 bool) error {
-	// No-op.
+func (NATOutRedirectUDPPort) LocalAction(Exchanger, bool) error {
 	return nil
 }
 
@@ -173,21 +186,23 @@ func (NATDropUDP) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (NATDropUDP) ContainerAction(ip net.IP, ipv6 bool) error {
-	if err := natTable(ipv6, "-A", "PREROUTING", "-p", "udp", "-j", "REDIRECT", "--to-ports", fmt.Sprintf("%d", redirectPort)); err != nil {
-		return err
+func (NATDropUDP) ContainerAction(e Exchanger, ipv6 bool) error {
+	if err := listenUDP(localSend(func(port int) error {
+		// Redirect to the bound port.
+		if err := natTable(ipv6, "-A", "PREROUTING", "-p", "udp", "-j", "REDIRECT", "--to-ports", fmt.Sprintf("%d", port)); err != nil {
+			return err
+		}
+		// Send some other port.
+		return e.Send(portAlt(port))
+	})); err == nil {
+		return fmt.Errorf("packets should have been redirected")
 	}
-
-	if err := listenUDP(acceptPort, sendloopDuration); err == nil {
-		return fmt.Errorf("packets on port %d should have been redirected to port %d", acceptPort, redirectPort)
-	}
-
 	return nil
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (NATDropUDP) LocalAction(ip net.IP, ipv6 bool) error {
-	return spawnUDPLoop(ip, acceptPort, sendloopDuration)
+func (NATDropUDP) LocalAction(e Exchanger, ipv6 bool) error {
+	return sendUDP(e)
 }
 
 // NATAcceptAll tests that all UDP packets are accepted.
@@ -199,21 +214,19 @@ func (NATAcceptAll) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (NATAcceptAll) ContainerAction(ip net.IP, ipv6 bool) error {
+func (NATAcceptAll) ContainerAction(e Exchanger, ipv6 bool) error {
 	if err := natTable(ipv6, "-A", "PREROUTING", "-p", "udp", "-j", "ACCEPT"); err != nil {
 		return err
 	}
-
-	if err := listenUDP(acceptPort, sendloopDuration); err != nil {
-		return fmt.Errorf("packets on port %d should be allowed, but encountered an error: %v", acceptPort, err)
+	if err := listenUDP(e); err != nil {
+		return fmt.Errorf("packets should be allowed, but encountered an error: %v", err)
 	}
-
 	return nil
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (NATAcceptAll) LocalAction(ip net.IP, ipv6 bool) error {
-	return spawnUDPLoop(ip, acceptPort, sendloopDuration)
+func (NATAcceptAll) LocalAction(e Exchanger, ipv6 bool) error {
+	return sendUDP(e)
 }
 
 // NATOutRedirectIP uses iptables to select packets based on destination IP and
@@ -226,18 +239,21 @@ func (NATOutRedirectIP) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (NATOutRedirectIP) ContainerAction(ip net.IP, ipv6 bool) error {
+func (NATOutRedirectIP) ContainerAction(e Exchanger, ipv6 bool) error {
 	// Redirect OUTPUT packets to a listening localhost port.
-	return loopbackTest(ipv6, net.ParseIP(nowhereIP(ipv6)),
-		"-A", "OUTPUT",
-		"-d", nowhereIP(ipv6),
-		"-p", "udp",
-		"-j", "REDIRECT", "--to-port", fmt.Sprintf("%d", acceptPort))
+	return loopbackTest(ipv6, net.ParseIP(nowhereIP(ipv6)), func(boundPort, unboundPort int) []string {
+		return []string{
+			"-A", "OUTPUT",
+			"-d", nowhereIP(ipv6),
+			"-p", "udp",
+			"-j", "REDIRECT",
+			"--to-port", fmt.Sprintf("%d", boundPort),
+		}
+	})
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (NATOutRedirectIP) LocalAction(ip net.IP, ipv6 bool) error {
-	// No-op.
+func (NATOutRedirectIP) LocalAction(e Exchanger, ipv6 bool) error {
 	return nil
 }
 
@@ -251,16 +267,24 @@ func (NATOutDontRedirectIP) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (NATOutDontRedirectIP) ContainerAction(ip net.IP, ipv6 bool) error {
-	if err := natTable(ipv6, "-A", "OUTPUT", "-d", localIP(ipv6), "-p", "udp", "-j", "REDIRECT", "--to-port", fmt.Sprintf("%d", dropPort)); err != nil {
-		return err
-	}
-	return sendUDPLoop(ip, acceptPort, sendloopDuration)
+func (NATOutDontRedirectIP) ContainerAction(e Exchanger, ipv6 bool) error {
+	return sendUDP(localRecv(func() (net.IP, int, error) {
+		ip, port, err := e.Recv()
+		if err != nil {
+			return ip, port, err
+		}
+		// Redirect outgoing traffic to some other address (won't match).
+		if err := natTable(ipv6, "-A", "OUTPUT", "-d", localIP(ipv6), "-p", "udp", "-j", "REDIRECT", "--to-port", fmt.Sprintf("%d", portAlt(port))); err != nil {
+			return err
+		}
+		// Return the original port.
+		return ip, port, err
+	}))
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (NATOutDontRedirectIP) LocalAction(ip net.IP, ipv6 bool) error {
-	return listenUDP(acceptPort, sendloopDuration)
+func (NATOutDontRedirectIP) LocalAction(e Exchanger, ipv6 bool) error {
+	return listenUDP(e)
 }
 
 // NATOutRedirectInvert tests that iptables can match with "! -d".
@@ -272,22 +296,25 @@ func (NATOutRedirectInvert) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (NATOutRedirectInvert) ContainerAction(ip net.IP, ipv6 bool) error {
+func (NATOutRedirectInvert) ContainerAction(_ Exchanger, ipv6 bool) error {
 	// Redirect OUTPUT packets to a listening localhost port.
 	dest := "192.0.2.2"
 	if ipv6 {
 		dest = "2001:db8::2"
 	}
-	return loopbackTest(ipv6, net.ParseIP(nowhereIP(ipv6)),
-		"-A", "OUTPUT",
-		"!", "-d", dest,
-		"-p", "udp",
-		"-j", "REDIRECT", "--to-port", fmt.Sprintf("%d", acceptPort))
+	return loopbackTest(ipv6, net.ParseIP(nowhereIP(ipv6)), func(boundPort, unboundPort int) []string {
+		return []string{
+			"-A", "OUTPUT",
+			"!", "-d", dest,
+			"-p", "udp",
+			"-j", "REDIRECT",
+			"--to-port", fmt.Sprintf("%d", boundPort),
+		}
+	})
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (NATOutRedirectInvert) LocalAction(ip net.IP, ipv6 bool) error {
-	// No-op.
+func (NATOutRedirectInvert) LocalAction(e Exchanger, ipv6 bool) error {
 	return nil
 }
 
@@ -301,25 +328,32 @@ func (NATPreRedirectIP) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (NATPreRedirectIP) ContainerAction(ip net.IP, ipv6 bool) error {
+func (NATPreRedirectIP) ContainerAction(e Exchanger, ipv6 bool) error {
 	addrs, err := localAddrs(ipv6)
 	if err != nil {
 		return err
 	}
-
-	var rules [][]string
-	for _, addr := range addrs {
-		rules = append(rules, []string{"-A", "PREROUTING", "-p", "udp", "-d", addr, "-j", "REDIRECT", "--to-ports", fmt.Sprintf("%d", acceptPort)})
-	}
-	if err := natTableRules(ipv6, rules); err != nil {
-		return err
-	}
-	return listenUDP(acceptPort, sendloopDuration)
+	return listenUDP(localSend(func(port int) error {
+		var rules [][]string
+		for _, addr := range addrs {
+			rules = append(rules, []string{
+				"-A", "PREROUTING",
+				"-p", "udp",
+				"-d", addr,
+				"-j", "REDIRECT",
+				"--to-ports", fmt.Sprintf("%d", port),
+			})
+		}
+		if err := natTableRules(ipv6, rules); err != nil {
+			return err
+		}
+		return e.Send(port)
+	}))
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (NATPreRedirectIP) LocalAction(ip net.IP, ipv6 bool) error {
-	return spawnUDPLoop(ip, dropPort, sendloopDuration)
+func (NATPreRedirectIP) LocalAction(e Exchanger, ipv6 bool) error {
+	return sendUDP(e)
 }
 
 // NATPreDontRedirectIP tests that iptables matching with "-d" does not match
@@ -332,16 +366,18 @@ func (NATPreDontRedirectIP) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (NATPreDontRedirectIP) ContainerAction(ip net.IP, ipv6 bool) error {
-	if err := natTable(ipv6, "-A", "PREROUTING", "-p", "udp", "-d", localIP(ipv6), "-j", "REDIRECT", "--to-ports", fmt.Sprintf("%d", dropPort)); err != nil {
-		return err
-	}
-	return listenUDP(acceptPort, sendloopDuration)
+func (NATPreDontRedirectIP) ContainerAction(e Exchanger, ipv6 bool) error {
+	return listenUDP(localSend(func(port int) error {
+		if err := natTable(ipv6, "-A", "PREROUTING", "-p", "udp", "-d", localIP(ipv6), "-j", "REDIRECT", "--to-ports", fmt.Sprintf("%d", port)); err != nil {
+			return err
+		}
+		return e.Send(port)
+	}))
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (NATPreDontRedirectIP) LocalAction(ip net.IP, ipv6 bool) error {
-	return spawnUDPLoop(ip, acceptPort, sendloopDuration)
+func (NATPreDontRedirectIP) LocalAction(e Exchanger, ipv6 bool) error {
+	return sendUDP(e)
 }
 
 // NATPreRedirectInvert tests that iptables can match with "! -d".
@@ -353,16 +389,17 @@ func (NATPreRedirectInvert) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (NATPreRedirectInvert) ContainerAction(ip net.IP, ipv6 bool) error {
-	if err := natTable(ipv6, "-A", "PREROUTING", "-p", "udp", "!", "-d", localIP(ipv6), "-j", "REDIRECT", "--to-ports", fmt.Sprintf("%d", acceptPort)); err != nil {
-		return err
-	}
-	return listenUDP(acceptPort, sendloopDuration)
+func (NATPreRedirectInvert) ContainerAction(e Exchanger, ipv6 bool) error {
+	return listenUDP(localSend(func(port int) error {
+		if err := natTable(ipv6, "-A", "PREROUTING", "-p", "udp", "!", "-d", localIP(ipv6), "-j", "REDIRECT", "--to-ports", fmt.Sprintf("%d", port)); err != nil {
+			return err
+		}
+	}))
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (NATPreRedirectInvert) LocalAction(ip net.IP, ipv6 bool) error {
-	return spawnUDPLoop(ip, dropPort, sendloopDuration)
+func (NATPreRedirectInvert) LocalAction(e Exchanger, ipv6 bool) error {
+	return sendUDP(e)
 }
 
 // NATRedirectRequiresProtocol tests that use of the --to-ports flag requires a
@@ -375,7 +412,7 @@ func (NATRedirectRequiresProtocol) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (NATRedirectRequiresProtocol) ContainerAction(ip net.IP, ipv6 bool) error {
+func (NATRedirectRequiresProtocol) ContainerAction(e Exchanger, ipv6 bool) error {
 	if err := natTable(ipv6, "-A", "PREROUTING", "-d", localIP(ipv6), "-j", "REDIRECT", "--to-ports", fmt.Sprintf("%d", acceptPort)); err == nil {
 		return errors.New("expected an error using REDIRECT --to-ports without a protocol")
 	}
@@ -383,8 +420,7 @@ func (NATRedirectRequiresProtocol) ContainerAction(ip net.IP, ipv6 bool) error {
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (NATRedirectRequiresProtocol) LocalAction(ip net.IP, ipv6 bool) error {
-	// No-op.
+func (NATRedirectRequiresProtocol) LocalAction(e Exchanger, ipv6 bool) error {
 	return nil
 }
 
@@ -397,42 +433,27 @@ func (NATOutRedirectTCPPort) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (NATOutRedirectTCPPort) ContainerAction(ip net.IP, ipv6 bool) error {
-	if err := natTable(ipv6, "-A", "OUTPUT", "-p", "tcp", "-m", "tcp", "--dport", fmt.Sprintf("%d", dropPort), "-j", "REDIRECT", "--to-ports", fmt.Sprintf("%d", acceptPort)); err != nil {
+func (NATOutRedirectTCPPort) ContainerAction(_ Exchanger, ipv6 bool) error {
+	listenCh := make(chan error)
+	localE := makeLocalExchange(ipv6)
+	go func() {
+		listenCh <- listenTCP(localSend(func(port int) error {
+			// Redirect to the bound port.
+			if err := natTable(ipv6, "-A", "OUTPUT", "-p", "tcp", "-m", "tcp", "--dport", fmt.Sprintf("%d", altPort(port)), "-j", "REDIRECT", "--to-ports", fmt.Sprintf("%d", port)); err != nil {
+				return err
+			}
+			// Send the altPort.
+			return localE.Send(portAlt(port))
+		}))
+	}()
+	if err := connectTCP(e, false); err != nil {
 		return err
 	}
-
-	timeout := 20 * time.Second
-	localAddr := net.TCPAddr{
-		IP:   net.ParseIP(localIP(ipv6)),
-		Port: acceptPort,
-	}
-
-	// Starts listening on port.
-	lConn, err := net.ListenTCP("tcp", &localAddr)
-	if err != nil {
-		return err
-	}
-	defer lConn.Close()
-
-	// Accept connections on port.
-	lConn.SetDeadline(time.Now().Add(timeout))
-	err = connectTCP(ip, dropPort, timeout)
-	if err != nil {
-		return err
-	}
-
-	conn, err := lConn.AcceptTCP()
-	if err != nil {
-		return err
-	}
-	conn.Close()
-
-	return nil
+	return <-listenCh
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (NATOutRedirectTCPPort) LocalAction(ip net.IP, ipv6 bool) error {
+func (NATOutRedirectTCPPort) LocalAction(e Exchanger, ipv6 bool) error {
 	return nil
 }
 
@@ -446,29 +467,28 @@ func (NATLoopbackSkipsPrerouting) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (NATLoopbackSkipsPrerouting) ContainerAction(ip net.IP, ipv6 bool) error {
-	// Redirect anything sent to localhost to an unused port.
-	dest := []byte{127, 0, 0, 1}
-	if err := natTable(ipv6, "-A", "PREROUTING", "-p", "tcp", "-j", "REDIRECT", "--to-port", fmt.Sprintf("%d", dropPort)); err != nil {
-		return err
-	}
-
-	// Establish a connection via localhost. If the PREROUTING rule did apply to
-	// loopback traffic, the connection would fail.
-	sendCh := make(chan error)
+func (NATLoopbackSkipsPrerouting) ContainerAction(e Exchanger, ipv6 bool) error {
+	listenCh := make(chan error)
+	localE := makeLocalExchange(ipv6)
 	go func() {
+		if err := listenTCP(localE); err != nil {
+			return err
+		}
+
+		// Redirect anything sent to localhost to an unused port.
+		dest := []byte{127, 0, 0, 1}
+		if err := natTable(ipv6, "-A", "PREROUTING", "-p", "tcp", "-j", "REDIRECT", "--to-port", fmt.Sprintf("%d", dropPort)); err != nil {
+			return err
+		}
+		<-readyCh // Wait until ready.
 		sendCh <- connectTCP(dest, acceptPort, sendloopDuration)
 	}()
 
-	if err := listenTCP(acceptPort, sendloopDuration); err != nil {
-		return err
-	}
 	return <-sendCh
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (NATLoopbackSkipsPrerouting) LocalAction(ip net.IP, ipv6 bool) error {
-	// No-op.
+func (NATLoopbackSkipsPrerouting) LocalAction(e Exchanger, ipv6 bool) error {
 	return nil
 }
 
@@ -482,25 +502,27 @@ func (NATPreOriginalDst) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (NATPreOriginalDst) ContainerAction(ip net.IP, ipv6 bool) error {
-	// Redirect incoming TCP connections to acceptPort.
-	if err := natTable(ipv6, "-A", "PREROUTING",
-		"-p", "tcp",
-		"--destination-port", fmt.Sprintf("%d", dropPort),
-		"-j", "REDIRECT", "--to-port", fmt.Sprintf("%d", acceptPort)); err != nil {
-		return err
-	}
-
+func (NATPreOriginalDst) ContainerAction(e Exchanger, ipv6 bool) error {
 	addrs, err := getInterfaceAddrs(ipv6)
 	if err != nil {
 		return err
 	}
-	return listenForRedirectedConn(ipv6, addrs)
+	return listenForRedirectedConn(localSend(func(port int) error {
+		// Redirect incoming TCP connections from portAlt to port.
+		if err := natTable(ipv6, "-A", "PREROUTING",
+			"-p", "tcp",
+			"--destination-port", fmt.Sprintf("%d", portAlt(port)),
+			"-j", "REDIRECT", "--to-port", fmt.Sprintf("%d", port)); err != nil {
+			return err
+		}
+		// Send portAlt to the other side.
+		return e.Send(portAlt(port))
+	}), ipv6, addrs)
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (NATPreOriginalDst) LocalAction(ip net.IP, ipv6 bool) error {
-	return connectTCP(ip, dropPort, sendloopDuration)
+func (NATPreOriginalDst) LocalAction(e Exchanger, ipv6 bool) error {
+	return connectTCP(e, sendloopDuration)
 }
 
 // NATOutOriginalDst tests that SO_ORIGINAL_DST returns the pre-NAT destination
@@ -513,73 +535,51 @@ func (NATOutOriginalDst) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (NATOutOriginalDst) ContainerAction(ip net.IP, ipv6 bool) error {
-	// Redirect incoming TCP connections to acceptPort.
-	if err := natTable(ipv6, "-A", "OUTPUT", "-p", "tcp", "-j", "REDIRECT", "--to-port", fmt.Sprintf("%d", acceptPort)); err != nil {
-		return err
-	}
-
-	connCh := make(chan error)
+func (NATOutOriginalDst) ContainerAction(e Exchanger, ipv6 bool) error {
+	localE := makeLocalExchange(ipv6)
 	go func() {
-		connCh <- connectTCP(ip, dropPort, sendloopDuration)
+		connCh <- connectTCP(localE, sendloopDuration)
 	}()
-
-	if err := listenForRedirectedConn(ipv6, []net.IP{ip}); err != nil {
+	if err := listenForRedirectedConn(localSend(func(port int) error {
+		// Redirect incoming TCP connections.
+		if err := natTable(ipv6, "-A", "OUTPUT", "-p", "tcp", "-j", "REDIRECT", "--to-port", fmt.Sprintf("%d", port)); err != nil {
+			return err
+		}
+		// Send the portAlt.
+		return localE.Send(portAlt(port))
+	}), ipv6, []net.IP{ip}); err != nil {
 		return err
 	}
 	return <-connCh
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (NATOutOriginalDst) LocalAction(ip net.IP, ipv6 bool) error {
-	// No-op.
+func (NATOutOriginalDst) LocalAction(e Exchanger, ipv6 bool) error {
 	return nil
 }
 
-func listenForRedirectedConn(ipv6 bool, originalDsts []net.IP) error {
-	// The net package doesn't give guarantee access to the connection's
-	// underlying FD, and thus we cannot call getsockopt. We have to use
-	// traditional syscalls for SO_ORIGINAL_DST.
+func listenForRedirectedConn(e Exchanger, ipv6 bool, originalDsts []net.IP) error {
+	// Verify that, despite listening on acceptPort, SO_ORIGINAL_DST
+	// indicates the packet was sent to originalDst:dropPort.
+	sockfd, port, err := rawTCPSocket(ipv6)
 
-	// Create the listening socket, bind, listen, and accept.
-	family := syscall.AF_INET
-	if ipv6 {
-		family = syscall.AF_INET6
-	}
-	sockfd, err := syscall.Socket(family, syscall.SOCK_STREAM, 0)
-	if err != nil {
-		return err
-	}
-	defer syscall.Close(sockfd)
-
-	var bindAddr syscall.Sockaddr
-	if ipv6 {
-		bindAddr = &syscall.SockaddrInet6{
-			Port: acceptPort,
-			Addr: [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, // in6addr_any
-		}
-	} else {
-		bindAddr = &syscall.SockaddrInet4{
-			Port: acceptPort,
-			Addr: [4]byte{0, 0, 0, 0}, // INADDR_ANY
-		}
-	}
-	if err := syscall.Bind(sockfd, bindAddr); err != nil {
-		return err
-	}
-
+	// Stack listening.
 	if err := syscall.Listen(sockfd, 1); err != nil {
 		return err
 	}
 
+	// Send the port.
+	if err := e.Send(port); err != nil {
+		return err
+	}
+
+	// Accept a new connection.
 	connfd, _, err := syscall.Accept(sockfd)
 	if err != nil {
 		return err
 	}
 	defer syscall.Close(connfd)
 
-	// Verify that, despite listening on acceptPort, SO_ORIGINAL_DST
-	// indicates the packet was sent to originalDst:dropPort.
 	if ipv6 {
 		got, err := originalDestination6(connfd)
 		if err != nil {
@@ -617,28 +617,29 @@ func listenForRedirectedConn(ipv6 bool, originalDsts []net.IP) error {
 	}
 }
 
-// loopbackTests runs an iptables rule and ensures that packets sent to
-// dest:dropPort are received by localhost:acceptPort.
-func loopbackTest(ipv6 bool, dest net.IP, args ...string) error {
-	if err := natTable(ipv6, args...); err != nil {
+// loopbackTests runs an iptables rule given a bound port.
+func loopbackTest(ipv6 bool, dest net.IP, rules func(boundPort, unboundPort int) []string) error {
+	listenCh := make(chan error)
+	localE := makeLocalExchange(ipv6)
+	go func() {
+		listenCh <- listenUDP(localSend(func(port int) error {
+			// Construct the natTable given the port.
+			if err := natTable(ipv6, rules(port, portAlt(port))); err != nil {
+				return err
+			}
+			return localE.Send(port)
+		}))
+	}()
+	if err := sendUDP(localRecv(func() (net.IP, int, error) {
+		ip, port, err := localE.Recv()
+		if err != nil {
+			return ip, port, err
+		}
+		// Override the destination.
+		return dest, port, nil
+	})); err != nil {
 		return err
 	}
-	sendCh := make(chan error)
-	listenCh := make(chan error)
-	go func() {
-		sendCh <- sendUDPLoop(dest, dropPort, sendloopDuration)
-	}()
-	go func() {
-		listenCh <- listenUDP(acceptPort, sendloopDuration)
-	}()
-	select {
-	case err := <-listenCh:
-		if err != nil {
-			return err
-		}
-	case <-time.After(sendloopDuration):
-		return errors.New("timed out")
-	}
-	// sendCh will always take the full sendloop time.
-	return <-sendCh
+	return <-listenCh
 }
+*/

@@ -16,7 +16,6 @@ package iptables
 
 import (
 	"fmt"
-	"net"
 )
 
 func init() {
@@ -52,25 +51,27 @@ func (FilterOutputDropTCPDestPort) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (FilterOutputDropTCPDestPort) ContainerAction(ip net.IP, ipv6 bool) error {
-	if err := filterTable(ipv6, "-A", "OUTPUT", "-p", "tcp", "-m", "tcp", "--dport", "1024:65535", "-j", "DROP"); err != nil {
+func (FilterOutputDropTCPDestPort) ContainerAction(e Exchanger, ipv6 bool) error {
+	// Drop anything targeting the bound remote port.
+	_, remotePort, err := e.Recv()
+	if err != nil {
 		return err
 	}
-
-	// Listen for TCP packets on accept port.
-	if err := listenTCP(acceptPort, sendloopDuration); err == nil {
-		return fmt.Errorf("connection destined to port %d should not be accepted, but got accepted", dropPort)
+	if err := filterTable(ipv6, "-A", "OUTPUT", "-p", "tcp", "-m", "tcp", "--dport", fmt.Sprintf("%d", remotePort), "-j", "DROP"); err != nil {
+		return err
 	}
-
+	if err := listenTCP(e); err == nil {
+		return fmt.Errorf("connection should not be accepted, but got accepted")
+	}
 	return nil
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (FilterOutputDropTCPDestPort) LocalAction(ip net.IP, ipv6 bool) error {
-	if err := connectTCP(ip, acceptPort, sendloopDuration); err == nil {
-		return fmt.Errorf("connection on port %d should not be accepted, but got accepted", dropPort)
+func (FilterOutputDropTCPDestPort) LocalAction(e Exchanger, ipv6 bool) error {
+	// Note: we send our bound ephemeral port before connecting.
+	if err := connectTCP(e, true, ipv6); err == nil {
+		return fmt.Errorf("connection should not be accepted, but got accepted")
 	}
-
 	return nil
 }
 
@@ -84,25 +85,24 @@ func (FilterOutputDropTCPSrcPort) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (FilterOutputDropTCPSrcPort) ContainerAction(ip net.IP, ipv6 bool) error {
-	if err := filterTable(ipv6, "-A", "OUTPUT", "-p", "tcp", "-m", "tcp", "--sport", fmt.Sprintf("%d", dropPort), "-j", "DROP"); err != nil {
-		return err
+func (FilterOutputDropTCPSrcPort) ContainerAction(e Exchanger, ipv6 bool) error {
+	if err := listenTCP(localSend(func(port int) error {
+		// Filtering anything coming from the bound server port.
+		if err := filterTable(ipv6, "-A", "OUTPUT", "-p", "tcp", "-m", "tcp", "--sport", fmt.Sprintf("%d", port), "-j", "DROP"); err != nil {
+			return err
+		}
+		return e.Send(port)
+	})); err == nil {
+		return fmt.Errorf("connection should not be accepted, but got accepted")
 	}
-
-	// Listen for TCP packets on drop port.
-	if err := listenTCP(dropPort, sendloopDuration); err == nil {
-		return fmt.Errorf("connection on port %d should not be accepted, but got accepted", dropPort)
-	}
-
 	return nil
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (FilterOutputDropTCPSrcPort) LocalAction(ip net.IP, ipv6 bool) error {
-	if err := connectTCP(ip, dropPort, sendloopDuration); err == nil {
-		return fmt.Errorf("connection destined to port %d should not be accepted, but got accepted", dropPort)
+func (FilterOutputDropTCPSrcPort) LocalAction(e Exchanger, ipv6 bool) error {
+	if err := connectTCP(e, false, ipv6); err == nil {
+		return fmt.Errorf("connection should not be accepted, but got accepted")
 	}
-
 	return nil
 }
 
@@ -115,18 +115,16 @@ func (FilterOutputAcceptTCPOwner) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (FilterOutputAcceptTCPOwner) ContainerAction(ip net.IP, ipv6 bool) error {
+func (FilterOutputAcceptTCPOwner) ContainerAction(e Exchanger, ipv6 bool) error {
 	if err := filterTable(ipv6, "-A", "OUTPUT", "-p", "tcp", "-m", "owner", "--uid-owner", "root", "-j", "ACCEPT"); err != nil {
 		return err
 	}
-
-	// Listen for TCP packets on accept port.
-	return listenTCP(acceptPort, sendloopDuration)
+	return listenTCP(e)
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (FilterOutputAcceptTCPOwner) LocalAction(ip net.IP, ipv6 bool) error {
-	return connectTCP(ip, acceptPort, sendloopDuration)
+func (FilterOutputAcceptTCPOwner) LocalAction(e Exchanger, ipv6 bool) error {
+	return connectTCP(e, false, ipv6)
 }
 
 // FilterOutputDropTCPOwner tests that TCP connections from uid owner are dropped.
@@ -138,23 +136,20 @@ func (FilterOutputDropTCPOwner) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (FilterOutputDropTCPOwner) ContainerAction(ip net.IP, ipv6 bool) error {
+func (FilterOutputDropTCPOwner) ContainerAction(e Exchanger, ipv6 bool) error {
 	if err := filterTable(ipv6, "-A", "OUTPUT", "-p", "tcp", "-m", "owner", "--uid-owner", "root", "-j", "DROP"); err != nil {
 		return err
 	}
-
-	// Listen for TCP packets on accept port.
-	if err := listenTCP(acceptPort, sendloopDuration); err == nil {
-		return fmt.Errorf("connection on port %d should be dropped, but got accepted", acceptPort)
+	if err := listenTCP(e); err == nil {
+		return fmt.Errorf("connection should be dropped, but got accepted")
 	}
-
 	return nil
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (FilterOutputDropTCPOwner) LocalAction(ip net.IP, ipv6 bool) error {
-	if err := connectTCP(ip, acceptPort, sendloopDuration); err == nil {
-		return fmt.Errorf("connection destined to port %d should be dropped, but got accepted", acceptPort)
+func (FilterOutputDropTCPOwner) LocalAction(e Exchanger, ipv6 bool) error {
+	if err := connectTCP(e, false, ipv6); err == nil {
+		return fmt.Errorf("connection should be dropped, but got accepted")
 	}
 
 	return nil
@@ -169,19 +164,16 @@ func (FilterOutputAcceptUDPOwner) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (FilterOutputAcceptUDPOwner) ContainerAction(ip net.IP, ipv6 bool) error {
+func (FilterOutputAcceptUDPOwner) ContainerAction(e Exchanger, ipv6 bool) error {
 	if err := filterTable(ipv6, "-A", "OUTPUT", "-p", "udp", "-m", "owner", "--uid-owner", "root", "-j", "ACCEPT"); err != nil {
 		return err
 	}
-
-	// Send UDP packets on acceptPort.
-	return sendUDPLoop(ip, acceptPort, sendloopDuration)
+	return sendUDP(e)
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (FilterOutputAcceptUDPOwner) LocalAction(ip net.IP, ipv6 bool) error {
-	// Listen for UDP packets on acceptPort.
-	return listenUDP(acceptPort, sendloopDuration)
+func (FilterOutputAcceptUDPOwner) LocalAction(e Exchanger, ipv6 bool) error {
+	return listenUDP(e)
 }
 
 // FilterOutputDropUDPOwner tests that UDP packets from uid owner are dropped.
@@ -193,22 +185,20 @@ func (FilterOutputDropUDPOwner) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (FilterOutputDropUDPOwner) ContainerAction(ip net.IP, ipv6 bool) error {
+func (FilterOutputDropUDPOwner) ContainerAction(e Exchanger, ipv6 bool) error {
 	if err := filterTable(ipv6, "-A", "OUTPUT", "-p", "udp", "-m", "owner", "--uid-owner", "root", "-j", "DROP"); err != nil {
 		return err
 	}
 
 	// Send UDP packets on dropPort.
-	return sendUDPLoop(ip, dropPort, sendloopDuration)
+	return sendUDP(e)
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (FilterOutputDropUDPOwner) LocalAction(ip net.IP, ipv6 bool) error {
-	// Listen for UDP packets on dropPort.
-	if err := listenUDP(dropPort, sendloopDuration); err == nil {
+func (FilterOutputDropUDPOwner) LocalAction(e Exchanger, ipv6 bool) error {
+	if err := listenUDP(e); err == nil {
 		return fmt.Errorf("packets should not be received")
 	}
-
 	return nil
 }
 
@@ -222,17 +212,15 @@ func (FilterOutputOwnerFail) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (FilterOutputOwnerFail) ContainerAction(ip net.IP, ipv6 bool) error {
+func (FilterOutputOwnerFail) ContainerAction(e Exchanger, ipv6 bool) error {
 	if err := filterTable(ipv6, "-A", "OUTPUT", "-p", "udp", "-m", "owner", "-j", "ACCEPT"); err == nil {
 		return fmt.Errorf("Invalid argument")
 	}
-
 	return nil
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (FilterOutputOwnerFail) LocalAction(ip net.IP, ipv6 bool) error {
-	// no-op.
+func (FilterOutputOwnerFail) LocalAction(e Exchanger, ipv6 bool) error {
 	return nil
 }
 
@@ -245,18 +233,18 @@ func (FilterOutputAcceptGIDOwner) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (FilterOutputAcceptGIDOwner) ContainerAction(ip net.IP, ipv6 bool) error {
+func (FilterOutputAcceptGIDOwner) ContainerAction(e Exchanger, ipv6 bool) error {
 	if err := filterTable(ipv6, "-A", "OUTPUT", "-p", "tcp", "-m", "owner", "--gid-owner", "root", "-j", "ACCEPT"); err != nil {
 		return err
 	}
 
 	// Listen for TCP packets on accept port.
-	return listenTCP(acceptPort, sendloopDuration)
+	return listenTCP(e)
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (FilterOutputAcceptGIDOwner) LocalAction(ip net.IP, ipv6 bool) error {
-	return connectTCP(ip, acceptPort, sendloopDuration)
+func (FilterOutputAcceptGIDOwner) LocalAction(e Exchanger, ipv6 bool) error {
+	return connectTCP(e, false, ipv6)
 }
 
 // FilterOutputDropGIDOwner tests that TCP connections from gid owner are dropped.
@@ -268,25 +256,21 @@ func (FilterOutputDropGIDOwner) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (FilterOutputDropGIDOwner) ContainerAction(ip net.IP, ipv6 bool) error {
+func (FilterOutputDropGIDOwner) ContainerAction(e Exchanger, ipv6 bool) error {
 	if err := filterTable(ipv6, "-A", "OUTPUT", "-p", "tcp", "-m", "owner", "--gid-owner", "root", "-j", "DROP"); err != nil {
 		return err
 	}
-
-	// Listen for TCP packets on accept port.
-	if err := listenTCP(acceptPort, sendloopDuration); err == nil {
-		return fmt.Errorf("connection on port %d should not be accepted, but got accepted", acceptPort)
+	if err := listenTCP(e); err == nil {
+		return fmt.Errorf("connection should not be accepted, but got accepted")
 	}
-
 	return nil
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (FilterOutputDropGIDOwner) LocalAction(ip net.IP, ipv6 bool) error {
-	if err := connectTCP(ip, acceptPort, sendloopDuration); err == nil {
-		return fmt.Errorf("connection destined to port %d should not be accepted, but got accepted", acceptPort)
+func (FilterOutputDropGIDOwner) LocalAction(e Exchanger, ipv6 bool) error {
+	if err := connectTCP(e, false, ipv6); err == nil {
+		return fmt.Errorf("connection should not be accepted, but got accepted")
 	}
-
 	return nil
 }
 
@@ -299,7 +283,7 @@ func (FilterOutputInvertGIDOwner) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (FilterOutputInvertGIDOwner) ContainerAction(ip net.IP, ipv6 bool) error {
+func (FilterOutputInvertGIDOwner) ContainerAction(e Exchanger, ipv6 bool) error {
 	rules := [][]string{
 		{"-A", "OUTPUT", "-p", "tcp", "-m", "owner", "!", "--gid-owner", "root", "-j", "ACCEPT"},
 		{"-A", "OUTPUT", "-p", "tcp", "-j", "DROP"},
@@ -307,21 +291,17 @@ func (FilterOutputInvertGIDOwner) ContainerAction(ip net.IP, ipv6 bool) error {
 	if err := filterTableRules(ipv6, rules); err != nil {
 		return err
 	}
-
-	// Listen for TCP packets on accept port.
-	if err := listenTCP(acceptPort, sendloopDuration); err == nil {
-		return fmt.Errorf("connection on port %d should not be accepted, but got accepted", acceptPort)
+	if err := listenTCP(e); err == nil {
+		return fmt.Errorf("connection on should not be accepted, but got accepted")
 	}
-
 	return nil
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (FilterOutputInvertGIDOwner) LocalAction(ip net.IP, ipv6 bool) error {
-	if err := connectTCP(ip, acceptPort, sendloopDuration); err == nil {
-		return fmt.Errorf("connection destined to port %d should not be accepted, but got accepted", acceptPort)
+func (FilterOutputInvertGIDOwner) LocalAction(e Exchanger, ipv6 bool) error {
+	if err := connectTCP(e, false, ipv6); err == nil {
+		return fmt.Errorf("connection should not be accepted, but got accepted")
 	}
-
 	return nil
 }
 
@@ -334,7 +314,7 @@ func (FilterOutputInvertUIDOwner) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (FilterOutputInvertUIDOwner) ContainerAction(ip net.IP, ipv6 bool) error {
+func (FilterOutputInvertUIDOwner) ContainerAction(e Exchanger, ipv6 bool) error {
 	rules := [][]string{
 		{"-A", "OUTPUT", "-p", "tcp", "-m", "owner", "!", "--uid-owner", "root", "-j", "DROP"},
 		{"-A", "OUTPUT", "-p", "tcp", "-j", "ACCEPT"},
@@ -344,12 +324,12 @@ func (FilterOutputInvertUIDOwner) ContainerAction(ip net.IP, ipv6 bool) error {
 	}
 
 	// Listen for TCP packets on accept port.
-	return listenTCP(acceptPort, sendloopDuration)
+	return listenTCP(e)
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (FilterOutputInvertUIDOwner) LocalAction(ip net.IP, ipv6 bool) error {
-	return connectTCP(ip, acceptPort, sendloopDuration)
+func (FilterOutputInvertUIDOwner) LocalAction(e Exchanger, ipv6 bool) error {
+	return connectTCP(e, false, ipv6)
 }
 
 // FilterOutputInvertUIDAndGIDOwner tests that TCP connections from uid and gid
@@ -362,7 +342,7 @@ func (FilterOutputInvertUIDAndGIDOwner) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (FilterOutputInvertUIDAndGIDOwner) ContainerAction(ip net.IP, ipv6 bool) error {
+func (FilterOutputInvertUIDAndGIDOwner) ContainerAction(e Exchanger, ipv6 bool) error {
 	rules := [][]string{
 		{"-A", "OUTPUT", "-p", "tcp", "-m", "owner", "!", "--uid-owner", "root", "!", "--gid-owner", "root", "-j", "ACCEPT"},
 		{"-A", "OUTPUT", "-p", "tcp", "-j", "DROP"},
@@ -370,21 +350,17 @@ func (FilterOutputInvertUIDAndGIDOwner) ContainerAction(ip net.IP, ipv6 bool) er
 	if err := filterTableRules(ipv6, rules); err != nil {
 		return err
 	}
-
-	// Listen for TCP packets on accept port.
-	if err := listenTCP(acceptPort, sendloopDuration); err == nil {
-		return fmt.Errorf("connection on port %d should not be accepted, but got accepted", acceptPort)
+	if err := listenTCP(e); err == nil {
+		return fmt.Errorf("connection should not be accepted, but got accepted")
 	}
-
 	return nil
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (FilterOutputInvertUIDAndGIDOwner) LocalAction(ip net.IP, ipv6 bool) error {
-	if err := connectTCP(ip, acceptPort, sendloopDuration); err == nil {
-		return fmt.Errorf("connection destined to port %d should not be accepted, but got accepted", acceptPort)
+func (FilterOutputInvertUIDAndGIDOwner) LocalAction(e Exchanger, ipv6 bool) error {
+	if err := connectTCP(e, false, ipv6); err == nil {
+		return fmt.Errorf("connection should not be accepted, but got accepted")
 	}
-
 	return nil
 }
 
@@ -398,7 +374,11 @@ func (FilterOutputDestination) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (FilterOutputDestination) ContainerAction(ip net.IP, ipv6 bool) error {
+func (FilterOutputDestination) ContainerAction(e Exchanger, ipv6 bool) error {
+	ip, _, err := e.Recv()
+	if err != nil {
+		return err
+	}
 	rules := [][]string{
 		{"-A", "OUTPUT", "-d", ip.String(), "-j", "ACCEPT"},
 		{"-P", "OUTPUT", "DROP"},
@@ -406,13 +386,16 @@ func (FilterOutputDestination) ContainerAction(ip net.IP, ipv6 bool) error {
 	if err := filterTableRules(ipv6, rules); err != nil {
 		return err
 	}
-
-	return sendUDPLoop(ip, acceptPort, sendloopDuration)
+	return sendUDP(e)
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (FilterOutputDestination) LocalAction(ip net.IP, ipv6 bool) error {
-	return listenUDP(acceptPort, sendloopDuration)
+func (FilterOutputDestination) LocalAction(e Exchanger, ipv6 bool) error {
+	// Note: send out IP for the rule above.
+	if err := e.Send(0); err != nil {
+		return err
+	}
+	return listenUDP(e)
 }
 
 // FilterOutputInvertDestination tests that we can selectively allow packets
@@ -425,7 +408,7 @@ func (FilterOutputInvertDestination) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (FilterOutputInvertDestination) ContainerAction(ip net.IP, ipv6 bool) error {
+func (FilterOutputInvertDestination) ContainerAction(e Exchanger, ipv6 bool) error {
 	rules := [][]string{
 		{"-A", "OUTPUT", "!", "-d", localIP(ipv6), "-j", "ACCEPT"},
 		{"-P", "OUTPUT", "DROP"},
@@ -433,13 +416,12 @@ func (FilterOutputInvertDestination) ContainerAction(ip net.IP, ipv6 bool) error
 	if err := filterTableRules(ipv6, rules); err != nil {
 		return err
 	}
-
-	return sendUDPLoop(ip, acceptPort, sendloopDuration)
+	return sendUDP(e)
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (FilterOutputInvertDestination) LocalAction(ip net.IP, ipv6 bool) error {
-	return listenUDP(acceptPort, sendloopDuration)
+func (FilterOutputInvertDestination) LocalAction(e Exchanger, ipv6 bool) error {
+	return listenUDP(e)
 }
 
 // FilterOutputInterfaceAccept tests that packets are sent via interface
@@ -452,7 +434,7 @@ func (FilterOutputInterfaceAccept) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (FilterOutputInterfaceAccept) ContainerAction(ip net.IP, ipv6 bool) error {
+func (FilterOutputInterfaceAccept) ContainerAction(e Exchanger, ipv6 bool) error {
 	ifname, ok := getInterfaceName()
 	if !ok {
 		return fmt.Errorf("no interface is present, except loopback")
@@ -460,13 +442,12 @@ func (FilterOutputInterfaceAccept) ContainerAction(ip net.IP, ipv6 bool) error {
 	if err := filterTable(ipv6, "-A", "OUTPUT", "-p", "udp", "-o", ifname, "-j", "ACCEPT"); err != nil {
 		return err
 	}
-
-	return sendUDPLoop(ip, acceptPort, sendloopDuration)
+	return sendUDP(e)
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (FilterOutputInterfaceAccept) LocalAction(ip net.IP, ipv6 bool) error {
-	return listenUDP(acceptPort, sendloopDuration)
+func (FilterOutputInterfaceAccept) LocalAction(e Exchanger, ipv6 bool) error {
+	return listenUDP(e)
 }
 
 // FilterOutputInterfaceDrop tests that packets are not sent via interface
@@ -479,7 +460,7 @@ func (FilterOutputInterfaceDrop) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (FilterOutputInterfaceDrop) ContainerAction(ip net.IP, ipv6 bool) error {
+func (FilterOutputInterfaceDrop) ContainerAction(e Exchanger, ipv6 bool) error {
 	ifname, ok := getInterfaceName()
 	if !ok {
 		return fmt.Errorf("no interface is present, except loopback")
@@ -488,15 +469,14 @@ func (FilterOutputInterfaceDrop) ContainerAction(ip net.IP, ipv6 bool) error {
 		return err
 	}
 
-	return sendUDPLoop(ip, acceptPort, sendloopDuration)
+	return sendUDP(e)
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (FilterOutputInterfaceDrop) LocalAction(ip net.IP, ipv6 bool) error {
-	if err := listenUDP(acceptPort, sendloopDuration); err == nil {
-		return fmt.Errorf("packets should not be received on port %v, but are received", acceptPort)
+func (FilterOutputInterfaceDrop) LocalAction(e Exchanger, ipv6 bool) error {
+	if err := listenUDP(e); err == nil {
+		return fmt.Errorf("packets should not be received, but are received")
 	}
-
 	return nil
 }
 
@@ -510,17 +490,16 @@ func (FilterOutputInterface) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (FilterOutputInterface) ContainerAction(ip net.IP, ipv6 bool) error {
+func (FilterOutputInterface) ContainerAction(e Exchanger, ipv6 bool) error {
 	if err := filterTable(ipv6, "-A", "OUTPUT", "-p", "udp", "-o", "lo", "-j", "DROP"); err != nil {
 		return err
 	}
-
-	return sendUDPLoop(ip, acceptPort, sendloopDuration)
+	return sendUDP(e)
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (FilterOutputInterface) LocalAction(ip net.IP, ipv6 bool) error {
-	return listenUDP(acceptPort, sendloopDuration)
+func (FilterOutputInterface) LocalAction(e Exchanger, ipv6 bool) error {
+	return listenUDP(e)
 }
 
 // FilterOutputInterfaceBeginsWith tests that packets are not sent via an
@@ -533,20 +512,18 @@ func (FilterOutputInterfaceBeginsWith) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (FilterOutputInterfaceBeginsWith) ContainerAction(ip net.IP, ipv6 bool) error {
+func (FilterOutputInterfaceBeginsWith) ContainerAction(e Exchanger, ipv6 bool) error {
 	if err := filterTable(ipv6, "-A", "OUTPUT", "-p", "udp", "-o", "e+", "-j", "DROP"); err != nil {
 		return err
 	}
-
-	return sendUDPLoop(ip, acceptPort, sendloopDuration)
+	return sendUDP(e)
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (FilterOutputInterfaceBeginsWith) LocalAction(ip net.IP, ipv6 bool) error {
-	if err := listenUDP(acceptPort, sendloopDuration); err == nil {
-		return fmt.Errorf("packets should not be received on port %v, but are received", acceptPort)
+func (FilterOutputInterfaceBeginsWith) LocalAction(e Exchanger, ipv6 bool) error {
+	if err := listenUDP(e); err == nil {
+		return fmt.Errorf("packets should not be received, but are received")
 	}
-
 	return nil
 }
 
@@ -560,25 +537,21 @@ func (FilterOutputInterfaceInvertDrop) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (FilterOutputInterfaceInvertDrop) ContainerAction(ip net.IP, ipv6 bool) error {
+func (FilterOutputInterfaceInvertDrop) ContainerAction(e Exchanger, ipv6 bool) error {
 	if err := filterTable(ipv6, "-A", "OUTPUT", "-p", "tcp", "!", "-o", "lo", "-j", "DROP"); err != nil {
 		return err
 	}
-
-	// Listen for TCP packets on accept port.
-	if err := listenTCP(acceptPort, sendloopDuration); err == nil {
-		return fmt.Errorf("connection on port %d should not be accepted, but got accepted", acceptPort)
+	if err := listenTCP(e); err == nil {
+		return fmt.Errorf("connection on should not be accepted, but got accepted")
 	}
-
 	return nil
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (FilterOutputInterfaceInvertDrop) LocalAction(ip net.IP, ipv6 bool) error {
-	if err := connectTCP(ip, acceptPort, sendloopDuration); err == nil {
-		return fmt.Errorf("connection destined to port %d should not be accepted, but got accepted", acceptPort)
+func (FilterOutputInterfaceInvertDrop) LocalAction(e Exchanger, ipv6 bool) error {
+	if err := connectTCP(e, false, ipv6); err == nil {
+		return fmt.Errorf("connection should not be accepted, but got accepted")
 	}
-
 	return nil
 }
 
@@ -592,16 +565,16 @@ func (FilterOutputInterfaceInvertAccept) Name() string {
 }
 
 // ContainerAction implements TestCase.ContainerAction.
-func (FilterOutputInterfaceInvertAccept) ContainerAction(ip net.IP, ipv6 bool) error {
+func (FilterOutputInterfaceInvertAccept) ContainerAction(e Exchanger, ipv6 bool) error {
 	if err := filterTable(ipv6, "-A", "OUTPUT", "-p", "tcp", "!", "-o", "lo", "-j", "ACCEPT"); err != nil {
 		return err
 	}
 
 	// Listen for TCP packets on accept port.
-	return listenTCP(acceptPort, sendloopDuration)
+	return listenTCP(e)
 }
 
 // LocalAction implements TestCase.LocalAction.
-func (FilterOutputInterfaceInvertAccept) LocalAction(ip net.IP, ipv6 bool) error {
-	return connectTCP(ip, acceptPort, sendloopDuration)
+func (FilterOutputInterfaceInvertAccept) LocalAction(e Exchanger, ipv6 bool) error {
+	return connectTCP(e, false, ipv6)
 }

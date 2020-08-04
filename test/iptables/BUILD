@@ -6,6 +6,7 @@ go_library(
     name = "iptables",
     testonly = 1,
     srcs = [
+        "exchanger.go",
         "filter_input.go",
         "filter_output.go",
         "iptables.go",
