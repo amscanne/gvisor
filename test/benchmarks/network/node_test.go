@@ -24,18 +24,16 @@ import (
 	"gvisor.dev/gvisor/test/benchmarks/tools"
 )
 
-// BenchmarkNode runs 10K requests using 'hey' against a Node server run on
+// BenchmarkNode runs requests using 'hey' against a Node server run on
 // 'runtime'. The server responds to requests by grabbing some data in a
 // redis instance and returns the data in its reponse. The test loops through
 // increasing amounts of concurency for requests.
 func BenchmarkNode(b *testing.B) {
-	requests := 10000
 	concurrency := []int{1, 5, 10, 25}
-
 	for _, c := range concurrency {
 		b.Run(fmt.Sprintf("Concurrency%d", c), func(b *testing.B) {
 			hey := &tools.Hey{
-				Requests:    requests,
+				Requests:    b.N * c, // Requests b.N requests per thread.
 				Concurrency: c,
 			}
 			runNode(b, hey)
@@ -113,19 +111,17 @@ func runNode(b *testing.B, hey *tools.Hey) {
 	nodeApp.RestartProfiles()
 	b.ResetTimer()
 
-	for i := 0; i < b.N; i++ {
-		// the client should run on Native.
-		client := clientMachine.GetNativeContainer(ctx, b)
-		out, err := client.Run(ctx, dockerutil.RunOpts{
-			Image: "benchmarks/hey",
-		}, heyCmd...)
-		if err != nil {
-			b.Fatalf("hey container failed: %v logs: %s", err, out)
-		}
-
-		// Stop the timer to parse the data and report stats.
-		b.StopTimer()
-		hey.Report(b, out)
-		b.StartTimer()
+	// the client should run on Native.
+	client := clientMachine.GetNativeContainer(ctx, b)
+	out, err := client.Run(ctx, dockerutil.RunOpts{
+		Image: "benchmarks/hey",
+	}, heyCmd...)
+	if err != nil {
+		b.Fatalf("hey container failed: %v logs: %s", err, out)
 	}
+
+	// Stop the timer to parse the data and report stats.
+	b.StopTimer()
+	hey.Report(b, out)
+	b.StartTimer()
 }

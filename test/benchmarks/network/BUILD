@@ -17,6 +17,7 @@ go_test(
         "iperf_test.go",
         "nginx_test.go",
         "node_test.go",
+        "ruby_test.go",
     ],
     library = ":network",
     tags = [
@@ -24,6 +25,7 @@ go_test(
         "manual",
         "local",
     ],
+    visibility = ["//:sandbox"],
     deps = [
         "//pkg/test/dockerutil",
         "//pkg/test/testutil",

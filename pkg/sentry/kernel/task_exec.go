@@ -199,11 +199,11 @@ func (r *runSyscallAfterExecStop) execute(t *Task) taskRunState {
 	t.tg.pidns.owner.mu.Unlock()
 
 	oldFDTable := t.fdTable
-	t.fdTable = t.fdTable.Fork()
-	oldFDTable.DecRef()
+	t.fdTable = t.fdTable.Fork(t)
+	oldFDTable.DecRef(t)
 
 	// Remove FDs with the CloseOnExec flag set.
-	t.fdTable.RemoveIf(func(_ *fs.File, _ *vfs.FileDescription, flags FDFlags) bool {
+	t.fdTable.RemoveIf(t, func(_ *fs.File, _ *vfs.FileDescription, flags FDFlags) bool {
 		return flags.CloseOnExec
 	})
 
@@ -226,6 +226,7 @@ func (r *runSyscallAfterExecStop) execute(t *Task) taskRunState {
 	t.tc = *r.tc
 	t.mu.Unlock()
 	t.unstopVforkParent()
+	t.p.FullStateChanged()
 	// NOTE(b/30316266): All locks must be dropped prior to calling Activate.
 	t.MemoryManager().Activate(t)
 

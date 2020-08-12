@@ -42,7 +42,12 @@ func (mm *MemoryManager) createVMALocked(ctx context.Context, opts memmap.MMapOp
 		Map32Bit: opts.Map32Bit,
 	})
 	if err != nil {
-		return vmaIterator{}, usermem.AddrRange{}, err
+		// Can't force without opts.Unmap and opts.Fixed.
+		if opts.Force && opts.Unmap && opts.Fixed {
+			addr = opts.Addr
+		} else {
+			return vmaIterator{}, usermem.AddrRange{}, err
+		}
 	}
 	ar, _ := addr.ToRange(opts.Length)
 
@@ -377,7 +382,7 @@ func (mm *MemoryManager) removeVMAsLocked(ctx context.Context, ar usermem.AddrRa
 			vma.mappable.RemoveMapping(ctx, mm, vmaAR, vma.off, vma.canWriteMappableLocked())
 		}
 		if vma.id != nil {
-			vma.id.DecRef()
+			vma.id.DecRef(ctx)
 		}
 		mm.usageAS -= uint64(vmaAR.Length())
 		if vma.isPrivateDataLocked() {
@@ -446,7 +451,7 @@ func (vmaSetFunctions) Merge(ar1 usermem.AddrRange, vma1 vma, ar2 usermem.AddrRa
 	}
 
 	if vma2.id != nil {
-		vma2.id.DecRef()
+		vma2.id.DecRef(context.Background())
 	}
 	return vma1, true
 }

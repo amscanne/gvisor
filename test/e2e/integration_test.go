@@ -167,6 +167,13 @@ func TestCheckpointRestore(t *testing.T) {
 		t.Skip("Pause/resume is not supported.")
 	}
 
+	// TODO(gvisor.dev/issue/3373): Remove after implementing.
+	if usingVFS2, err := dockerutil.UsingVFS2(); usingVFS2 {
+		t.Skip("CheckpointRestore not implemented in VFS2.")
+	} else if err != nil {
+		t.Fatalf("failed to read config for runtime %s: %v", dockerutil.Runtime(), err)
+	}
+
 	ctx := context.Background()
 	d := dockerutil.MakeContainer(ctx, t)
 	defer d.CleanUp(ctx)
@@ -461,6 +468,24 @@ func TestHostOverlayfsRewindDir(t *testing.T) {
 		Image:   "basic/hostoverlaytest",
 		WorkDir: "/root",
 	}, "./test_rewinddir"); err != nil {
+		t.Fatalf("docker run failed: %v", err)
+	} else if got != "" {
+		t.Errorf("test failed:\n%s", got)
+	}
+}
+
+// Basic test for linkat(2). Syscall tests requires CAP_DAC_READ_SEARCH and it
+// cannot use tricks like userns as root. For this reason, run a basic link test
+// to ensure some coverage.
+func TestLink(t *testing.T) {
+	ctx := context.Background()
+	d := dockerutil.MakeContainer(ctx, t)
+	defer d.CleanUp(ctx)
+
+	if got, err := d.Run(ctx, dockerutil.RunOpts{
+		Image:   "basic/linktest",
+		WorkDir: "/root",
+	}, "./link_test"); err != nil {
 		t.Fatalf("docker run failed: %v", err)
 	} else if got != "" {
 		t.Errorf("test failed:\n%s", got)

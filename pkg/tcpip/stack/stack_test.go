@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"fmt"
 	"math"
+	"net"
 	"sort"
 	"strings"
 	"testing"
@@ -34,6 +35,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
 	"gvisor.dev/gvisor/pkg/tcpip/link/loopback"
+	"gvisor.dev/gvisor/pkg/tcpip/network/arp"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -275,6 +277,17 @@ func (l *linkEPWithMockedAttach) Attach(d stack.NetworkDispatcher) {
 
 func (l *linkEPWithMockedAttach) isAttached() bool {
 	return l.attached
+}
+
+// Checks to see if list contains an address.
+func containsAddr(list []tcpip.ProtocolAddress, item tcpip.ProtocolAddress) bool {
+	for _, i := range list {
+		if i == item {
+			return true
+		}
+	}
+
+	return false
 }
 
 func TestNetworkReceive(t *testing.T) {
@@ -1704,7 +1717,7 @@ func testNicForAddressRange(t *testing.T, nicID tcpip.NICID, s *stack.Stack, sub
 
 	// Trying the next address should always fail since it is outside the range.
 	if gotNicID := s.CheckLocalAddress(0, fakeNetNumber, tcpip.Address(addrBytes)); gotNicID != 0 {
-		t.Errorf("got CheckLocalAddress(0, %d, %s) = %d, want = %d", fakeNetNumber, tcpip.Address(addrBytes), gotNicID, 0)
+		t.Errorf("got CheckLocalAddress(0, %d, %s) = %d, want = 0", fakeNetNumber, tcpip.Address(addrBytes), gotNicID)
 	}
 }
 
@@ -3089,6 +3102,13 @@ func TestIPv6SourceAddressSelectionScopeAndSameAddress(t *testing.T) {
 
 func TestAddRemoveIPv4BroadcastAddressOnNICEnableDisable(t *testing.T) {
 	const nicID = 1
+	broadcastAddr := tcpip.ProtocolAddress{
+		Protocol: header.IPv4ProtocolNumber,
+		AddressWithPrefix: tcpip.AddressWithPrefix{
+			Address:   header.IPv4Broadcast,
+			PrefixLen: 32,
+		},
+	}
 
 	e := loopback.New()
 	s := stack.New(stack.Options{
@@ -3099,49 +3119,41 @@ func TestAddRemoveIPv4BroadcastAddressOnNICEnableDisable(t *testing.T) {
 		t.Fatalf("CreateNIC(%d, _, %+v) = %s", nicID, nicOpts, err)
 	}
 
-	allStackAddrs := s.AllAddresses()
-	allNICAddrs, ok := allStackAddrs[nicID]
-	if !ok {
-		t.Fatalf("entry for %d missing from allStackAddrs = %+v", nicID, allStackAddrs)
-	}
-	if l := len(allNICAddrs); l != 0 {
-		t.Fatalf("got len(allNICAddrs) = %d, want = 0", l)
+	{
+		allStackAddrs := s.AllAddresses()
+		if allNICAddrs, ok := allStackAddrs[nicID]; !ok {
+			t.Fatalf("entry for %d missing from allStackAddrs = %+v", nicID, allStackAddrs)
+		} else if containsAddr(allNICAddrs, broadcastAddr) {
+			t.Fatalf("got allNICAddrs = %+v, don't want = %+v", allNICAddrs, broadcastAddr)
+		}
 	}
 
 	// Enabling the NIC should add the IPv4 broadcast address.
 	if err := s.EnableNIC(nicID); err != nil {
 		t.Fatalf("s.EnableNIC(%d): %s", nicID, err)
 	}
-	allStackAddrs = s.AllAddresses()
-	allNICAddrs, ok = allStackAddrs[nicID]
-	if !ok {
-		t.Fatalf("entry for %d missing from allStackAddrs = %+v", nicID, allStackAddrs)
-	}
-	if l := len(allNICAddrs); l != 1 {
-		t.Fatalf("got len(allNICAddrs) = %d, want = 1", l)
-	}
-	want := tcpip.ProtocolAddress{
-		Protocol: header.IPv4ProtocolNumber,
-		AddressWithPrefix: tcpip.AddressWithPrefix{
-			Address:   header.IPv4Broadcast,
-			PrefixLen: 32,
-		},
-	}
-	if allNICAddrs[0] != want {
-		t.Fatalf("got allNICAddrs[0] = %+v, want = %+v", allNICAddrs[0], want)
+
+	{
+		allStackAddrs := s.AllAddresses()
+		if allNICAddrs, ok := allStackAddrs[nicID]; !ok {
+			t.Fatalf("entry for %d missing from allStackAddrs = %+v", nicID, allStackAddrs)
+		} else if !containsAddr(allNICAddrs, broadcastAddr) {
+			t.Fatalf("got allNICAddrs = %+v, want = %+v", allNICAddrs, broadcastAddr)
+		}
 	}
 
 	// Disabling the NIC should remove the IPv4 broadcast address.
 	if err := s.DisableNIC(nicID); err != nil {
 		t.Fatalf("s.DisableNIC(%d): %s", nicID, err)
 	}
-	allStackAddrs = s.AllAddresses()
-	allNICAddrs, ok = allStackAddrs[nicID]
-	if !ok {
-		t.Fatalf("entry for %d missing from allStackAddrs = %+v", nicID, allStackAddrs)
-	}
-	if l := len(allNICAddrs); l != 0 {
-		t.Fatalf("got len(allNICAddrs) = %d, want = 0", l)
+
+	{
+		allStackAddrs := s.AllAddresses()
+		if allNICAddrs, ok := allStackAddrs[nicID]; !ok {
+			t.Fatalf("entry for %d missing from allStackAddrs = %+v", nicID, allStackAddrs)
+		} else if containsAddr(allNICAddrs, broadcastAddr) {
+			t.Fatalf("got allNICAddrs = %+v, don't want = %+v", allNICAddrs, broadcastAddr)
+		}
 	}
 }
 
@@ -3189,50 +3201,93 @@ func TestLeaveIPv6SolicitedNodeAddrBeforeAddrRemoval(t *testing.T) {
 	}
 }
 
-func TestJoinLeaveAllNodesMulticastOnNICEnableDisable(t *testing.T) {
+func TestJoinLeaveMulticastOnNICEnableDisable(t *testing.T) {
 	const nicID = 1
 
-	e := loopback.New()
-	s := stack.New(stack.Options{
-		NetworkProtocols: []stack.NetworkProtocol{ipv6.NewProtocol()},
-	})
-	nicOpts := stack.NICOptions{Disabled: true}
-	if err := s.CreateNICWithOptions(nicID, e, nicOpts); err != nil {
-		t.Fatalf("CreateNIC(%d, _, %+v) = %s", nicID, nicOpts, err)
+	tests := []struct {
+		name  string
+		proto tcpip.NetworkProtocolNumber
+		addr  tcpip.Address
+	}{
+		{
+			name:  "IPv6 All-Nodes",
+			proto: header.IPv6ProtocolNumber,
+			addr:  header.IPv6AllNodesMulticastAddress,
+		},
+		{
+			name:  "IPv4 All-Systems",
+			proto: header.IPv4ProtocolNumber,
+			addr:  header.IPv4AllSystems,
+		},
 	}
 
-	// Should not be in the IPv6 all-nodes multicast group yet because the NIC has
-	// not been enabled yet.
-	isInGroup, err := s.IsInGroup(nicID, header.IPv6AllNodesMulticastAddress)
-	if err != nil {
-		t.Fatalf("IsInGroup(%d, %s): %s", nicID, header.IPv6AllNodesMulticastAddress, err)
-	}
-	if isInGroup {
-		t.Fatalf("got IsInGroup(%d, %s) = true, want = false", nicID, header.IPv6AllNodesMulticastAddress)
-	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			e := loopback.New()
+			s := stack.New(stack.Options{
+				NetworkProtocols: []stack.NetworkProtocol{ipv4.NewProtocol(), ipv6.NewProtocol()},
+			})
+			nicOpts := stack.NICOptions{Disabled: true}
+			if err := s.CreateNICWithOptions(nicID, e, nicOpts); err != nil {
+				t.Fatalf("CreateNIC(%d, _, %+v) = %s", nicID, nicOpts, err)
+			}
 
-	// The all-nodes multicast group should be joined when the NIC is enabled.
-	if err := s.EnableNIC(nicID); err != nil {
-		t.Fatalf("s.EnableNIC(%d): %s", nicID, err)
-	}
-	isInGroup, err = s.IsInGroup(nicID, header.IPv6AllNodesMulticastAddress)
-	if err != nil {
-		t.Fatalf("IsInGroup(%d, %s): %s", nicID, header.IPv6AllNodesMulticastAddress, err)
-	}
-	if !isInGroup {
-		t.Fatalf("got IsInGroup(%d, %s) = false, want = true", nicID, header.IPv6AllNodesMulticastAddress)
-	}
+			// Should not be in the multicast group yet because the NIC has not been
+			// enabled yet.
+			if isInGroup, err := s.IsInGroup(nicID, test.addr); err != nil {
+				t.Fatalf("IsInGroup(%d, %s): %s", nicID, test.addr, err)
+			} else if isInGroup {
+				t.Fatalf("got IsInGroup(%d, %s) = true, want = false", nicID, test.addr)
+			}
 
-	// The all-nodes multicast group should be left when the NIC is disabled.
-	if err := s.DisableNIC(nicID); err != nil {
-		t.Fatalf("s.DisableNIC(%d): %s", nicID, err)
-	}
-	isInGroup, err = s.IsInGroup(nicID, header.IPv6AllNodesMulticastAddress)
-	if err != nil {
-		t.Fatalf("IsInGroup(%d, %s): %s", nicID, header.IPv6AllNodesMulticastAddress, err)
-	}
-	if isInGroup {
-		t.Fatalf("got IsInGroup(%d, %s) = true, want = false", nicID, header.IPv6AllNodesMulticastAddress)
+			// The all-nodes multicast group should be joined when the NIC is enabled.
+			if err := s.EnableNIC(nicID); err != nil {
+				t.Fatalf("s.EnableNIC(%d): %s", nicID, err)
+			}
+
+			if isInGroup, err := s.IsInGroup(nicID, test.addr); err != nil {
+				t.Fatalf("IsInGroup(%d, %s): %s", nicID, test.addr, err)
+			} else if !isInGroup {
+				t.Fatalf("got IsInGroup(%d, %s) = false, want = true", nicID, test.addr)
+			}
+
+			// The multicast group should be left when the NIC is disabled.
+			if err := s.DisableNIC(nicID); err != nil {
+				t.Fatalf("s.DisableNIC(%d): %s", nicID, err)
+			}
+
+			if isInGroup, err := s.IsInGroup(nicID, test.addr); err != nil {
+				t.Fatalf("IsInGroup(%d, %s): %s", nicID, test.addr, err)
+			} else if isInGroup {
+				t.Fatalf("got IsInGroup(%d, %s) = true, want = false", nicID, test.addr)
+			}
+
+			// The all-nodes multicast group should be joined when the NIC is enabled.
+			if err := s.EnableNIC(nicID); err != nil {
+				t.Fatalf("s.EnableNIC(%d): %s", nicID, err)
+			}
+
+			if isInGroup, err := s.IsInGroup(nicID, test.addr); err != nil {
+				t.Fatalf("IsInGroup(%d, %s): %s", nicID, test.addr, err)
+			} else if !isInGroup {
+				t.Fatalf("got IsInGroup(%d, %s) = false, want = true", nicID, test.addr)
+			}
+
+			// Leaving the group before disabling the NIC should not cause an error.
+			if err := s.LeaveGroup(test.proto, nicID, test.addr); err != nil {
+				t.Fatalf("s.LeaveGroup(%d, %d, %s): %s", test.proto, nicID, test.addr, err)
+			}
+
+			if err := s.DisableNIC(nicID); err != nil {
+				t.Fatalf("s.DisableNIC(%d): %s", nicID, err)
+			}
+
+			if isInGroup, err := s.IsInGroup(nicID, test.addr); err != nil {
+				t.Fatalf("IsInGroup(%d, %s): %s", nicID, test.addr, err)
+			} else if isInGroup {
+				t.Fatalf("got IsInGroup(%d, %s) = true, want = false", nicID, test.addr)
+			}
+		})
 	}
 }
 
@@ -3639,5 +3694,51 @@ func TestOutgoingSubnetBroadcast(t *testing.T) {
 				t.Errorf("route mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestResolveWith(t *testing.T) {
+	const (
+		unspecifiedNICID = 0
+		nicID            = 1
+	)
+
+	s := stack.New(stack.Options{
+		NetworkProtocols: []stack.NetworkProtocol{ipv4.NewProtocol(), arp.NewProtocol()},
+	})
+	ep := channel.New(0, defaultMTU, "")
+	ep.LinkEPCapabilities |= stack.CapabilityResolutionRequired
+	if err := s.CreateNIC(nicID, ep); err != nil {
+		t.Fatalf("CreateNIC(%d, _): %s", nicID, err)
+	}
+	addr := tcpip.ProtocolAddress{
+		Protocol: header.IPv4ProtocolNumber,
+		AddressWithPrefix: tcpip.AddressWithPrefix{
+			Address:   tcpip.Address(net.ParseIP("192.168.1.58").To4()),
+			PrefixLen: 24,
+		},
+	}
+	if err := s.AddProtocolAddress(nicID, addr); err != nil {
+		t.Fatalf("AddProtocolAddress(%d, %+v): %s", nicID, addr, err)
+	}
+
+	s.SetRouteTable([]tcpip.Route{{Destination: header.IPv4EmptySubnet, NIC: nicID}})
+
+	remoteAddr := tcpip.Address(net.ParseIP("192.168.1.59").To4())
+	r, err := s.FindRoute(unspecifiedNICID, "" /* localAddr */, remoteAddr, header.IPv4ProtocolNumber, false /* multicastLoop */)
+	if err != nil {
+		t.Fatalf("FindRoute(%d, '', %s, %d): %s", unspecifiedNICID, remoteAddr, header.IPv4ProtocolNumber, err)
+	}
+	defer r.Release()
+
+	// Should initially require resolution.
+	if !r.IsResolutionRequired() {
+		t.Fatal("got r.IsResolutionRequired() = false, want = true")
+	}
+
+	// Manually resolving the route should no longer require resolution.
+	r.ResolveWith("\x01")
+	if r.IsResolutionRequired() {
+		t.Fatal("got r.IsResolutionRequired() = true, want = false")
 	}
 }

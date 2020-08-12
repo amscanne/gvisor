@@ -37,6 +37,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/proc"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/sys"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/tmpfs"
+	"gvisor.dev/gvisor/pkg/sentry/inet"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
@@ -89,6 +90,12 @@ func registerFilesystems(k *kernel.Kernel) error {
 	if err := ttydev.Register(vfsObj); err != nil {
 		return fmt.Errorf("registering ttydev: %w", err)
 	}
+	tunSupported := tundev.IsNetTunSupported(inet.StackFromContext(ctx))
+	if tunSupported {
+		if err := tundev.Register(vfsObj); err != nil {
+			return fmt.Errorf("registering tundev: %v", err)
+		}
+	}
 
 	if kernel.FUSEEnabled {
 		if err := fuse.Register(vfsObj); err != nil {
@@ -96,14 +103,11 @@ func registerFilesystems(k *kernel.Kernel) error {
 		}
 	}
 
-	if err := tundev.Register(vfsObj); err != nil {
-		return fmt.Errorf("registering tundev: %v", err)
-	}
 	a, err := devtmpfs.NewAccessor(ctx, vfsObj, creds, devtmpfs.Name)
 	if err != nil {
 		return fmt.Errorf("creating devtmpfs accessor: %w", err)
 	}
-	defer a.Release()
+	defer a.Release(ctx)
 
 	if err := a.UserspaceInit(ctx); err != nil {
 		return fmt.Errorf("initializing userspace: %w", err)
@@ -114,8 +118,10 @@ func registerFilesystems(k *kernel.Kernel) error {
 	if err := ttydev.CreateDevtmpfsFiles(ctx, a); err != nil {
 		return fmt.Errorf("creating ttydev devtmpfs files: %w", err)
 	}
-	if err := tundev.CreateDevtmpfsFiles(ctx, a); err != nil {
-		return fmt.Errorf("creating tundev devtmpfs files: %v", err)
+	if tunSupported {
+		if err := tundev.CreateDevtmpfsFiles(ctx, a); err != nil {
+			return fmt.Errorf("creating tundev devtmpfs files: %v", err)
+		}
 	}
 
 	if kernel.FUSEEnabled {
@@ -252,7 +258,7 @@ func (c *containerMounter) prepareMountsVFS2() ([]mountAndFD, error) {
 
 func (c *containerMounter) mountSubmountVFS2(ctx context.Context, conf *Config, mns *vfs.MountNamespace, creds *auth.Credentials, submount *mountAndFD) error {
 	root := mns.Root()
-	defer root.DecRef()
+	defer root.DecRef(ctx)
 	target := &vfs.PathOperation{
 		Root:  root,
 		Start: root,
@@ -387,28 +393,35 @@ func (c *containerMounter) mountTmpVFS2(ctx context.Context, conf *Config, creds
 	}
 
 	root := mns.Root()
-	defer root.DecRef()
+	defer root.DecRef(ctx)
 	pop := vfs.PathOperation{
 		Root:  root,
 		Start: root,
 		Path:  fspath.Parse("/tmp"),
 	}
 	// TODO(gvisor.dev/issue/2782): Use O_PATH when available.
-	statx, err := c.k.VFS().StatAt(ctx, creds, &pop, &vfs.StatOptions{})
+	fd, err := c.k.VFS().OpenAt(ctx, creds, &pop, &vfs.OpenOptions{Flags: linux.O_RDONLY | linux.O_DIRECTORY})
 	switch err {
 	case nil:
-		// Found '/tmp' in filesystem, check if it's empty.
-		if linux.FileMode(statx.Mode).FileType() != linux.ModeDirectory {
-			// Not a dir?! Leave it be.
+		defer fd.DecRef(ctx)
+
+		err := fd.IterDirents(ctx, vfs.IterDirentsCallbackFunc(func(dirent vfs.Dirent) error {
+			if dirent.Name != "." && dirent.Name != ".." {
+				return syserror.ENOTEMPTY
+			}
 			return nil
-		}
-		if statx.Nlink > 2 {
+		}))
+		switch err {
+		case nil:
+			log.Infof(`Mounting internal tmpfs on top of empty "/tmp"`)
+		case syserror.ENOTEMPTY:
 			// If more than "." and ".." is found, skip internal tmpfs to prevent
 			// hiding existing files.
 			log.Infof(`Skipping internal tmpfs mount for "/tmp" because it's not empty`)
 			return nil
+		default:
+			return err
 		}
-		log.Infof(`Mounting internal tmpfs on top of empty "/tmp"`)
 		fallthrough
 
 	case syserror.ENOENT:
@@ -423,8 +436,12 @@ func (c *containerMounter) mountTmpVFS2(ctx context.Context, conf *Config, creds
 		}
 		return c.mountSubmountVFS2(ctx, conf, mns, creds, &mountAndFD{Mount: tmpMount})
 
+	case syserror.ENOTDIR:
+		// Not a dir?! Let it be.
+		return nil
+
 	default:
-		return fmt.Errorf(`stating "/tmp" inside container: %w`, err)
+		return fmt.Errorf(`opening "/tmp" inside container: %w`, err)
 	}
 }
 
@@ -481,10 +498,10 @@ func (c *containerMounter) mountSharedSubmountVFS2(ctx context.Context, conf *Co
 	if err != nil {
 		return err
 	}
-	defer newMnt.DecRef()
+	defer newMnt.DecRef(ctx)
 
 	root := mns.Root()
-	defer root.DecRef()
+	defer root.DecRef(ctx)
 	if err := c.makeSyntheticMount(ctx, mount.Destination, root, creds); err != nil {
 		return err
 	}

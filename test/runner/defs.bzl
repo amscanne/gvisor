@@ -132,7 +132,7 @@ def syscall_test(
         add_overlay = False,
         add_uds_tree = False,
         add_hostinet = False,
-        vfs2 = False,
+        vfs2 = True,
         fuse = False,
         tags = None):
     """syscall_test is a macro that will create targets for all platforms.
@@ -201,7 +201,7 @@ def syscall_test(
             platform = default_platform,
             use_tmpfs = use_tmpfs,
             add_uds_tree = add_uds_tree,
-            tags = platforms[default_platform] + vfs2_tags,
+            tags = platforms[default_platform] + vfs2_tags + ["fuse"],
             vfs2 = True,
             fuse = True,
         )

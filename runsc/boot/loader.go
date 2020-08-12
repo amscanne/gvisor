@@ -16,12 +16,12 @@
 package boot
 
 import (
+	"errors"
 	"fmt"
 	mrand "math/rand"
 	"os"
 	"runtime"
 	"sync/atomic"
-	"syscall"
 	gtime "time"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -32,6 +32,7 @@ import (
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/memutil"
 	"gvisor.dev/gvisor/pkg/rand"
+	"gvisor.dev/gvisor/pkg/refs"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/control"
 	"gvisor.dev/gvisor/pkg/sentry/fdimport"
@@ -187,7 +188,7 @@ type Args struct {
 }
 
 // make sure stdioFDs are always the same on initial start and on restore
-const startingStdioFD = 64
+const startingStdioFD = 256
 
 // New initializes a new kernel loader configured by spec.
 // New also handles setting up a kernel for restoring a container.
@@ -346,7 +347,7 @@ func New(args Args) (*Loader, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to create hostfs filesystem: %v", err)
 		}
-		defer hostFilesystem.DecRef()
+		defer hostFilesystem.DecRef(k.SupervisorContext())
 		hostMount, err := k.VFS().NewDisconnectedMount(hostFilesystem, nil, &vfs.MountOptions{})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create hostfs mount: %v", err)
@@ -360,15 +361,20 @@ func New(args Args) (*Loader, error) {
 	var stdioFDs []int
 	newfd := startingStdioFD
 	for _, fd := range args.StdioFDs {
-		err := syscall.Dup3(fd, newfd, syscall.O_CLOEXEC)
+		// Check that newfd is unused to avoid clobbering over it.
+		if _, err := unix.FcntlInt(uintptr(newfd), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
+			if err != nil {
+				return nil, fmt.Errorf("error checking for FD (%d) conflict: %w", newfd, err)
+			}
+			return nil, fmt.Errorf("unable to remap stdios, FD %d is already in use", newfd)
+		}
+
+		err := unix.Dup3(fd, newfd, unix.O_CLOEXEC)
 		if err != nil {
 			return nil, fmt.Errorf("dup3 of stdioFDs failed: %v", err)
 		}
 		stdioFDs = append(stdioFDs, newfd)
-		err = syscall.Close(fd)
-		if err != nil {
-			return nil, fmt.Errorf("close original stdioFDs failed: %v", err)
-		}
+		_ = unix.Close(fd)
 		newfd++
 	}
 
@@ -458,6 +464,11 @@ func (l *Loader) Destroy() {
 		l.stopSignalForwarding()
 	}
 	l.watchdog.Stop()
+
+	for i, fd := range l.root.stdioFDs {
+		_ = unix.Close(fd)
+		l.root.stdioFDs[i] = -1
+	}
 }
 
 func createPlatform(conf *Config, deviceFile *os.File) (platform.Platform, error) {
@@ -591,11 +602,9 @@ func (l *Loader) run() error {
 	// during restore, we can release l.stdioFDs now. VFS2 takes ownership of the
 	// passed FDs, so only close for VFS1.
 	if !kernel.VFS2Enabled {
-		for _, fd := range l.root.stdioFDs {
-			err := syscall.Close(fd)
-			if err != nil {
-				return fmt.Errorf("close dup()ed stdioFDs: %v", err)
-			}
+		for i, fd := range l.root.stdioFDs {
+			_ = unix.Close(fd)
+			l.root.stdioFDs[i] = -1
 		}
 	}
 
@@ -686,7 +695,7 @@ func (l *Loader) startContainer(spec *specs.Spec, conf *Config, cid string, file
 
 	// Can't take ownership away from os.File. dup them to get a new FDs.
 	for _, f := range files[3:] {
-		fd, err := syscall.Dup(int(f.Fd()))
+		fd, err := unix.Dup(int(f.Fd()))
 		if err != nil {
 			return fmt.Errorf("failed to dup file: %v", err)
 		}
@@ -755,7 +764,7 @@ func (l *Loader) createContainerProcess(root bool, cid string, info *containerIn
 		return nil, fmt.Errorf("creating process: %v", err)
 	}
 	// CreateProcess takes a reference on FDTable if successful.
-	info.procArgs.FDTable.DecRef()
+	info.procArgs.FDTable.DecRef(ctx)
 
 	// Set the foreground process group on the TTY to the global init process
 	// group, since that is what we are about to start running.
@@ -890,22 +899,20 @@ func (l *Loader) executeAsync(args *control.ExecArgs) (kernel.ThreadID, error) {
 
 	// Add the HOME environment variable if it is not already set.
 	if kernel.VFS2Enabled {
-		defer args.MountNamespaceVFS2.DecRef()
-
 		root := args.MountNamespaceVFS2.Root()
-		defer root.DecRef()
 		ctx := vfs.WithRoot(l.k.SupervisorContext(), root)
+		defer args.MountNamespaceVFS2.DecRef(ctx)
+		defer root.DecRef(ctx)
 		envv, err := user.MaybeAddExecUserHomeVFS2(ctx, args.MountNamespaceVFS2, args.KUID, args.Envv)
 		if err != nil {
 			return 0, err
 		}
 		args.Envv = envv
 	} else {
-		defer args.MountNamespace.DecRef()
-
 		root := args.MountNamespace.Root()
-		defer root.DecRef()
 		ctx := fs.WithRoot(l.k.SupervisorContext(), root)
+		defer args.MountNamespace.DecRef(ctx)
+		defer root.DecRef(ctx)
 		envv, err := user.MaybeAddExecUserHome(ctx, args.MountNamespace, args.KUID, args.Envv)
 		if err != nil {
 			return 0, err
@@ -1001,6 +1008,11 @@ func (l *Loader) WaitForStartSignal() {
 func (l *Loader) WaitExit() kernel.ExitStatus {
 	// Wait for container.
 	l.k.WaitExited()
+
+	// Cleanup
+	l.ctrl.stop()
+
+	refs.OnExit()
 
 	return l.k.GlobalInit().ExitStatus()
 }
@@ -1263,7 +1275,7 @@ func createFDTable(ctx context.Context, console bool, stdioFDs []int) (*kernel.F
 	fdTable := k.NewFDTable()
 	ttyFile, ttyFileVFS2, err := fdimport.Import(ctx, fdTable, console, stdioFDs)
 	if err != nil {
-		fdTable.DecRef()
+		fdTable.DecRef(ctx)
 		return nil, nil, nil, err
 	}
 	return fdTable, ttyFile, ttyFileVFS2, nil

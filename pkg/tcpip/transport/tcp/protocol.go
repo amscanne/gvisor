@@ -62,6 +62,10 @@ const (
 	// FIN_WAIT_2 state before being marked closed.
 	DefaultTCPLingerTimeout = 60 * time.Second
 
+	// MaxTCPLingerTimeout is the maximum amount of time that sockets
+	// linger in FIN_WAIT_2 state before being marked closed.
+	MaxTCPLingerTimeout = 120 * time.Second
+
 	// DefaultTCPTimeWaitTimeout is the amount of time that sockets linger
 	// in TIME_WAIT state before being marked closed.
 	DefaultTCPTimeWaitTimeout = 60 * time.Second
@@ -79,6 +83,25 @@ const (
 // SACKEnabled is used by stack.(*Stack).TransportProtocolOption to
 // enable/disable SACK support in TCP. See: https://tools.ietf.org/html/rfc2018.
 type SACKEnabled bool
+
+// Recovery is used by stack.(*Stack).TransportProtocolOption to
+// set loss detection algorithm in TCP.
+type Recovery int32
+
+const (
+	// RACKLossDetection indicates RACK is used for loss detection and
+	// recovery.
+	RACKLossDetection Recovery = 1 << iota
+
+	// RACKStaticReoWnd indicates the reordering window should not be
+	// adjusted when DSACK is received.
+	RACKStaticReoWnd
+
+	// RACKNoDupTh indicates RACK should not consider the classic three
+	// duplicate acknowledgements rule to mark the segments as lost. This
+	// is used when reordering is not detected.
+	RACKNoDupTh
+)
 
 // DelayEnabled is used by stack.(Stack*).TransportProtocolOption to
 // enable/disable Nagle's algorithm in TCP.
@@ -161,6 +184,7 @@ func (s *synRcvdCounter) Threshold() uint64 {
 type protocol struct {
 	mu                         sync.RWMutex
 	sackEnabled                bool
+	recovery                   Recovery
 	delayEnabled               bool
 	sendBufferSize             SendBufferSizeOption
 	recvBufferSize             ReceiveBufferSizeOption
@@ -280,6 +304,12 @@ func (p *protocol) SetOption(option interface{}) *tcpip.Error {
 		p.mu.Unlock()
 		return nil
 
+	case Recovery:
+		p.mu.Lock()
+		p.recovery = Recovery(v)
+		p.mu.Unlock()
+		return nil
+
 	case DelayEnabled:
 		p.mu.Lock()
 		p.delayEnabled = bool(v)
@@ -391,6 +421,12 @@ func (p *protocol) Option(option interface{}) *tcpip.Error {
 	case *SACKEnabled:
 		p.mu.RLock()
 		*v = SACKEnabled(p.sackEnabled)
+		p.mu.RUnlock()
+		return nil
+
+	case *Recovery:
+		p.mu.RLock()
+		*v = Recovery(p.recovery)
 		p.mu.RUnlock()
 		return nil
 
@@ -535,6 +571,7 @@ func NewProtocol() stack.TransportProtocol {
 		minRTO:                     MinRTO,
 		maxRTO:                     MaxRTO,
 		maxRetries:                 MaxRetries,
+		recovery:                   RACKLossDetection,
 	}
 	p.dispatcher.init(runtime.GOMAXPROCS(0))
 	return &p

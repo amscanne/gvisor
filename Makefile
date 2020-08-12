@@ -122,7 +122,7 @@ smoke-tests: ## Runs a simple smoke test after build runsc.
 .PHONY: smoke-tests
 
 unit-tests: ## Local package unit tests in pkg/..., runsc/, tools/.., etc.
-	@$(call submake,test TARGETS="pkg/... runsc/... tools/... benchmarks/... benchmarks/runner:runner_test")
+	@$(call submake,test TARGETS="pkg/... runsc/... tools/...")
 
 tests: ## Runs all unit tests and syscall tests.
 tests: unit-tests
@@ -166,14 +166,11 @@ do-tests: runsc
 simple-tests: unit-tests # Compatibility target.
 .PHONY: simple-tests
 
-IMAGE_FILTER := HelloWorld\|Httpd\|Ruby\|Stdio
-INTEGRATION_FILTER := Life\|Pause\|Connect\|JobControl\|Overlay\|Exec\|DirCreation/root
-
 docker-tests: load-basic-images
 	@$(call submake,install-test-runtime RUNTIME="vfs1")
 	@$(call submake,test-runtime RUNTIME="vfs1" TARGETS="$(INTEGRATION_TARGETS)")
 	@$(call submake,install-test-runtime RUNTIME="vfs2" ARGS="--vfs2")
-	@$(call submake,test-runtime RUNTIME="vfs2" OPTIONS="--test_filter=$(IMAGE_FILTER)\|$(INTEGRATION_FILTER)" TARGETS="$(INTEGRATION_TARGETS)")
+	@$(call submake,test-runtime RUNTIME="vfs2" TARGETS="$(INTEGRATION_TARGETS)")
 .PHONY: docker-tests
 
 overlay-tests: load-basic-images
@@ -185,7 +182,6 @@ swgso-tests: load-basic-images
 	@$(call submake,install-test-runtime RUNTIME="swgso" ARGS="--software-gso=true --gso=false")
 	@$(call submake,test-runtime RUNTIME="swgso" TARGETS="$(INTEGRATION_TARGETS)")
 .PHONY: swgso-tests
-
 hostnet-tests: load-basic-images
 	@$(call submake,install-test-runtime RUNTIME="hostnet" ARGS="--network=host")
 	@$(call submake,test-runtime RUNTIME="hostnet" OPTIONS="--test_arg=-checkpoint=false" TARGETS="$(INTEGRATION_TARGETS)")
@@ -211,8 +207,9 @@ packetdrill-tests: load-packetdrill
 .PHONY: packetdrill-tests
 
 packetimpact-tests: load-packetimpact
+	@sudo modprobe iptable_filter ip6table_filter
 	@$(call submake,install-test-runtime RUNTIME="packetimpact")
-	@$(call submake,test-runtime RUNTIME="packetimpact" TARGETS="$(shell $(MAKE) query TARGETS='attr(tags, packetimpact, tests(//...))')")
+	@$(call submake,test-runtime OPTIONS="--jobs=HOST_CPUS*3 --local_test_jobs=HOST_CPUS*3" RUNTIME="packetimpact" TARGETS="$(shell $(MAKE) query TARGETS='attr(tags, packetimpact, tests(//...))')")
 .PHONY: packetimpact-tests
 
 root-tests: load-basic-images

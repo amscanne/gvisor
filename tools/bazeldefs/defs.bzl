@@ -2,15 +2,16 @@
 
 load("@bazel_gazelle//:def.bzl", _gazelle = "gazelle")
 load("@bazel_skylib//rules:build_test.bzl", _build_test = "build_test")
+load("@bazel_skylib//:bzl_library.bzl", _bzl_library = "bzl_library")
 load("@bazel_tools//tools/cpp:cc_flags_supplier.bzl", _cc_flags_supplier = "cc_flags_supplier")
 load("@io_bazel_rules_go//go:def.bzl", "GoLibrary", _go_binary = "go_binary", _go_context = "go_context", _go_embed_data = "go_embed_data", _go_library = "go_library", _go_path = "go_path", _go_test = "go_test")
 load("@io_bazel_rules_go//proto:def.bzl", _go_grpc_library = "go_grpc_library", _go_proto_library = "go_proto_library")
 load("@rules_cc//cc:defs.bzl", _cc_binary = "cc_binary", _cc_library = "cc_library", _cc_proto_library = "cc_proto_library", _cc_test = "cc_test")
 load("@rules_pkg//:pkg.bzl", _pkg_deb = "pkg_deb", _pkg_tar = "pkg_tar")
-load("@pydeps//:requirements.bzl", _py_requirement = "requirement")
 load("@com_github_grpc_grpc//bazel:cc_grpc_library.bzl", _cc_grpc_library = "cc_grpc_library")
 
 build_test = _build_test
+bzl_library = _bzl_library
 cc_library = _cc_library
 cc_flags_supplier = _cc_flags_supplier
 cc_proto_library = _cc_proto_library
@@ -25,9 +26,7 @@ gbenchmark = "@com_google_benchmark//:benchmark"
 loopback = "//tools/bazeldefs:loopback"
 pkg_deb = _pkg_deb
 pkg_tar = _pkg_tar
-py_library = native.py_library
 py_binary = native.py_binary
-py_test = native.py_test
 rbe_platform = native.platform
 rbe_toolchain = native.toolchain
 vdso_linker_option = "-fuse-ld=gold "
@@ -162,9 +161,6 @@ def go_context(ctx):
         goarch = go_ctx.sdk.goarch,
         tags = go_ctx.tags,
     )
-
-def py_requirement(name, direct = True):
-    return _py_requirement(name)
 
 def select_arch(amd64 = "amd64", arm64 = "arm64", default = None, **kwargs):
     values = {

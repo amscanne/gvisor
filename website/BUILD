@@ -1,4 +1,4 @@
-load("//tools:defs.bzl", "pkg_tar")
+load("//tools:defs.bzl", "bzl_library", "pkg_tar")
 load("//website:defs.bzl", "doc", "docs")
 
 package(licenses = ["notice"])
@@ -149,6 +149,9 @@ docs(
         "//g3doc/user_guide:install",
         "//g3doc/user_guide:networking",
         "//g3doc/user_guide:platforms",
+        "//g3doc/user_guide/containerd:configuration",
+        "//g3doc/user_guide/containerd:containerd_11",
+        "//g3doc/user_guide/containerd:quick_start",
         "//g3doc/user_guide/quick_start:docker",
         "//g3doc/user_guide/quick_start:kubernetes",
         "//g3doc/user_guide/quick_start:oci",
@@ -176,4 +179,10 @@ genrule(
           "tar -C $$T -czf $@ . && " +
           "rm -rf $$T",
     tools = ["//website/cmd/syscalldocs"],
+)
+
+bzl_library(
+    name = "defs_bzl",
+    srcs = ["defs.bzl"],
+    visibility = ["//visibility:private"],
 )

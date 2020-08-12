@@ -90,10 +90,8 @@ func (d *dentry) createSyntheticChildLocked(opts *createSyntheticOpts) {
 		uid:       uint32(opts.kuid),
 		gid:       uint32(opts.kgid),
 		blockSize: usermem.PageSize, // arbitrary
-		handle: handle{
-			fd: -1,
-		},
-		nlink: uint32(2),
+		hostFD:    -1,
+		nlink:     uint32(2),
 	}
 	switch opts.mode.FileType() {
 	case linux.S_IFDIR:
@@ -122,7 +120,7 @@ type directoryFD struct {
 }
 
 // Release implements vfs.FileDescriptionImpl.Release.
-func (fd *directoryFD) Release() {
+func (fd *directoryFD) Release(context.Context) {
 }
 
 // IterDirents implements vfs.FileDescriptionImpl.IterDirents.
@@ -139,7 +137,7 @@ func (fd *directoryFD) IterDirents(ctx context.Context, cb vfs.IterDirentsCallba
 		fd.dirents = ds
 	}
 
-	d.InotifyWithParent(linux.IN_ACCESS, 0, vfs.PathEvent)
+	d.InotifyWithParent(ctx, linux.IN_ACCESS, 0, vfs.PathEvent)
 	if d.cachedMetadataAuthoritative() {
 		d.touchAtime(fd.vfsfd.Mount())
 	}
@@ -205,14 +203,14 @@ func (d *dentry) getDirents(ctx context.Context) ([]vfs.Dirent, error) {
 		off := uint64(0)
 		const count = 64 * 1024 // for consistency with the vfs1 client
 		d.handleMu.RLock()
-		if !d.handleReadable {
+		if d.readFile.isNil() {
 			// This should not be possible because a readable handle should
 			// have been opened when the calling directoryFD was opened.
 			d.handleMu.RUnlock()
 			panic("gofer.dentry.getDirents called without a readable handle")
 		}
 		for {
-			p9ds, err := d.handle.file.readdir(ctx, off, count)
+			p9ds, err := d.readFile.readdir(ctx, off, count)
 			if err != nil {
 				d.handleMu.RUnlock()
 				return nil, err
@@ -304,5 +302,5 @@ func (fd *directoryFD) Seek(ctx context.Context, offset int64, whence int32) (in
 
 // Sync implements vfs.FileDescriptionImpl.Sync.
 func (fd *directoryFD) Sync(ctx context.Context) error {
-	return fd.dentry().handle.sync(ctx)
+	return fd.dentry().syncRemoteFile(ctx)
 }

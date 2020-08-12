@@ -192,10 +192,14 @@ const (
 	//
 	// - File timestamps are based on client clocks. This ensures that users of
 	// the client observe timestamps that are coherent with their own clocks
-	// and consistent with Linux's semantics. However, since it is not always
-	// possible for clients to set arbitrary atimes and mtimes, and never
-	// possible for clients to set arbitrary ctimes, file timestamp changes are
-	// stored in the client only and never sent to the remote filesystem.
+	// and consistent with Linux's semantics (in particular, it is not always
+	// possible for clients to set arbitrary atimes and mtimes depending on the
+	// remote filesystem implementation, and never possible for clients to set
+	// arbitrary ctimes.) If a dentry containing a client-defined atime or
+	// mtime is evicted from cache, client timestamps will be sent to the
+	// remote filesystem on a best-effort basis to attempt to ensure that
+	// timestamps will be preserved when another dentry representing the same
+	// file is instantiated.
 	InteropModeExclusive InteropMode = iota
 
 	// InteropModeWritethrough is appropriate when there are read-only users of
@@ -482,7 +486,7 @@ func (fstype FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 	root, err := fs.newDentry(ctx, attachFile, qid, attrMask, &attr)
 	if err != nil {
 		attachFile.close(ctx)
-		fs.vfsfs.DecRef()
+		fs.vfsfs.DecRef(ctx)
 		return nil, nil, err
 	}
 	// Set the root's reference count to 2. One reference is returned to the
@@ -495,17 +499,16 @@ func (fstype FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 }
 
 // Release implements vfs.FilesystemImpl.Release.
-func (fs *filesystem) Release() {
-	ctx := context.Background()
+func (fs *filesystem) Release(ctx context.Context) {
 	mf := fs.mfp.MemoryFile()
 
 	fs.syncMu.Lock()
 	for d := range fs.syncableDentries {
 		d.handleMu.Lock()
 		d.dataMu.Lock()
-		if d.handleWritable {
+		if h := d.writeHandleLocked(); h.isOpen() {
 			// Write dirty cached data to the remote file.
-			if err := fsutil.SyncDirtyAll(ctx, &d.cache, &d.dirty, d.size, fs.mfp.MemoryFile(), d.handle.writeFromBlocksAt); err != nil {
+			if err := fsutil.SyncDirtyAll(ctx, &d.cache, &d.dirty, d.size, fs.mfp.MemoryFile(), h.writeFromBlocksAt); err != nil {
 				log.Warningf("gofer.filesystem.Release: failed to flush dentry: %v", err)
 			}
 			// TODO(jamieliu): Do we need to flushf/fsync d?
@@ -515,9 +518,9 @@ func (fs *filesystem) Release() {
 		d.dirty.RemoveAll()
 		d.dataMu.Unlock()
 		// Close the host fd if one exists.
-		if d.handle.fd >= 0 {
-			syscall.Close(int(d.handle.fd))
-			d.handle.fd = -1
+		if d.hostFD >= 0 {
+			syscall.Close(int(d.hostFD))
+			d.hostFD = -1
 		}
 		d.handleMu.Unlock()
 	}
@@ -558,8 +561,6 @@ type dentry struct {
 	// filesystem root, name is the empty string. name is protected by
 	// filesystem.renameMu.
 	name string
-
-	// We don't support hard links, so each dentry maps 1:1 to an inode.
 
 	// file is the unopened p9.File that backs this dentry. file is immutable.
 	//
@@ -621,9 +622,20 @@ type dentry struct {
 	mtime int64
 	ctime int64
 	btime int64
-	// File size, protected by both metadataMu and dataMu (i.e. both must be
+	// File size, which differs from other metadata in two ways:
+	//
+	// - We make a best-effort attempt to keep it up to date even if
+	// !dentry.cachedMetadataAuthoritative() for the sake of O_APPEND writes.
+	//
+	// - size is protected by both metadataMu and dataMu (i.e. both must be
 	// locked to mutate it; locking either is sufficient to access it).
 	size uint64
+	// If this dentry does not represent a synthetic file, deleted is 0, and
+	// atimeDirty/mtimeDirty are non-zero, atime/mtime may have diverged from the
+	// remote file's timestamps, which should be updated when this dentry is
+	// evicted.
+	atimeDirty uint32
+	mtimeDirty uint32
 
 	// nlink counts the number of hard links to this dentry. It's updated and
 	// accessed using atomic operations. It's not protected by metadataMu like the
@@ -636,30 +648,28 @@ type dentry struct {
 	// the file into memmap.MappingSpaces. mappings is protected by mapsMu.
 	mappings memmap.MappingSet
 
-	// If this dentry represents a regular file or directory:
+	// - If this dentry represents a regular file or directory, readFile is the
+	// p9.File used for reads by all regularFileFDs/directoryFDs representing
+	// this dentry.
 	//
-	// - handle is the I/O handle used by all regularFileFDs/directoryFDs
-	// representing this dentry.
+	// - If this dentry represents a regular file, writeFile is the p9.File
+	// used for writes by all regularFileFDs representing this dentry.
 	//
-	// - handleReadable is true if handle is readable.
-	//
-	// - handleWritable is true if handle is writable.
-	//
-	// Invariants:
-	//
-	// - If handleReadable == handleWritable == false, then handle.file == nil
-	// (i.e. there is no open handle). Conversely, if handleReadable ||
-	// handleWritable == true, then handle.file != nil (i.e. there is an open
-	// handle).
-	//
-	// - handleReadable and handleWritable cannot transition from true to false
-	// (i.e. handles may not be downgraded).
+	// - If this dentry represents a regular file, hostFD is the host FD used
+	// for memory mappings and I/O (when applicable) in preference to readFile
+	// and writeFile. hostFD is always readable; if !writeFile.isNil(), it must
+	// also be writable. If hostFD is -1, no such host FD is available.
 	//
 	// These fields are protected by handleMu.
-	handleMu       sync.RWMutex
-	handle         handle
-	handleReadable bool
-	handleWritable bool
+	//
+	// readFile and writeFile may or may not represent the same p9.File. Once
+	// either p9.File transitions from closed (isNil() == true) to open
+	// (isNil() == false), it may be mutated with handleMu locked, but cannot
+	// be closed until the dentry is destroyed.
+	handleMu  sync.RWMutex
+	readFile  p9file
+	writeFile p9file
+	hostFD    int32
 
 	dataMu sync.RWMutex
 
@@ -673,7 +683,7 @@ type dentry struct {
 	// tracks dirty segments in cache. dirty is protected by dataMu.
 	dirty fsutil.DirtySet
 
-	// pf implements platform.File for mappings of handle.fd.
+	// pf implements platform.File for mappings of hostFD.
 	pf dentryPlatformFile
 
 	// If this dentry represents a symbolic link, InteropModeShared is not in
@@ -735,9 +745,7 @@ func (fs *filesystem) newDentry(ctx context.Context, file p9file, qid p9.QID, ma
 		uid:       uint32(fs.opts.dfltuid),
 		gid:       uint32(fs.opts.dfltgid),
 		blockSize: usermem.PageSize,
-		handle: handle{
-			fd: -1,
-		},
+		hostFD:    -1,
 	}
 	d.pf.dentry = d
 	if mask.UID {
@@ -804,10 +812,12 @@ func (d *dentry) updateFromP9AttrsLocked(mask p9.AttrMask, attr *p9.Attr) {
 	if attr.BlockSize != 0 {
 		atomic.StoreUint32(&d.blockSize, uint32(attr.BlockSize))
 	}
-	if mask.ATime {
+	// Don't override newer client-defined timestamps with old server-defined
+	// ones.
+	if mask.ATime && atomic.LoadUint32(&d.atimeDirty) == 0 {
 		atomic.StoreInt64(&d.atime, dentryTimestampFromP9(attr.ATimeSeconds, attr.ATimeNanoSeconds))
 	}
-	if mask.MTime {
+	if mask.MTime && atomic.LoadUint32(&d.mtimeDirty) == 0 {
 		atomic.StoreInt64(&d.mtime, dentryTimestampFromP9(attr.MTimeSeconds, attr.MTimeNanoSeconds))
 	}
 	if mask.CTime {
@@ -826,9 +836,13 @@ func (d *dentry) updateFromP9AttrsLocked(mask p9.AttrMask, attr *p9.Attr) {
 
 // Preconditions: !d.isSynthetic()
 func (d *dentry) updateFromGetattr(ctx context.Context) error {
-	// Use d.handle.file, which represents a 9P fid that has been opened, in
-	// preference to d.file, which represents a 9P fid that has not. This may
-	// be significantly more efficient in some implementations.
+	// Use d.readFile or d.writeFile, which represent 9P fids that have been
+	// opened, in preference to d.file, which represents a 9P fid that has not.
+	// This may be significantly more efficient in some implementations. Prefer
+	// d.writeFile over d.readFile since some filesystem implementations may
+	// update a writable handle's metadata after writes to that handle, without
+	// making metadata updates immediately visible to read-only handles
+	// representing the same file.
 	var (
 		file            p9file
 		handleMuRLocked bool
@@ -838,8 +852,11 @@ func (d *dentry) updateFromGetattr(ctx context.Context) error {
 	d.metadataMu.Lock()
 	defer d.metadataMu.Unlock()
 	d.handleMu.RLock()
-	if !d.handle.file.isNil() {
-		file = d.handle.file
+	if !d.writeFile.isNil() {
+		file = d.writeFile
+		handleMuRLocked = true
+	} else if !d.readFile.isNil() {
+		file = d.readFile
 		handleMuRLocked = true
 	} else {
 		file = d.file
@@ -904,51 +921,44 @@ func (d *dentry) setStat(ctx context.Context, creds *auth.Credentials, opts *vfs
 		return err
 	}
 	defer mnt.EndWrite()
-	setLocalAtime := false
-	setLocalMtime := false
-	if d.cachedMetadataAuthoritative() {
-		// Timestamp updates will be handled locally.
-		setLocalAtime = stat.Mask&linux.STATX_ATIME != 0
-		setLocalMtime = stat.Mask&linux.STATX_MTIME != 0
-		stat.Mask &^= linux.STATX_ATIME | linux.STATX_MTIME
 
-		// Prepare for truncate.
-		if stat.Mask&linux.STATX_SIZE != 0 {
-			switch mode.FileType() {
-			case linux.ModeRegular:
-				if !setLocalMtime {
-					// Truncate updates mtime.
-					setLocalMtime = true
-					stat.Mtime.Nsec = linux.UTIME_NOW
-				}
-			case linux.ModeDirectory:
-				return syserror.EISDIR
-			default:
-				return syserror.EINVAL
-			}
+	if stat.Mask&linux.STATX_SIZE != 0 {
+		// Reject attempts to truncate files other than regular files, since
+		// filesystem implementations may return the wrong errno.
+		switch mode.FileType() {
+		case linux.S_IFREG:
+			// ok
+		case linux.S_IFDIR:
+			return syserror.EISDIR
+		default:
+			return syserror.EINVAL
 		}
 	}
+
+	var now int64
+	if d.cachedMetadataAuthoritative() {
+		// Truncate updates mtime.
+		if stat.Mask&(linux.STATX_SIZE|linux.STATX_MTIME) == linux.STATX_SIZE {
+			stat.Mask |= linux.STATX_MTIME
+			stat.Mtime = linux.StatxTimestamp{
+				Nsec: linux.UTIME_NOW,
+			}
+		}
+
+		// Use client clocks for timestamps.
+		now = d.fs.clock.Now().Nanoseconds()
+		if stat.Mask&linux.STATX_ATIME != 0 && stat.Atime.Nsec == linux.UTIME_NOW {
+			stat.Atime = statxTimestampFromDentry(now)
+		}
+		if stat.Mask&linux.STATX_MTIME != 0 && stat.Mtime.Nsec == linux.UTIME_NOW {
+			stat.Mtime = statxTimestampFromDentry(now)
+		}
+	}
+
 	d.metadataMu.Lock()
 	defer d.metadataMu.Unlock()
-	if stat.Mask&linux.STATX_SIZE != 0 {
-		// The size needs to be changed even when
-		// !d.cachedMetadataAuthoritative() because d.mappings has to be
-		// updated.
-		d.updateFileSizeLocked(stat.Size)
-	}
 	if !d.isSynthetic() {
 		if stat.Mask != 0 {
-			if stat.Mask&linux.STATX_SIZE != 0 {
-				// Check whether to allow a truncate request to be made.
-				switch d.mode & linux.S_IFMT {
-				case linux.S_IFREG:
-					// Allow.
-				case linux.S_IFDIR:
-					return syserror.EISDIR
-				default:
-					return syserror.EINVAL
-				}
-			}
 			if err := d.file.setAttr(ctx, p9.SetAttrMask{
 				Permissions:        stat.Mask&linux.STATX_MODE != 0,
 				UID:                stat.Mask&linux.STATX_UID != 0,
@@ -970,6 +980,12 @@ func (d *dentry) setStat(ctx context.Context, creds *auth.Credentials, opts *vfs
 			}); err != nil {
 				return err
 			}
+			if stat.Mask&linux.STATX_SIZE != 0 {
+				// d.size should be kept up to date, and privatized
+				// copy-on-write mappings of truncated pages need to be
+				// invalidated, even if InteropModeShared is in effect.
+				d.updateFileSizeLocked(stat.Size)
+			}
 		}
 		if d.fs.opts.interop == InteropModeShared {
 			// There's no point to updating d's metadata in this case since
@@ -979,7 +995,6 @@ func (d *dentry) setStat(ctx context.Context, creds *auth.Credentials, opts *vfs
 			return nil
 		}
 	}
-	now := d.fs.clock.Now().Nanoseconds()
 	if stat.Mask&linux.STATX_MODE != 0 {
 		atomic.StoreUint32(&d.mode, d.fileType()|uint32(stat.Mode))
 	}
@@ -989,23 +1004,18 @@ func (d *dentry) setStat(ctx context.Context, creds *auth.Credentials, opts *vfs
 	if stat.Mask&linux.STATX_GID != 0 {
 		atomic.StoreUint32(&d.gid, stat.GID)
 	}
-	if setLocalAtime {
-		if stat.Atime.Nsec == linux.UTIME_NOW {
-			atomic.StoreInt64(&d.atime, now)
-		} else {
-			atomic.StoreInt64(&d.atime, dentryTimestampFromStatx(stat.Atime))
-		}
-		// Restore mask bits that we cleared earlier.
-		stat.Mask |= linux.STATX_ATIME
+	// Note that stat.Atime.Nsec and stat.Mtime.Nsec can't be UTIME_NOW because
+	// if d.cachedMetadataAuthoritative() then we converted stat.Atime and
+	// stat.Mtime to client-local timestamps above, and if
+	// !d.cachedMetadataAuthoritative() then we returned after calling
+	// d.file.setAttr(). For the same reason, now must have been initialized.
+	if stat.Mask&linux.STATX_ATIME != 0 {
+		atomic.StoreInt64(&d.atime, dentryTimestampFromStatx(stat.Atime))
+		atomic.StoreUint32(&d.atimeDirty, 0)
 	}
-	if setLocalMtime {
-		if stat.Mtime.Nsec == linux.UTIME_NOW {
-			atomic.StoreInt64(&d.mtime, now)
-		} else {
-			atomic.StoreInt64(&d.mtime, dentryTimestampFromStatx(stat.Mtime))
-		}
-		// Restore mask bits that we cleared earlier.
-		stat.Mask |= linux.STATX_MTIME
+	if stat.Mask&linux.STATX_MTIME != 0 {
+		atomic.StoreInt64(&d.mtime, dentryTimestampFromStatx(stat.Mtime))
+		atomic.StoreUint32(&d.mtimeDirty, 0)
 	}
 	atomic.StoreInt64(&d.ctime, now)
 	return nil
@@ -1089,10 +1099,10 @@ func (d *dentry) TryIncRef() bool {
 }
 
 // DecRef implements vfs.DentryImpl.DecRef.
-func (d *dentry) DecRef() {
+func (d *dentry) DecRef(ctx context.Context) {
 	if refs := atomic.AddInt64(&d.refs, -1); refs == 0 {
 		d.fs.renameMu.Lock()
-		d.checkCachingLocked()
+		d.checkCachingLocked(ctx)
 		d.fs.renameMu.Unlock()
 	} else if refs < 0 {
 		panic("gofer.dentry.DecRef() called without holding a reference")
@@ -1109,7 +1119,7 @@ func (d *dentry) decRefLocked() {
 }
 
 // InotifyWithParent implements vfs.DentryImpl.InotifyWithParent.
-func (d *dentry) InotifyWithParent(events, cookie uint32, et vfs.EventType) {
+func (d *dentry) InotifyWithParent(ctx context.Context, events, cookie uint32, et vfs.EventType) {
 	if d.isDir() {
 		events |= linux.IN_ISDIR
 	}
@@ -1117,9 +1127,9 @@ func (d *dentry) InotifyWithParent(events, cookie uint32, et vfs.EventType) {
 	d.fs.renameMu.RLock()
 	// The ordering below is important, Linux always notifies the parent first.
 	if d.parent != nil {
-		d.parent.watches.Notify(d.name, events, cookie, et, d.isDeleted())
+		d.parent.watches.Notify(ctx, d.name, events, cookie, et, d.isDeleted())
 	}
-	d.watches.Notify("", events, cookie, et, d.isDeleted())
+	d.watches.Notify(ctx, "", events, cookie, et, d.isDeleted())
 	d.fs.renameMu.RUnlock()
 }
 
@@ -1131,10 +1141,10 @@ func (d *dentry) Watches() *vfs.Watches {
 // OnZeroWatches implements vfs.DentryImpl.OnZeroWatches.
 //
 // If no watches are left on this dentry and it has no references, cache it.
-func (d *dentry) OnZeroWatches() {
+func (d *dentry) OnZeroWatches(ctx context.Context) {
 	if atomic.LoadInt64(&d.refs) == 0 {
 		d.fs.renameMu.Lock()
-		d.checkCachingLocked()
+		d.checkCachingLocked(ctx)
 		d.fs.renameMu.Unlock()
 	}
 }
@@ -1148,8 +1158,9 @@ func (d *dentry) OnZeroWatches() {
 // operation. One of the calls may destroy the dentry, so subsequent calls will
 // do nothing.
 //
-// Preconditions: d.fs.renameMu must be locked for writing.
-func (d *dentry) checkCachingLocked() {
+// Preconditions: d.fs.renameMu must be locked for writing; it may be
+// temporarily unlocked.
+func (d *dentry) checkCachingLocked(ctx context.Context) {
 	// Dentries with a non-zero reference count must be retained. (The only way
 	// to obtain a reference on a dentry with zero references is via path
 	// resolution, which requires renameMu, so if d.refs is zero then it will
@@ -1171,14 +1182,14 @@ func (d *dentry) checkCachingLocked() {
 	// reachable by path resolution and should be dropped immediately.
 	if d.vfsd.IsDead() {
 		if d.isDeleted() {
-			d.watches.HandleDeletion()
+			d.watches.HandleDeletion(ctx)
 		}
 		if d.cached {
 			d.fs.cachedDentries.Remove(d)
 			d.fs.cachedDentriesLen--
 			d.cached = false
 		}
-		d.destroyLocked()
+		d.destroyLocked(ctx)
 		return
 	}
 	// If d still has inotify watches and it is not deleted or invalidated, we
@@ -1213,7 +1224,7 @@ func (d *dentry) checkCachingLocked() {
 				if !victim.vfsd.IsDead() {
 					// Note that victim can't be a mount point (in any mount
 					// namespace), since VFS holds references on mount points.
-					d.fs.vfsfs.VirtualFilesystem().InvalidateDentry(&victim.vfsd)
+					d.fs.vfsfs.VirtualFilesystem().InvalidateDentry(ctx, &victim.vfsd)
 					delete(victim.parent.children, victim.name)
 					// We're only deleting the dentry, not the file it
 					// represents, so we don't need to update
@@ -1221,19 +1232,21 @@ func (d *dentry) checkCachingLocked() {
 				}
 				victim.parent.dirMu.Unlock()
 			}
-			victim.destroyLocked()
+			victim.destroyLocked(ctx)
 		}
 		// Whether or not victim was destroyed, we brought fs.cachedDentriesLen
 		// back down to fs.opts.maxCachedDentries, so we don't loop.
 	}
 }
 
-// destroyLocked destroys the dentry. It may flushes dirty pages from cache,
-// close p9 file and remove reference on parent dentry.
+// destroyLocked destroys the dentry.
 //
-// Preconditions: d.fs.renameMu must be locked for writing. d.refs == 0. d is
-// not a child dentry.
-func (d *dentry) destroyLocked() {
+// Preconditions:
+// * d.fs.renameMu must be locked for writing; it may be temporarily unlocked.
+// * d.refs == 0.
+// * d.parent.children[d.name] != d, i.e. d is not reachable by path traversal
+//   from its former parent dentry.
+func (d *dentry) destroyLocked(ctx context.Context) {
 	switch atomic.LoadInt64(&d.refs) {
 	case 0:
 		// Mark the dentry destroyed.
@@ -1244,27 +1257,64 @@ func (d *dentry) destroyLocked() {
 		panic("dentry.destroyLocked() called with references on the dentry")
 	}
 
-	ctx := context.Background()
+	// Allow the following to proceed without renameMu locked to improve
+	// scalability.
+	d.fs.renameMu.Unlock()
+
+	mf := d.fs.mfp.MemoryFile()
 	d.handleMu.Lock()
-	if !d.handle.file.isNil() {
-		mf := d.fs.mfp.MemoryFile()
-		d.dataMu.Lock()
+	d.dataMu.Lock()
+	if h := d.writeHandleLocked(); h.isOpen() {
 		// Write dirty pages back to the remote filesystem.
-		if d.handleWritable {
-			if err := fsutil.SyncDirtyAll(ctx, &d.cache, &d.dirty, d.size, mf, d.handle.writeFromBlocksAt); err != nil {
-				log.Warningf("gofer.dentry.DecRef: failed to write dirty data back: %v", err)
-			}
+		if err := fsutil.SyncDirtyAll(ctx, &d.cache, &d.dirty, d.size, mf, h.writeFromBlocksAt); err != nil {
+			log.Warningf("gofer.dentry.destroyLocked: failed to write dirty data back: %v", err)
 		}
-		// Discard cached data.
+	}
+	// Discard cached data.
+	if !d.cache.IsEmpty() {
+		mf.MarkAllUnevictable(d)
 		d.cache.DropAll(mf)
 		d.dirty.RemoveAll()
-		d.dataMu.Unlock()
-		// Clunk open fids and close open host FDs.
-		d.handle.close(ctx)
+	}
+	d.dataMu.Unlock()
+	// Clunk open fids and close open host FDs.
+	if !d.readFile.isNil() {
+		d.readFile.close(ctx)
+	}
+	if !d.writeFile.isNil() && d.readFile != d.writeFile {
+		d.writeFile.close(ctx)
+	}
+	d.readFile = p9file{}
+	d.writeFile = p9file{}
+	if d.hostFD >= 0 {
+		syscall.Close(int(d.hostFD))
+		d.hostFD = -1
 	}
 	d.handleMu.Unlock()
 
 	if !d.file.isNil() {
+		if !d.isDeleted() {
+			// Write dirty timestamps back to the remote filesystem.
+			atimeDirty := atomic.LoadUint32(&d.atimeDirty) != 0
+			mtimeDirty := atomic.LoadUint32(&d.mtimeDirty) != 0
+			if atimeDirty || mtimeDirty {
+				atime := atomic.LoadInt64(&d.atime)
+				mtime := atomic.LoadInt64(&d.mtime)
+				if err := d.file.setAttr(ctx, p9.SetAttrMask{
+					ATime:              atimeDirty,
+					ATimeNotSystemTime: atimeDirty,
+					MTime:              mtimeDirty,
+					MTimeNotSystemTime: mtimeDirty,
+				}, p9.SetAttr{
+					ATimeSeconds:     uint64(atime / 1e9),
+					ATimeNanoSeconds: uint64(atime % 1e9),
+					MTimeSeconds:     uint64(mtime / 1e9),
+					MTimeNanoSeconds: uint64(mtime % 1e9),
+				}); err != nil {
+					log.Warningf("gofer.dentry.destroyLocked: failed to write dirty timestamps back: %v", err)
+				}
+			}
+		}
 		d.file.close(ctx)
 		d.file = p9file{}
 		// Remove d from the set of syncable dentries.
@@ -1272,11 +1322,14 @@ func (d *dentry) destroyLocked() {
 		delete(d.fs.syncableDentries, d)
 		d.fs.syncMu.Unlock()
 	}
+
+	d.fs.renameMu.Lock()
+
 	// Drop the reference held by d on its parent without recursively locking
 	// d.fs.renameMu.
 	if d.parent != nil {
 		if refs := atomic.AddInt64(&d.parent.refs, -1); refs == 0 {
-			d.parent.checkCachingLocked()
+			d.parent.checkCachingLocked(ctx)
 		} else if refs < 0 {
 			panic("gofer.dentry.DecRef() called without holding a reference")
 		}
@@ -1371,80 +1424,120 @@ func (d *dentry) ensureSharedHandle(ctx context.Context, read, write, trunc bool
 	// O_TRUNC).
 	if !trunc {
 		d.handleMu.RLock()
-		if (!read || d.handleReadable) && (!write || d.handleWritable) {
-			// The current handle is sufficient.
+		if (!read || !d.readFile.isNil()) && (!write || !d.writeFile.isNil()) {
+			// Current handles are sufficient.
 			d.handleMu.RUnlock()
 			return nil
 		}
 		d.handleMu.RUnlock()
 	}
 
-	haveOldFD := false
+	fdToClose := int32(-1)
+	invalidateTranslations := false
 	d.handleMu.Lock()
-	if (read && !d.handleReadable) || (write && !d.handleWritable) || trunc {
-		// Get a new handle.
-		wantReadable := d.handleReadable || read
-		wantWritable := d.handleWritable || write
-		h, err := openHandle(ctx, d.file, wantReadable, wantWritable, trunc)
+	if (read && d.readFile.isNil()) || (write && d.writeFile.isNil()) || trunc {
+		// Get a new handle. If this file has been opened for both reading and
+		// writing, try to get a single handle that is usable for both:
+		//
+		// - Writable memory mappings of a host FD require that the host FD is
+		// opened for both reading and writing.
+		//
+		// - NOTE(b/141991141): Some filesystems may not ensure coherence
+		// between multiple handles for the same file.
+		openReadable := !d.readFile.isNil() || read
+		openWritable := !d.writeFile.isNil() || write
+		h, err := openHandle(ctx, d.file, openReadable, openWritable, trunc)
+		if err == syserror.EACCES && (openReadable != read || openWritable != write) {
+			// It may not be possible to use a single handle for both
+			// reading and writing, since permissions on the file may have
+			// changed to e.g. disallow reading after previously being
+			// opened for reading. In this case, we have no choice but to
+			// use separate handles for reading and writing.
+			ctx.Debugf("gofer.dentry.ensureSharedHandle: bifurcating read/write handles for dentry %p", d)
+			openReadable = read
+			openWritable = write
+			h, err = openHandle(ctx, d.file, openReadable, openWritable, trunc)
+		}
 		if err != nil {
 			d.handleMu.Unlock()
 			return err
 		}
-		if !d.handle.file.isNil() {
-			// Check that old and new handles are compatible: If the old handle
-			// includes a host file descriptor but the new one does not, or
-			// vice versa, old and new memory mappings may be incoherent.
-			haveOldFD = d.handle.fd >= 0
-			haveNewFD := h.fd >= 0
-			if haveOldFD != haveNewFD {
-				d.handleMu.Unlock()
-				ctx.Warningf("gofer.dentry.ensureSharedHandle: can't change host FD availability from %v to %v across dentry handle upgrade", haveOldFD, haveNewFD)
-				h.close(ctx)
-				return syserror.EIO
-			}
-			if haveOldFD {
-				// We may have raced with callers of d.pf.FD() that are now
-				// using the old file descriptor, preventing us from safely
-				// closing it. We could handle this by invalidating existing
-				// memmap.Translations, but this is expensive. Instead, use
-				// dup3 to make the old file descriptor refer to the new file
-				// description, then close the new file descriptor (which is no
-				// longer needed). Racing callers may use the old or new file
-				// description, but this doesn't matter since they refer to the
-				// same file (unless d.fs.opts.overlayfsStaleRead is true,
-				// which we handle separately).
-				if err := syscall.Dup3(int(h.fd), int(d.handle.fd), syscall.O_CLOEXEC); err != nil {
+
+		if d.hostFD < 0 && openReadable && h.fd >= 0 {
+			// We have no existing FD; use the new FD for at least reading.
+			d.hostFD = h.fd
+		} else if d.hostFD >= 0 && d.writeFile.isNil() && openWritable {
+			// We have an existing read-only FD, but the file has just been
+			// opened for writing, so we need to start supporting writable memory
+			// mappings. This may race with callers of d.pf.FD() using the existing
+			// FD, so in most cases we need to delay closing the old FD until after
+			// invalidating memmap.Translations that might have observed it.
+			if !openReadable || h.fd < 0 {
+				// We don't have a read/write FD, so we have no FD that can be
+				// used to create writable memory mappings. Switch to using the
+				// internal page cache.
+				invalidateTranslations = true
+				fdToClose = d.hostFD
+				d.hostFD = -1
+			} else if d.fs.opts.overlayfsStaleRead {
+				// We do have a read/write FD, but it may not be coherent with
+				// the existing read-only FD, so we must switch to mappings of
+				// the new FD in both the application and sentry.
+				if err := d.pf.hostFileMapper.RegenerateMappings(int(h.fd)); err != nil {
 					d.handleMu.Unlock()
-					ctx.Warningf("gofer.dentry.ensureSharedHandle: failed to dup fd %d to fd %d: %v", h.fd, d.handle.fd, err)
+					ctx.Warningf("gofer.dentry.ensureSharedHandle: failed to replace sentry mappings of old FD with mappings of new FD: %v", err)
 					h.close(ctx)
 					return err
 				}
-				syscall.Close(int(h.fd))
-				h.fd = d.handle.fd
-				if d.fs.opts.overlayfsStaleRead {
-					// Replace sentry mappings of the old FD with mappings of
-					// the new FD, since the two are not necessarily coherent.
-					if err := d.pf.hostFileMapper.RegenerateMappings(int(h.fd)); err != nil {
-						d.handleMu.Unlock()
-						ctx.Warningf("gofer.dentry.ensureSharedHandle: failed to replace sentry mappings of old FD with mappings of new FD: %v", err)
-						h.close(ctx)
-						return err
-					}
+				invalidateTranslations = true
+				fdToClose = d.hostFD
+				d.hostFD = h.fd
+			} else {
+				// We do have a read/write FD. To avoid invalidating existing
+				// memmap.Translations (which is expensive), use dup3 to make
+				// the old file descriptor refer to the new file description,
+				// then close the new file descriptor (which is no longer
+				// needed). Racing callers of d.pf.FD() may use the old or new
+				// file description, but this doesn't matter since they refer
+				// to the same file, and any racing mappings must be read-only.
+				if err := syscall.Dup3(int(h.fd), int(d.hostFD), syscall.O_CLOEXEC); err != nil {
+					oldHostFD := d.hostFD
+					d.handleMu.Unlock()
+					ctx.Warningf("gofer.dentry.ensureSharedHandle: failed to dup fd %d to fd %d: %v", h.fd, oldHostFD, err)
+					h.close(ctx)
+					return err
 				}
-				// Clunk the old fid before making the new handle visible (by
-				// unlocking d.handleMu).
-				d.handle.file.close(ctx)
+				fdToClose = h.fd
 			}
+		} else {
+			// h.fd is not useful.
+			fdToClose = h.fd
 		}
-		// Switch to the new handle.
-		d.handle = h
-		d.handleReadable = wantReadable
-		d.handleWritable = wantWritable
+
+		// Switch to new fids.
+		var oldReadFile p9file
+		if openReadable {
+			oldReadFile = d.readFile
+			d.readFile = h.file
+		}
+		var oldWriteFile p9file
+		if openWritable {
+			oldWriteFile = d.writeFile
+			d.writeFile = h.file
+		}
+		// NOTE(b/141991141): Clunk old fids before making new fids visible (by
+		// unlocking d.handleMu).
+		if !oldReadFile.isNil() {
+			oldReadFile.close(ctx)
+		}
+		if !oldWriteFile.isNil() && oldReadFile != oldWriteFile {
+			oldWriteFile.close(ctx)
+		}
 	}
 	d.handleMu.Unlock()
 
-	if d.fs.opts.overlayfsStaleRead && haveOldFD {
-		// Invalidate application mappings that may be using the old FD; they
+	if invalidateTranslations {
+		// Invalidate application mappings that may be using an old FD; they
 		// will be replaced with mappings using the new FD after future calls
 		// to d.Translate(). This requires holding d.mapsMu, which precedes
 		// d.handleMu in the lock order.
@@ -1452,7 +1545,51 @@ func (d *dentry) ensureSharedHandle(ctx context.Context, read, write, trunc bool
 		d.mappings.InvalidateAll(memmap.InvalidateOpts{})
 		d.mapsMu.Unlock()
 	}
+	if fdToClose >= 0 {
+		syscall.Close(int(fdToClose))
+	}
 
+	return nil
+}
+
+// Preconditions: d.handleMu must be locked.
+func (d *dentry) readHandleLocked() handle {
+	return handle{
+		file: d.readFile,
+		fd:   d.hostFD,
+	}
+}
+
+// Preconditions: d.handleMu must be locked.
+func (d *dentry) writeHandleLocked() handle {
+	return handle{
+		file: d.writeFile,
+		fd:   d.hostFD,
+	}
+}
+
+func (d *dentry) syncRemoteFile(ctx context.Context) error {
+	d.handleMu.RLock()
+	defer d.handleMu.RUnlock()
+	return d.syncRemoteFileLocked(ctx)
+}
+
+// Preconditions: d.handleMu must be locked.
+func (d *dentry) syncRemoteFileLocked(ctx context.Context) error {
+	// If we have a host FD, fsyncing it is likely to be faster than an fsync
+	// RPC.
+	if d.hostFD >= 0 {
+		ctx.UninterruptibleSleepStart(false)
+		err := syscall.Fsync(int(d.hostFD))
+		ctx.UninterruptibleSleepFinish(false)
+		return err
+	}
+	if !d.writeFile.isNil() {
+		return d.writeFile.fsync(ctx)
+	}
+	if !d.readFile.isNil() {
+		return d.readFile.fsync(ctx)
+	}
 	return nil
 }
 
@@ -1514,7 +1651,7 @@ func (fd *fileDescription) SetStat(ctx context.Context, opts vfs.SetStatOptions)
 		return err
 	}
 	if ev := vfs.InotifyEventFromStatMask(opts.Stat.Mask); ev != 0 {
-		fd.dentry().InotifyWithParent(ev, 0, vfs.InodeEvent)
+		fd.dentry().InotifyWithParent(ctx, ev, 0, vfs.InodeEvent)
 	}
 	return nil
 }
@@ -1535,7 +1672,7 @@ func (fd *fileDescription) Setxattr(ctx context.Context, opts vfs.SetxattrOption
 	if err := d.setxattr(ctx, auth.CredentialsFromContext(ctx), &opts); err != nil {
 		return err
 	}
-	d.InotifyWithParent(linux.IN_ATTRIB, 0, vfs.InodeEvent)
+	d.InotifyWithParent(ctx, linux.IN_ATTRIB, 0, vfs.InodeEvent)
 	return nil
 }
 
@@ -1545,7 +1682,7 @@ func (fd *fileDescription) Removexattr(ctx context.Context, name string) error {
 	if err := d.removexattr(ctx, auth.CredentialsFromContext(ctx), name); err != nil {
 		return err
 	}
-	d.InotifyWithParent(linux.IN_ATTRIB, 0, vfs.InodeEvent)
+	d.InotifyWithParent(ctx, linux.IN_ATTRIB, 0, vfs.InodeEvent)
 	return nil
 }
 
