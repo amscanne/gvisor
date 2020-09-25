@@ -4,10 +4,12 @@ on:
     branches:
       - master
       - feature/**
+      - annotations
   pull_request:
     branches:
       - master
       - feature/**
+      - annotations
 
 jobs:
   default:

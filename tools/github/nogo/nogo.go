@@ -88,19 +88,23 @@ func (p *FindingsPoster) Post() error {
 
 	// Construct the message.
 	count := len(p.findings)
+	title := "nogo"
 	status := "completed"
 	conclusion := "success"
 	if count > 0 {
 		conclusion = "failure" // Contains errors.
 	}
+	summary := fmt.Sprintf("%d findings.", count)
 	opts := github.CreateCheckRunOptions{
-		Name:        "nogo",
+		Name:        title,
 		HeadSHA:     p.commit,
 		Status:      &status,
 		Conclusion:  &conclusion,
 		StartedAt:   &github.Timestamp{p.startTime},
 		CompletedAt: &github.Timestamp{time.Now()},
 		Output: &github.CheckRunOutput{
+			Title:            &title,
+			Summary:          &summary,
 			AnnotationsCount: &count,
 		},
 	}

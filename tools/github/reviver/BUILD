@@ -8,6 +8,7 @@ go_library(
         "github.go",
         "reviver.go",
     ],
+    nogo = False,
     visibility = [
         "//tools/github:__subpackages__",
     ],
@@ -22,4 +23,5 @@ go_test(
         "reviver_test.go",
     ],
     library = ":reviver",
+    nogo = False,
 )

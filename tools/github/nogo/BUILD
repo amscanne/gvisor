@@ -5,6 +5,7 @@ package(licenses = ["notice"])
 go_library(
     name = "nogo",
     srcs = ["nogo.go"],
+    nogo = False,
     visibility = [
         "//tools/github:__subpackages__",
     ],
