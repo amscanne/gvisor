@@ -4,10 +4,12 @@ on:
     branches:
       - master
       - feature/**
+      - annotations
   pull_request:
     branches:
       - master
       - feature/**
+      - annotations
 
 jobs:
   default:
@@ -21,3 +23,8 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-bazel-
     - run: make
+    - run: make build OPTIONS="--build_tag_filters nogo" TARGETS="//..."
+    - run: make run TARGETS="//tools/github" ARGS="-path=bazel-bin/ nogo"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
