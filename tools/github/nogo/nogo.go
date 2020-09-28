@@ -87,8 +87,8 @@ func (p *FindingsPoster) Post() error {
 	}
 
 	// Construct the message.
-	count := len(p.findings)
 	title := "nogo"
+	count := len(p.findings)
 	status := "completed"
 	conclusion := "success"
 	if count > 0 {

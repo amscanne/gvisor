@@ -26,8 +26,6 @@ import (
 	"syscall"
 	"time"
 
-	_ "unsafe" // Illegal.
-
 	"github.com/google/subcommands"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/refs"
