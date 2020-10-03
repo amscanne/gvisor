@@ -130,8 +130,7 @@ unit-tests: ## Local package unit tests in pkg/..., runsc/, tools/.., etc.
 .PHONY: unit-tests
 
 tests: ## Runs all unit tests and syscall tests.
-tests: unit-tests
-	@$(call submake,test TARGETS="test/syscalls/...")
+tests: unit-tests syscall-tests
 .PHONY: tests
 
 integration-tests: ## Run all standard integration tests.
@@ -147,15 +146,14 @@ network-tests: iptables-tests packetdrill-tests packetimpact-tests
 INTEGRATION_TARGETS := //test/image:image_test //test/e2e:integration_test
 
 syscall-%-tests:
-	@$(call submake,test OPTIONS="--test_tag_filters runsc_$* test/syscalls/...")
+	@$(call submake,test OPTIONS="--test_tag_filters runsc_$*" TARGETS="test/syscalls/...")
 
 syscall-native-tests:
-	@$(call submake,test OPTIONS="--test_tag_filters native test/syscalls/...")
+	@$(call submake,test OPTIONS="--test_tag_filters native" TARGETS="test/syscalls/...")
 .PHONY: syscall-native-tests
 
 syscall-tests: ## Run all system call tests.
-syscall-tests: syscall-ptrace-tests syscall-kvm-tests syscall-native-tests
-.PHONY: syscall-tests
+	@$(call submake,test TARGETS="test/syscalls/...")
 
 %-runtime-tests: load-runtimes_%
 	@$(call submake,install-test-runtime)
