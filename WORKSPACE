@@ -23,10 +23,6 @@ bazel_skylib_workspace()
 
 http_archive(
     name = "io_bazel_rules_go",
-    patch_args = ["-p1"],
-    patches = [
-        "//tools:rules_go.patch",
-    ],
     sha256 = "b725e6497741d7fc2d55fcc29a276627d10e43fa5d0bb692692890ae30d98d00",
     urls = [
         "https://mirror.bazel.build/github.com/bazelbuild/rules_go/releases/download/v0.24.3/rules_go-v0.24.3.tar.gz",
