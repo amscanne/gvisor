@@ -23,6 +23,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	"gvisor.dev/gvisor/website/pkg/webhook"
 )
 
 var redirects = map[string]string{
@@ -184,12 +186,20 @@ func registerRedirects(mux *http.ServeMux) {
 	}
 }
 
-// registerStatic registers static file handlers
+// registerStatic registers static file handlers.
 func registerStatic(mux *http.ServeMux, staticDir string) {
 	if mux == nil {
 		mux = http.DefaultServeMux
 	}
 	mux.Handle("/", hostRedirectHandler(wrappedHandler(http.FileServer(http.Dir(staticDir)))))
+}
+
+// registerWebhook registers the webhook handler.
+func registerWebhook(mux *http.ServeMux) {
+	if mux == nil {
+		mux = http.DefaultServeMux
+	}
+	mux.Handle("/webhook", webhook.Webhook())
 }
 
 func envFlagString(name, def string) string {
@@ -213,6 +223,7 @@ func main() {
 
 	registerRedirects(nil)
 	registerStatic(nil, *staticDir)
+	registerWebhook(nil)
 
 	log.Printf("Listening on %s...", *addr)
 	log.Fatal(http.ListenAndServe(*addr, nil))

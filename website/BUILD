@@ -31,6 +31,7 @@ docker_image(
 genrule(
     name = "files",
     srcs = [
+        ":cacerts",
         ":config",
         ":css",
         ":docs",
@@ -61,8 +62,32 @@ genrule(
           "ruby /checks.rb " +
           "/output && " +
           "cp $(location //website/cmd/server) $$T/output/server && " +
+	  "tar -xzf $(location :cacerts) -C $$T/output && " +
           "tar -zcf $@ -C $$T/output . && " +
           "rm -rf $$T",
+    tags = [
+        "local",
+        "manual",
+        "nosandbox",
+    ],
+)
+
+# cacerts are local certificates.
+genrule(
+    name = "cacerts",
+    outs = ["cacerts.tgz"],
+    cmd = "T=$$(mktemp -d); " +
+          "for file in " +
+               "/etc/ssl/certs/ca-certificates.crt " +
+               "/etc/pki/tls/certs/ca-bundle.crt " +
+               "/etc/ssl/ca-bundle.pem " +
+               "/etc/pki/tls/cacert.pem " +
+               "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem " +
+               "/etc/ssl/cert.pem; do " +
+             "if [[ -f $${file} ]]; then mkdir -p $$T$$(dirname $${file}) && cp $${file} $$T$${file}; fi; " +
+	  "done && " +
+	  "tar -C $$T -czf $@ . && " +
+	  "rm -rf $$T",
     tags = [
         "local",
         "manual",
@@ -85,12 +110,8 @@ pkg_tar(
 # main.scss requires front-matter to be processed.
 genrule(
     name = "css",
-    srcs = glob([
-        "css/**",
-    ]),
-    outs = [
-        "css.tar",
-    ],
+    srcs = glob(["css/**"]),
+    outs = ["css.tar"],
     cmd = "T=$$(mktemp -d); " +
           "mkdir -p $$T/css && " +
           "for file in $(SRCS); do " +

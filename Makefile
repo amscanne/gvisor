@@ -254,15 +254,26 @@ containerd-tests: containerd-test-1.4.0-beta.0
 ##   The website is built from repository documentation and wrappers, using
 ##   using a locally-defined Docker image (see images/jekyll). The following
 ##   variables may be set when using website-push:
-##     WEBSITE_IMAGE   - The name of the container image.
-##     WEBSITE_SERVICE - The backend service.
-##     WEBSITE_PROJECT - The project id to use.
-##     WEBSITE_REGION  - The region to deploy to.
+##     WEBSITE_IMAGE           - The name of the container image.
+##     WEBSITE_SERVICE         - The backend service.
+##     WEBSITE_PROJECT         - The project id to use.
+##     WEBSITE_REGION          - The region to deploy to.
+##     WEBSITE_SERVICE_ACCOUNT - The service account to use.
 ##
-WEBSITE_IMAGE   := gcr.io/gvisordev/gvisordev
-WEBSITE_SERVICE := gvisordev
-WEBSITE_PROJECT := gvisordev
-WEBSITE_REGION  := us-central1
+##   Note that the project must contain the following secrets to support CI/CD:
+##     - presubmit-service-account
+##     - postsubmit-service-account
+##     - github-webhook-secret
+##
+##   The Cloud Run service account must also be authorized to use Cloud Build,
+##   and act as the service accounts provided in the above secrets. None of the
+##   secrets are required if the GitHub webhook is not used.
+##
+WEBSITE_IMAGE           := gcr.io/gvisordev/gvisordev
+WEBSITE_SERVICE         := gvisordev
+WEBSITE_PROJECT         := gvisordev
+WEBSITE_REGION          := us-central1
+WEBSITE_SERVICE_ACCOUNT := gvisordev@gvisordev.iam.gserviceaccount.com
 
 website-build: load-jekyll ## Build the site image locally.
 	@$(call submake,run TARGETS="//website:website" ARGS="$(WEBSITE_IMAGE)")
@@ -277,7 +288,7 @@ website-push: website-build ## Push a new image and update the service.
 .PHONY: website-push
 
 website-deploy: website-push ## Deploy a new version of the website.
-	@gcloud run deploy $(WEBSITE_SERVICE) --platform=managed --region=$(WEBSITE_REGION) --project=$(WEBSITE_PROJECT) --image=$(WEBSITE_IMAGE)
+	@gcloud run deploy $(WEBSITE_SERVICE) --platform=managed --region=$(WEBSITE_REGION) --project=$(WEBSITE_PROJECT) --image=$(WEBSITE_IMAGE) --service-account=$(WEBSITE_SERVICE_ACCOUNT)
 .PHONY: website-deploy
 
 ##
