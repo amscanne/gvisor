@@ -1,0 +1,158 @@
+groups:
+  # We define three basic groups: generated (all generated files),
+  # external (all files outside the repository), and internal (all
+  # files within the local repository). We can't enforce many style
+  # checks on generated and external code, so enable those cases
+  # selectively for analyzers below.
+  - name: generated
+    regex: "^(bazel-genfiles|bazel-out|bazel-bin)/"
+    default: true
+  - name: external
+    regex: "^external/"
+    default: false
+  - name: internal
+    regex: ".*"
+    default: true
+global:
+  generated:
+    suppress:
+      # Suppress the basic style checks for
+      # generated code, but keep the analysis
+      # that are required for quality & security.
+      - "should not use ALL_CAPS in Go names"
+      - "should not use underscores"
+      - "comment on exported"
+      - "methods on the same type should have the same receiver name"
+      - "at least one file in a package"
+      - "package comment should be of the form"
+      # Generated code may have dead code paths.
+      - "identical build constraints"
+      - "no value of type"
+      - "is never used"
+      # go_embed_data rules generate unicode literals.
+      - "string literal contains the Unicode format character"
+      - "string literal contains the Unicode control character"
+      - "string literal contains Unicode control characters"
+      - "string literal contains Unicode format and control characters"
+      # Some external code will generate protov1
+      # implementations. These should be ignored.
+      - "proto.* is deprecated"
+      - "xxx_messageInfo_.*"
+      - "receiver name should be a reflection of its identity"
+      # Generated gRPC code is not compliant either.
+      - "error strings should not be capitalized"
+      - "grpc.Errorf is deprecated"
+      # Generated proto code does not always follow capitalization conventions.
+      - "(field|method|struct|type) .* should be .*"
+      # Generated proto code sometimes duplicates imports with aliases.
+      - "duplicate import"
+  internal:
+    suppress:
+      # We use ALL_CAPS for system definitions,
+      # which are common enough in the code base
+      # that we shouldn't annotate exceptions.
+      #
+      # Same story for underscores.
+      - "should not use ALL_CAPS in Go names"
+      - "should not use underscores in Go names"
+    exclude:
+      # Generated: exempt all.
+      - pkg/shim/v2/runtimeoptions/runtimeoptions_cri.go
+analyzers:
+  asmdecl:
+    external: # Enabled.
+  assign:
+    external:
+      exclude:
+        - gazelle/walk/walk.go
+  atomic:
+    external: # Enabled.
+  bools:
+    external: # Enabled.
+  buildtag:
+    external: # Enabled.
+  cgocall:
+    external: # Enabled.
+  shadow: # Disable for now.
+    generated:
+      exclude: [".*"]
+    internal:
+      exclude: [".*"]
+  composites: # Disable for now.
+    generated:
+      exclude: [".*"]
+    internal:
+      exclude: [".*"]
+  errorsas:
+    external: # Enabled.
+  httpresponse:
+    external: # Enabled.
+  loopclosure:
+    external: # Enabled.
+  nilfunc:
+    external: # Enabled.
+  nilness:
+    internal:
+      exclude:
+        - pkg/sentry/platform/kvm/kvm_test.go # Intentional.
+        - tools/bigquery/bigquery.go          # False positive.
+  printf:
+    external: # Enabled.
+  shift:
+    generated: # Disabled for generated code; these shifts are well-defined.
+      exclude: [".*"]
+    external: # Enabled.
+  stringintconv:
+    external:
+      exclude:
+        - ".*protobuf/.*.go"              # Bad conversions.
+        - ".*flate/huffman_bit_writer.go" # Bad conversion.
+        # Runtime internal violations.
+        - ".*reflect/value.go"
+        - ".*encoding/xml/xml.go"
+        - ".*runtime/pprof/internal/profile/proto.go"
+        - ".*fmt/scan.go"
+        - ".*go/types/conversions.go"
+        - ".*golang.org/x/net/dns/dnsmessage/message.go"
+  tests:
+    external: # Enabled.
+  unmarshal:
+    external: # Enabled.
+  unreachable:
+    external: # Enabled.
+  unsafeptr:
+    internal:
+      exclude:
+        - ".*_test.go"                                             # Exclude tests.
+        - "pkg/flipcall/.*_unsafe.go"                              # Special case.
+        - pkg/gohacks/gohacks_unsafe.go                            # Special case.
+        - pkg/sentry/fs/fsutil/host_file_mapper_unsafe.go          # Special case.
+        - pkg/sentry/platform/kvm/bluepill_unsafe.go               # Special case.
+        - pkg/sentry/platform/kvm/machine_unsafe.go                # Special case.
+        - pkg/sentry/platform/ring0/pagetables/allocator_unsafe.go # Special case.
+        - pkg/sentry/platform/safecopy/safecopy_unsafe.go          # Special case.
+        - pkg/sentry/vfs/mount_unsafe.go                           # Special case.
+        - pkg/state/decode_unsafe.go                               # Special case.
+  unusedresult:
+    external: # Enabled.
+  checkescape:
+    external: # Enabled.
+  SA4016:
+    internal:
+      exclude:
+        - pkg/gohacks/gohacks_unsafe.go # x ^ 0 always equals x.
+  SA2001:
+    internal:
+      exclude:
+        - pkg/sentry/fs/fs.go          # Intentional.
+        - pkg/sentry/fs/gofer/inode.go # Intentional.
+        - pkg/refs/refcounter_test.go  # Intentional.
+  ST1021:
+    internal:
+      suppress:
+        - "comment on exported type Translation" # Intentional.
+        - "comment on exported type PinnedRange" # Intentional.
+  SA5011:
+    internal:
+      exclude:
+        - pkg/sentry/fs/fdpipe/pipe_opener_test.go # False positive.

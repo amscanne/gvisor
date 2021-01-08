@@ -1,0 +1,30 @@
+# This workflow builds the source code, extracts nogo annotations and
+# posts them to GitHub, if applicable. This leverages the fact that the
+# workflow token has appropriate permissions to do so, and attempts to
+# leverage the GitHub workflow caches.
+name: "Build"
+"on":
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - "**"
+
+jobs:
+  default:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - uses: actions/cache@v1
+      with:
+        path: ~/.cache/bazel
+        key: ${{ runner.os }}-bazel-${{ hashFiles('WORKSPACE') }}
+        restore-keys: |
+          ${{ runner.os }}-bazel-
+    - run: make
+    - run: make build OPTIONS="--build_tag_filters nogo" TARGETS="//..."
+    - run: make run TARGETS="//tools/github" ARGS="-path=bazel-bin/ -path=bazel-out/ nogo"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_REPOSITORY: ${{ github.repository }}

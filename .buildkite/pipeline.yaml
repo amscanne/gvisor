@@ -1,0 +1,204 @@
+_templates:
+  common: &common
+    timeout_in_minutes: 30
+    retry:
+      automatic:
+        - exit_status: -1
+          limit: 10
+        - exit_status: "*"
+          limit: 2
+  benchmarks: &benchmarks
+    timeout_in_minutes: 120
+    retry:
+      automatic: false
+    soft_fail: true
+    if: build.branch == "master"
+    env:
+      # BENCHMARKS_OFFICIAL is set from hooks/pre-command, based
+      # on whether this is executing on the master branch.
+      BENCHMARKS_DATASET: buildkite
+      BENCHMARKS_PLATFORMS: "ptrace kvm"
+      BENCHMARKS_PROJECT: gvisor-benchmarks
+      BENCHMARKS_TABLE: benchmarks
+      BENCHMARKS_UPLOAD: true
+
+steps:
+  # Run basic smoke tests before preceding to other tests.
+  - <<: *common
+    label: ":fire: Smoke tests"
+    command: make smoke-tests
+  - wait
+
+  # Check that the Go branch builds.
+  - <<: *common
+    label: ":golang: Go branch"
+    commands:
+      - tools/go_branch.sh
+      - git checkout go && git clean -f
+      - go build ./...
+
+  # Release workflow.
+  - <<: *common
+    label: ":ship: Release tests"
+    commands: make release
+
+  # Basic unit tests.
+  - <<: *common
+    label: ":test_tube: Unit tests"
+    command: make unit-tests
+
+  # All system call tests.
+  - <<: *common
+    label: ":toolbox: System call tests"
+    command: make syscall-tests
+    parallelism: 20
+
+  # Integration tests.
+  - <<: *common
+    label: ":parachute: FUSE tests"
+    command: make fuse-tests
+  - <<: *common
+    label: ":docker: Docker tests"
+    command: make docker-tests
+  - <<: *common
+    label: ":goggles: Overlay tests"
+    command: make overlay-tests
+  - <<: *common
+    label: ":safety_pin: Host network tests"
+    command: make hostnet-tests
+  - <<: *common
+    label: ":satellite: SWGSO tests"
+    command: make swgso-tests
+  - <<: *common
+    label: ":coffee: Do tests"
+    command: make do-tests
+  - <<: *common
+    label: ":person_in_lotus_position: KVM tests"
+    command: make kvm-tests
+  - <<: *common
+    label: ":docker: Containerd 1.3.9 tests"
+    command: make containerd-test-1.3.9
+  - <<: *common
+    label: ":docker: Containerd 1.4.3 tests"
+    command: make containerd-test-1.4.3
+
+  # Check the website builds.
+  - <<: *common
+    label: ":earth_americas: Website tests"
+    command: make website-build
+
+  # Networking tests.
+  - <<: *common
+    label: ":table_tennis_paddle_and_ball: IPTables tests"
+    command: make iptables-tests
+  - <<: *common
+    label: ":construction_worker: Packetdrill tests"
+    command: make packetdrill-tests
+  - <<: *common
+    label: ":hammer: Packetimpact tests"
+    command: make packetimpact-tests
+
+  # Runtime tests.
+  - <<: *common
+    label: ":php: PHP runtime tests"
+    command: make php7.3.6-runtime-tests_vfs2
+    parallelism: 10
+  - <<: *common
+    label: ":java: Java runtime tests"
+    command: make java11-runtime-tests_vfs2
+    parallelism: 40
+  - <<: *common
+    label: ":golang: Go runtime tests"
+    command: make go1.12-runtime-tests_vfs2
+    parallelism: 10
+  - <<: *common
+    label: ":node: NodeJS runtime tests"
+    command: make nodejs12.4.0-runtime-tests_vfs2
+    parallelism: 10
+  - <<: *common
+    label: ":python: Python runtime tests"
+    command: make python3.7.3-runtime-tests_vfs2
+    parallelism: 10
+
+  # Runtime tests (VFS1).
+  - <<: *common
+    label: ":php: PHP runtime tests (VFS1)"
+    command: make php7.3.6-runtime-tests
+    parallelism: 10
+    if: build.message =~ /VFS1/ || build.branch == "master"
+  - <<: *common
+    label: ":java: Java runtime tests (VFS1)"
+    command: make java11-runtime-tests
+    parallelism: 40
+    if: build.message =~ /VFS1/ || build.branch == "master"
+  - <<: *common
+    label: ":golang: Go runtime tests (VFS1)"
+    command: make go1.12-runtime-tests
+    parallelism: 10
+    if: build.message =~ /VFS1/ || build.branch == "master"
+  - <<: *common
+    label: ":node: NodeJS runtime tests (VFS1)"
+    command: make nodejs12.4.0-runtime-tests
+    parallelism: 10
+    if: build.message =~ /VFS1/ || build.branch == "master"
+  - <<: *common
+    label: ":python: Python runtime tests (VFS1)"
+    command: make python3.7.3-runtime-tests
+    parallelism: 10
+    if: build.message =~ /VFS1/ || build.branch == "master"
+
+  # ARM tests.
+  - <<: *common
+    label: ":mechanical_arm: ARM"
+    command: make arm-qemu-smoke-test
+
+  # Run basic benchmarks smoke tests (no upload).
+  - <<: *common
+    label: ":fire: Benchmarks smoke test"
+    command: make benchmark-platforms
+    # Use the opposite of the benchmarks filter.
+    if: build.branch != "master"
+
+  # Run all benchmarks.
+  - <<: *benchmarks
+    label: ":bazel: ABSL build benchmarks"
+    command: make benchmark-platforms BENCHMARKS_FILTER="ABSL/page_cache.clean" BENCHMARKS_SUITE=absl BENCHMARKS_TARGETS=test/benchmarks/fs:bazel_test
+  - <<: *benchmarks
+    label: ":go: runsc build benchmarks"
+    command: make benchmark-platforms BENCHMARKS_FILTER="Runsc/page_cache.clean/filesystem.bind" BENCHMARKS_SUITE=runsc BENCHMARKS_TARGETS=test/benchmarks/fs:bazel_test
+  - <<: *benchmarks
+    label: ":metal: FFMPEG benchmarks"
+    command: make benchmark-platforms BENCHMARKS_SUITE=ffmpeg BENCHMARKS_TARGETS=test/benchmarks/media:ffmpeg_test
+  - <<: *benchmarks
+    label: ":floppy_disk: FIO benchmarks"
+    command: make benchmark-platforms BENCHMARKS_SUITE=fio BENCHMARKS_TARGETS=test/benchmarks/fs:fio_test
+  - <<: *benchmarks
+    label: ":globe_with_meridians: HTTPD benchmarks"
+    command: make benchmark-platforms BENCHMARKS_FILTER="Continuous" BENCHMARKS_SUITE=httpd BENCHMARKS_TARGETS=test/benchmarks/network:httpd_test
+  - <<: *benchmarks
+    label: ":piedpiper: iperf benchmarks"
+    command: make benchmark-platforms BENCHMARKS_SUITE=iperf BENCHMARKS_TARGETS=test/benchmarks/network:iperf_test
+  - <<: *benchmarks
+    label: ":nginx: nginx benchmarks"
+    command: make benchmark-platforms BENCHMARKS_FILTER="Continuous" BENCHMARKS_SUITE=nginx BENCHMARKS_TARGETS=test/benchmarks/network:nginx_test
+  - <<: *benchmarks
+    label: ":node: node benchmarks"
+    command: make benchmark-platforms BENCHMARKS_SUITE=node BENCHMARKS_TARGETS=test/benchmarks/network:node_test
+  - <<: *benchmarks
+    label: ":redis: Redis benchmarks"
+    command: make benchmark-platforms BENCHMARKS_SUITE=redis BENCHMARKS_TARGETS=test/benchmarks/database:redis_test
+  - <<: *benchmarks
+    label: ":ruby: Ruby benchmarks"
+    command: make benchmark-platforms BENCHMARKS_SUITE=ruby BENCHMARKS_TARGETS=test/benchmarks/network:ruby_test
+  - <<: *benchmarks
+    label: ":weight_lifter: Size benchmarks"
+    command: make benchmark-platforms  BENCHMARKS_SUITE=size BENCHMARKS_TARGETS=test/benchmarks/base:size_test
+  - <<: *benchmarks
+    label: ":speedboat: Startup benchmarks"
+    command: make benchmark-platforms BENCHMARKS_SUITE=startup BENCHMARKS_TARGETS=test/benchmarks/base:startup_test
+  - <<: *benchmarks
+    label: ":computer: sysbench benchmarks"
+    command: make benchmark-platforms BENCHMARKS_SUITE=sysbench BENCHMARKS_TARGETS=test/benchmarks/base:sysbench_test
+  - <<: *benchmarks
+    label: ":tensorflow: TensorFlow benchmarks"
+    command: make benchmark-platforms BENCHMARKS_SUITE=tensorflow BENCHMARKS_TARGETS=test/benchmarks/ml:tensorflow_test
